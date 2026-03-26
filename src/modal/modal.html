@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Image Saver</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      /* overflow:hidden を削除 — body/html のスクロールブロックが内部要素のホイールを妨げていたため */
+      background: #fff;
+    }
+    #modal-root {
+      width: 100%; height: 100%;
+      overflow: hidden; /* ここでウィンドウ外への溢れのみ抑制 */
+    }
+  </style>
+  <script src="modal.js"></script>
+</head>
+<body>
+  <div id="modal-root"></div>
+</body>
+</html>

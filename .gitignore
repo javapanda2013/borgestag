@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.spec
+
+# 仮想環境
+.venv/
+venv/
+env/
+ENV/
+
+# Pillow / pip キャッシュ
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Firefox 拡張機能 ビルド成果物
+*.xpi
+*.zip
+web-ext-artifacts/
+
+# web-ext
+.web-ext-artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# エディタ
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# ログ・一時ファイル
+*.log
+*.tmp
+
+# エクスポートバックアップ（ローカル作業用）
+backup/
+export/

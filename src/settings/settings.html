@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image Saver 設定</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100%; max-width: 720px; margin: 0 auto; min-height: 100vh;
+      font-family: "Segoe UI", -apple-system, sans-serif;
+      font-size: 13px; color: #1a1a1a; background: #f7f9fc;
+    }
+    .app-header {
+      display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+      background: #fff; border-bottom: 1px solid #e0e0e0;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .app-header h1 { font-size: 14px; font-weight: 700; flex: 1; }
+    .app-header .version { font-size: 11px; color: #aaa; }
+    /* 削除処理有効化トグル */
+    .delete-mode-toggle {
+      display: flex; align-items: center; gap: 5px; cursor: pointer;
+      font-size: 12px; font-weight: 600; color: #888; margin-right: 14px;
+      user-select: none;
+    }
+    .delete-mode-toggle input[type="checkbox"] {
+      accent-color: #e74c3c; width: 14px; height: 14px; cursor: pointer;
+    }
+    body.delete-mode .delete-mode-toggle { color: #e74c3c; }
+    /* 削除ボタン：通常時は非活性 */
+    .delete-guarded {
+      opacity: 0.35 !important; pointer-events: none !important; cursor: not-allowed !important;
+    }
+    body.delete-mode .delete-guarded {
+      opacity: 1 !important; pointer-events: auto !important; cursor: pointer !important;
+    }
+    .tab-bar {
+      display: flex; background: #fff; border-bottom: 2px solid #e0e0e0;
+      padding: 0 16px; position: sticky; top: 41px; z-index: 9;
+    }
+    .tab-btn {
+      background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px;
+      padding: 10px 18px; font-size: 12px; font-weight: 600; cursor: pointer;
+      color: #888; font-family: inherit; white-space: nowrap;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: #4a90e2; }
+    .tab-btn.active { color: #1a56db; border-bottom-color: #4a90e2; }
+    .tab-panel { display: none; padding: 16px; flex-direction: column; gap: 14px; }
+    .tab-panel.active { display: flex; }
+    .section-title {
+      font-size: 11px; font-weight: 700; color: #555;
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px;
+    }
+    .tag-list { display: flex; flex-direction: column; gap: 4px; }
+    .tag-row { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .tag-row-header {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      cursor: pointer; user-select: none; transition: background .1s;
+    }
+    .tag-row-header:hover { background: #f5f8ff; }
+    .tag-row-toggle { font-size: 10px; color: #aaa; transition: transform .15s; }
+    .tag-row-toggle.open { transform: rotate(90deg); }
+    .tag-row-name { flex: 1; font-size: 13px; font-weight: 700; color: #1a56db; }
+    .tag-row-count { font-size: 11px; color: #999; }
+    .tag-row-edit {
+      margin-left: auto; background: none;
+      border: 1px solid #c0cfe8; cursor: pointer; color: #4a6fa5;
+      font-size: 11px; padding: 2px 8px; border-radius: 4px;
+      font-family: inherit; white-space: nowrap;
+    }
+    .tag-row-edit:hover { color: #1a56db; background: #eef3ff; border-color: #b0c8f0; }
+    .tag-row-del {
+      background: none; border: none; cursor: pointer;
+      font-size: 14px; color: #ccc; padding: 2px 4px; border-radius: 3px;
+    }
+    .tag-row-del:hover { color: #e74c3c; background: #fde; }
+    .dest-list { border-top: 1px solid #f0f0f0; display: none; flex-direction: column; }
+    .dest-list.open { display: flex; }
+    .dest-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 12px 7px 28px; border-bottom: 1px solid #f5f5f5; background: #fafbff;
+    }
+    .dest-item:last-child { border-bottom: none; }
+    .dest-item-icon { font-size: 14px; flex-shrink: 0; }
+    .dest-item-body { flex: 1; overflow: hidden; }
+    .dest-item-label-wrap { display: flex; align-items: center; gap: 4px; }
+    .dest-item-label {
+      font-size: 12px; font-weight: 600; color: #333;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+    }
+    .dest-item-label-input {
+      font-size: 12px; font-weight: 600; border: 1px solid #d0d0d0;
+      border-radius: 4px; padding: 2px 6px; outline: none; font-family: inherit; width: 180px;
+    }
+    .dest-item-label-input:focus { border-color: #4a90e2; }
+    .dest-item-path {
+      font-size: 11px; color: #999; font-family: "Consolas", monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .dest-item-drag { cursor: grab; font-size: 14px; color: #ccc; flex-shrink: 0; padding: 0 2px; }
+    .dest-item-drag:active { cursor: grabbing; }
+    .dest-item.dragging { opacity: .4; }
+    .dest-item.drag-over { border-top: 2px solid #4a90e2; }
+    .dest-item-actions { display: flex; gap: 3px; flex-shrink: 0; }
+    .dest-item-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 13px; color: #bbb; padding: 3px 5px; border-radius: 3px;
+    }
+    .dest-item-btn:hover { background: #f0f0f0; color: #555; }
+    .dest-item-btn.del:hover { background: #fde; color: #e74c3c; }
+    .empty-state { text-align: center; padding: 32px 16px; color: #aaa; font-size: 12px; line-height: 1.8; }
+    .empty-state .emoji { font-size: 32px; display: block; margin-bottom: 8px; }
+    .bm-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .bm-list { display: flex; flex-direction: column; }
+    .bm-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-bottom: 1px solid #f5f5f5; background: #fffdf5;
+    }
+    .bm-item:last-child { border-bottom: none; }
+    .bm-item-icon { font-size: 15px; flex-shrink: 0; }
+    .bm-item-body { flex: 1; overflow: hidden; }
+    .bm-item-label {
+      font-size: 12px; font-weight: 600; color: #7a5500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bm-item-label-input {
+      font-size: 12px; font-weight: 600; border: 1px solid #d0d0d0;
+      border-radius: 4px; padding: 2px 6px; outline: none; font-family: inherit; width: 180px; color: #7a5500;
+    }
+    .bm-item-label-input:focus { border-color: #e8a000; }
+    .bm-item-path {
+      font-size: 10px; color: #bbb; font-family: "Consolas", monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bm-item-actions { display: flex; gap: 3px; flex-shrink: 0; }
+    .bm-item-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 13px; color: #bbb; padding: 3px 5px; border-radius: 3px;
+    }
+    .bm-item-btn:hover { background: #f0f0f0; color: #555; }
+    .bm-item-btn.del:hover { background: #fde; color: #e74c3c; }
+    .bm-item-drag { cursor: grab; font-size: 14px; color: #ccc; flex-shrink: 0; }
+    .bm-item-drag:active { cursor: grabbing; }
+    .bm-item.dragging { opacity: .4; }
+    .bm-item.drag-over { border-top: 2px solid #e8a000; }
+    .bm-add-row {
+      display: flex; gap: 6px; padding: 8px 12px;
+      border-top: 1px solid #e8e8e8; background: #fafafa;
+    }
+    .bm-add-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 5px 8px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .bm-add-input:focus { border-color: #e8a000; }
+    .bm-add-btn {
+      background: #e8a000; color: #fff; border: none; border-radius: 5px;
+      padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .bm-add-btn:hover { background: #cc8f00; }
+    .root-path-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .root-path-row {
+      display: flex; gap: 6px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #f0f0f0;
+    }
+    .root-path-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 6px 9px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .root-path-input:focus { border-color: #4a90e2; }
+    .root-path-btn {
+      background: #4a90e2; color: #fff; border: none; border-radius: 5px;
+      padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .root-path-btn:hover:not(:disabled) { background: #3a7fd5; }
+    .root-path-btn:disabled { background: #b0c8e8; color: #fff; cursor: not-allowed; opacity: .6; }
+    .root-path-clear {
+      background: #f0f0f0; color: #555; border: 1px solid #d0d0d0;
+      border-radius: 5px; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .root-path-clear:hover { background: #e0e0e0; }
+    .priority-row {
+      display: flex; align-items: center; gap: 16px; padding: 9px 12px; font-size: 12px; color: #555;
+    }
+    .priority-label { font-weight: 600; color: #444; white-space: nowrap; }
+    .priority-option { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+    .priority-option input[type="radio"] { accent-color: #4a90e2; cursor: pointer; }
+    .backup-section {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .backup-note {
+      font-size: 11px; color: #e07800; background: #fff8ee;
+      border: 1px solid #f5d08a; border-radius: 5px; padding: 7px 10px; line-height: 1.6;
+    }
+    .export-path-row {
+      display: flex; flex-direction: column; gap: 5px;
+      background: #f8faff; border: 1px solid #dde8f8; border-radius: 6px; padding: 9px 11px;
+    }
+    .export-path-label {
+      font-size: 11px; font-weight: 700; color: #555;
+    }
+    .export-path-inputs {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .export-path-inputs input[type="text"] {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 5px 8px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .export-path-inputs input[type="text"]:focus { border-color: #4a90e2; }
+    .export-path-inputs button {
+      background: #4a90e2; color: #fff; border: none; border-radius: 5px;
+      padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .export-path-inputs button:disabled { background: #b0c8e8; cursor: not-allowed; opacity: .6; }
+    .export-path-inputs button:last-child {
+      background: #f0f0f0; color: #555; border: 1px solid #d0d0d0;
+    }
+    .export-path-inputs button:hover:not(:disabled) { opacity: .85; }
+    .export-auto-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: #444; cursor: pointer; user-select: none;
+    }
+    .export-auto-label input[type="checkbox"] { accent-color: #4a90e2; cursor: pointer; }
+    .backup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .backup-btn {
+      display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px; border-radius: 6px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      border: 1px solid transparent; font-family: inherit; transition: opacity .15s;
+    }
+    .backup-btn:hover { opacity: .85; }
+    .backup-btn.export { background: #4a90e2; color: #fff; }
+    .backup-btn.import { background: #f0f0f0; color: #444; border-color: #d0d0d0; }
+    .import-result {
+      font-size: 11px; padding: 8px 12px; border-radius: 5px;
+      display: none; line-height: 1.8; white-space: pre-wrap; font-family: "Consolas", monospace;
+    }
+    .import-result.success { display: block; background: #eafaf1; color: #1a7a40; border: 1px solid #a3d9b8; }
+    .import-result.error   { display: block; background: #fdf0f0; color: #c0392b; border: 1px solid #f5b8b8; }
+    .log-section { background: #111; border-radius: 8px; overflow: hidden; font-family: "Consolas", "Courier New", monospace; }
+    .log-toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+      background: #222; border-bottom: 1px solid #333;
+    }
+    .log-toolbar-title { font-size: 11px; font-weight: 700; color: #aaa; flex: 1; }
+    .log-btn {
+      background: #333; border: 1px solid #444; border-radius: 4px;
+      color: #ccc; font-size: 11px; font-weight: 600; padding: 3px 10px; cursor: pointer; font-family: inherit;
+    }
+    .log-btn:hover { background: #444; color: #fff; }
+    .log-btn.danger:hover { background: #c0392b; border-color: #e74c3c; }
+    .log-list { max-height: 420px; overflow-y: auto; padding: 6px 0; }
+    .log-list::-webkit-scrollbar { width: 6px; }
+    .log-list::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+    .log-entry {
+      display: flex; gap: 8px; padding: 3px 12px; font-size: 11px; line-height: 1.5;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: #666; flex-shrink: 0; white-space: nowrap; }
+    .log-level { font-weight: 700; flex-shrink: 0; width: 38px; text-align: center; }
+    .log-level.INFO  { color: #4a9; }
+    .log-level.WARN  { color: #ea0; }
+    .log-level.ERROR { color: #e55; }
+    .log-msg { color: #ddd; flex: 1; word-break: break-all; }
+    .log-detail { color: #777; font-size: 10px; word-break: break-all; }
+    .log-empty { padding: 20px; text-align: center; color: #555; font-size: 11px; }
+    /* ================================================================
+       保存履歴タブ
+       ================================================================ */
+    #tab-history { height: calc(100vh - 90px); }
+    .history-toolbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 14px; background: #f3f4f8; border-bottom: 1px solid #dde2f0;
+      flex-shrink: 0; position: sticky; top: 41px; z-index: 5;
+    }
+    .history-toolbar-info {
+      display: flex; gap: 10px; align-items: center; font-size: 11px; color: #888; flex: 1;
+    }
+    .history-toolbar-info span { color: #4a90e2; font-weight: 600; }
+    .history-toolbar-actions {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .history-toolbar-actions input[type="text"] {
+      width: 160px; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
+    }
+    .history-toolbar-actions input[type="text"]:focus { border-color: #4a90e2; }
+    .hist-btn-sm {
+      background: none; border: none; cursor: pointer;
+      font-size: 11px; color: #aaa; padding: 2px 5px; border-radius: 3px;
+    }
+    .hist-btn-sm:hover { color: #e74c3c; }
+    .hist-btn {
+      background: #f0f0f0; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .hist-btn.danger { background: #fde; border-color: #f5b8b8; color: #c0392b; }
+    .hist-btn.danger:hover { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+    .hist-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .history-grid {
+      flex: 1; overflow-y: auto;
+      display: flex; flex-wrap: wrap; align-content: flex-start;
+      gap: 10px; padding: 10px 14px;
+      background: #f5f6fa;
+    }
+    .hist-card {
+      background: #fff; border: 1px solid #e0e4f0; border-radius: 8px;
+      width: 220px; height: 360px; overflow: hidden; cursor: pointer; position: relative;
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .hist-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,.1); border-color: #b0c4f0; }
+    .hist-card.selected { border-color: #4a90e2; box-shadow: 0 0 0 2px rgba(74,144,226,.3); }
+    .hist-card-thumb {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+      background: #f0f2f5;
+    }
+    .hist-card-thumb-placeholder {
+      width: 100%; height: 100%; display: flex; align-items: center;
+      justify-content: center; font-size: 40px; background: #f0f2f5; color: #ccc;
+    }
+    .hist-card-overlay {
+      position: absolute; inset: 0;
+      background: linear-gradient(transparent 30%, rgba(0,0,0,0.78));
+      opacity: 0; transition: opacity .2s;
+      display: flex; flex-direction: column; justify-content: flex-end;
+      padding: 8px; pointer-events: none;
+    }
+    .hist-card:hover .hist-card-overlay { opacity: 1; }
+    .hist-card:hover .hist-card-overlay * { pointer-events: auto; }
+    .hist-card-body {
+      display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px;
+    }
+    .hist-card-filename {
+      font-size: 11px; font-weight: 700; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-card-path {
+      font-size: 10px; color: rgba(255,255,255,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-card-tags { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 2px; }
+    .hist-card-tag {
+      background: rgba(255,255,255,.2); color: #fff; border-radius: 3px;
+      padding: 1px 5px; font-size: 9px; font-weight: 600; cursor: pointer;
+      border: 1px solid rgba(255,255,255,.4);
+      display: inline-flex; align-items: center; gap: 2px;
+    }
+    .hist-card-tag:hover { background: rgba(255,255,255,.4); }
+    .hist-tag-del-btn {
+      display: none; background: none; border: none; color: #ffaaaa;
+      font-size: 10px; cursor: pointer; padding: 0; line-height: 1;
+      font-weight: 700;
+    }
+    body.delete-mode .hist-tag-del-btn { display: inline; }
+    .hist-card-date { font-size: 9px; color: rgba(255,255,255,.55); }
+    .hist-card-actions {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .hist-card-btn {
+      width: 100%;
+      background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35); border-radius: 4px;
+      padding: 5px 4px; font-size: 13px; cursor: pointer; color: #fff; font-family: inherit;
+      transition: background .1s; text-align: center; line-height: 1;
+    }
+    .hist-card-btn:hover { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.6); }
+    .hist-card-btn.del { border-color: rgba(255,100,100,.6); color: #ffaaaa; }
+    .hist-card-btn.del:hover { background: rgba(255,80,80,.25); }
+    .hist-select-box {
+      position: absolute; top: 6px; left: 6px;
+      width: 16px; height: 16px; accent-color: #4a90e2; cursor: pointer;
+    }
+    .hist-empty {
+      width: 100%; padding: 40px; text-align: center; color: #aaa; font-size: 12px;
+    }
+
+    .status-bar {
+      position: sticky; bottom: 0; padding: 8px 16px; background: #fff;
+      border-top: 1px solid #e8e8e8; font-size: 11px; color: #27ae60;
+      min-height: 32px; display: flex; align-items: center; transition: opacity .3s;
+    }
+    .status-bar.hidden { opacity: 0; }
+
+    /* ⑤ ライトボックス */
+    .lightbox-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.82);
+      z-index: 9999; display: flex; align-items: center; justify-content: center;
+      cursor: zoom-out;
+    }
+    .lightbox-overlay img {
+      max-width: 90vw; max-height: 90vh;
+      border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+      object-fit: contain; cursor: default;
+    }
+    .lightbox-overlay .lb-close {
+      position: fixed; top: 18px; right: 22px;
+      background: rgba(255,255,255,.15); border: none; color: #fff;
+      font-size: 22px; width: 36px; height: 36px; border-radius: 50%;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background .15s;
+    }
+    .lightbox-overlay .lb-close:hover { background: rgba(255,255,255,.3); }
+    .lightbox-overlay .lb-info {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 5px 14px;
+      border-radius: 20px; white-space: nowrap; max-width: 80vw;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* ⑥ 期間削除ダイアログ */
+    .period-dialog-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      z-index: 9998; display: flex; align-items: center; justify-content: center;
+    }
+    .period-dialog {
+      background: #fff; border-radius: 10px; padding: 22px 26px 18px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.25); width: 340px;
+      font-family: inherit;
+    }
+    .period-dialog h3 { margin: 0 0 14px; font-size: 14px; color: #2c3e50; }
+    .period-dialog .pd-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px;
+    }
+    .period-dialog .pd-row label { color: #555; width: 60px; flex-shrink: 0; }
+    .period-dialog .pd-row input[type=date] {
+      flex: 1; border: 1px solid #ccc; border-radius: 5px;
+      padding: 5px 8px; font-size: 13px; font-family: inherit;
+    }
+    .period-dialog .pd-preview {
+      font-size: 12px; color: #e67e22; font-weight: 600;
+      min-height: 18px; margin: 6px 0 14px;
+    }
+    .period-dialog .pd-footer {
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    .period-dialog .pd-footer button {
+      padding: 7px 18px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid transparent;
+    }
+    .pd-cancel { background: #f0f0f0; color: #555; border-color: #ddd !important; }
+    .pd-ok     { background: #e74c3c; color: #fff; font-weight: 600; }
+    .pd-ok:disabled { background: #f0b0a8; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+  <div class="app-header">
+    <h1>🖼 Image Saver 設定</h1>
+    <label class="delete-mode-toggle" id="delete-mode-label" title="ONにした場合のみ削除ボタンが活性化します">
+      <input type="checkbox" id="chk-delete-mode" />
+      <span>削除処理を有効にする</span>
+    </label>
+    <span class="version" id="app-version">v…</span>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="general">⚙️ 全般</button>
+    <button class="tab-btn"        data-tab="bookmarks">⭐ ブックマーク</button>
+    <button class="tab-btn"        data-tab="tags">🏷 タグ・保存先</button>
+    <button class="tab-btn"        data-tab="history">📋 保存履歴</button>
+    <button class="tab-btn"        data-tab="sns">🔗 SNS連携</button>
+  </div>
+
+  <!-- ① 全般タブ（バックアップ・初期フォルダ・ログ） -->
+  <div class="tab-panel active" id="tab-general">
+
+    <div>
+      <div class="section-title">バックアップ・復元</div>
+      <div class="backup-section">
+        <div class="backup-note" id="tmp-addon-note" style="display:none">
+          ⚠️ 「一時的なアドオン」としてインストールした場合、Firefox を閉じると
+          保存先候補のデータが消えます。<br>
+          更新前に <strong>エクスポート</strong> し、再読み込み後に <strong>インポート</strong> してください。
+        </div>
+        <!-- エクスポート先フォルダ設定 -->
+        <div class="export-path-row">
+          <label class="export-path-label">標準エクスポート先フォルダ</label>
+          <div class="export-path-inputs">
+            <input type="text" id="export-path-input"
+              placeholder="例: C:\Users\foo\Documents（空欄でブラウザの保存先ダイアログ）" />
+            <button id="export-path-save">設定</button>
+            <button id="export-path-open" title="設定中のフォルダをエクスプローラーで開く" disabled>📂</button>
+            <button id="export-path-clear">クリア</button>
+          </div>
+          <label class="export-auto-label">
+            <input type="checkbox" id="export-auto-save" />
+            設定したフォルダへ確認なしで即エクスポートする
+          </label>
+        </div>
+
+        <div class="backup-actions">
+          <button class="backup-btn export" id="btn-export">⬇ エクスポート（JSONファイル保存）</button>
+          <label class="backup-btn import" id="label-import">
+            ⬆ インポート（JSONファイル読み込み）
+            <input type="file" id="input-import" accept=".json" style="display:none" />
+          </label>
+        </div>
+        <div class="import-result" id="import-result"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">エクスプローラーの初期フォルダ</div>
+      <div class="root-path-section">
+        <div class="root-path-row">
+          <input type="text" class="root-path-input" id="root-path-input"
+            placeholder="例: C:\Users\foo\Pictures（空欄でPC/ドライブ一覧から開始）" />
+          <button class="root-path-btn"   id="root-path-save">設定</button>
+          <button class="root-path-btn" style="background:#f0f0f0;color:#555;border:1px solid #d0d0d0"
+            id="root-path-open" title="設定中のフォルダをエクスプローラーで開く" disabled>📂</button>
+          <button class="root-path-clear" id="root-path-clear">クリア</button>
+        </div>
+        <div class="priority-row">
+          <span class="priority-label">開始フォルダの優先順位：</span>
+          <label class="priority-option">
+            <input type="radio" name="start-priority" value="lastSave" id="priority-lastSave" />
+            前回の保存先を優先
+          </label>
+          <label class="priority-option">
+            <input type="radio" name="start-priority" value="rootPath" id="priority-rootPath" />
+            初期フォルダを優先
+          </label>
+          <span style="font-size:11px;color:#888;margin-left:8px;">※ 即保存ボタンの保存先もこの設定に従います</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">即保存ボタン</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          画像ホバー時に表示される💾ボタンの左に、保存ウィンドウを開かずに即時保存するボタンを表示します。<br>
+          保存先は「開始フォルダの優先順位」の設定に従います。タグは付与されません（連続保存モード中はセッションのタグを引き継ぎます）。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="chk-instant-save" />
+          常に即保存ボタンを表示する
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存後の動作</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          連続保存モード以外でも、保存後にウィンドウを閉じずに最小化して待機します。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="chk-minimize-after-save" />
+          保存後にウィンドウを最小化する（連続保存モード以外でも有効）
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存履歴の表示モード</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          連続保存モードで保存した画像のグループ化方法を選択します。
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="history-display-mode" value="normal" id="hdm-normal" style="margin-top:2px;accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">①通常表示</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">すべての保存画像を個別タイルで表示します（従来の動作）</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="history-display-mode" value="group" id="hdm-group" style="margin-top:2px;accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">②グループ表示</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">連続保存した画像を1タイルにまとめます。展開ボタンで個別表示に切り替え可能です</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">画像プレビュー(グループ表示)の進行方向</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          グループ内ライトボックスで◀▶ボタンの「次のページ」方向を設定します。
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="group-read-direction" value="rtl" id="grd-rtl" style="accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">◀ 左方向（右→左）</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">◀ ボタンで次ページへ進む（漫画・縦書きコンテンツ向け）</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="group-read-direction" value="ltr" id="grd-ltr" style="accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">▶ 右方向（左→右）</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">▶ ボタンで次ページへ進む（写真・横書きコンテンツ向け）</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">動作ログ</div>
+      <div class="log-section">
+        <div class="log-toolbar">
+          <span class="log-toolbar-title">🗒 最新 200 件</span>
+          <button class="log-btn" id="btn-log-refresh">更新</button>
+          <button class="log-btn danger delete-guarded" id="btn-log-clear">クリア</button>
+        </div>
+        <div class="log-list" id="log-list">
+          <div class="log-empty">ログがありません</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ② ブックマークタブ -->
+  <div class="tab-panel" id="tab-bookmarks">
+    <div>
+      <div class="section-title">ブックマーク管理</div>
+      <div class="bm-section">
+        <div class="bm-list" id="bm-list"></div>
+        <div class="bm-add-row">
+          <input type="text" class="bm-add-input" id="bm-add-path"
+            placeholder="追加するフォルダのパスを入力（例: C:\Users\foo\Pictures）" />
+          <button class="bm-add-btn" id="bm-add-btn">⭐ 追加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ③ タグ・保存先タブ -->
+  <div class="tab-panel" id="tab-tags">
+    <div>
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+        タグ別 保存先管理
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;color:#555">
+          <label for="tag-sort-select">並び順</label>
+          <select id="tag-sort-select" style="font-size:12px;padding:3px 6px;border:1px solid #ccc;border-radius:5px;font-family:inherit">
+            <option value="registered">登録順（古い順）</option>
+            <option value="registered-desc">登録順（新しい順）</option>
+            <option value="name">名前順（昇順）</option>
+            <option value="name-desc">名前順（降順）</option>
+            <option value="count-desc">保存先が多い順</option>
+            <option value="count-asc">保存先が少ない順</option>
+          </select>
+        </div>
+      </div>
+      <div class="tag-list" id="tag-list"></div>
+    </div>
+  </div>
+
+  <!-- 保存履歴タブ -->
+  <div class="tab-panel" id="tab-history" style="padding:0; gap:0;">
+    <div class="history-toolbar">
+      <div class="history-toolbar-info">
+        <span id="hist-count">0 件</span>
+        <span id="hist-storage">保存履歴情報: 計算中</span>
+        <span id="hist-idb">保存サムネイル: 計算中</span>
+      </div>
+      <div class="history-toolbar-actions">
+        <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+          <option value="or">OR</option>
+          <option value="and">AND</option>
+        </select>
+        <input type="text" id="hist-filter" placeholder="🔍 タグで絞り込み（スペース区切りで複数）" autocomplete="off" />
+        <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
+        <button id="hist-select-all" class="hist-btn" disabled title="絞り込み中の全件を選択">全選択</button>
+        <button id="hist-deselect-all" class="hist-btn" disabled>選択解除</button>
+        <button id="hist-add-tag-selected" class="hist-btn" disabled>🏷 タグ追加</button>
+        <button id="hist-group-selected" class="hist-btn" disabled title="選択した履歴を連続保存したグループとしてまとめます">🔴 グループ化</button>
+        <button id="hist-ungroup-selected" class="hist-btn" disabled title="選択したグループを解除します（グループ内の全アイテムのセッションIDを削除）">🔵 グループ解除</button>
+        <button id="hist-delete-selected" class="hist-btn danger delete-guarded" disabled>選択削除</button>
+        <button id="hist-delete-period" class="hist-btn danger delete-guarded">期間削除</button>
+        <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
+      </div>
+    </div>
+    <div class="history-grid" id="hist-grid">
+      <div class="hist-empty">読み込み中…</div>
+    </div>
+  </div>
+
+  <div class="status-bar hidden" id="status-bar"></div>
+
+  <!-- SNS連携タブ -->
+  <div class="tab-panel" id="tab-sns">
+    <div>
+      <div class="section-title">SNS連携</div>
+      <div style="padding: 24px 16px; color: #888; font-size: 13px; text-align: center; background: #fafafa; border: 1px dashed #d0d0d0; border-radius: 8px; line-height: 1.8;">
+        🔗 SNS連携機能は後日実装予定です。<br>
+        <span style="font-size: 11px; color: #aaa;">Twitter / X・pixiv・Misskey 等との連携機能を予定しています。</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

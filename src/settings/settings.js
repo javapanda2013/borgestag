@@ -478,6 +478,7 @@ async function exportData() {
     "groupReadDirection",
     "instantSaveEnabled",
     "minimizeAfterSave",
+    "historyPageSize",
   ]);
 
   // IndexedDB のサムネイルも取得
@@ -709,6 +710,14 @@ async function importData(e) {
       await browser.storage.local.set({ exportAutoSave: parsed.exportAutoSave });
       log(`📤 exportAutoSave: ${parsed.exportAutoSave}`);
     } catch (err) { logError(`exportAutoSave の保存に失敗: ${err.message}`); return; }
+  }
+
+  // ---- historyPageSize ----
+  if (parsed.historyPageSize !== undefined) {
+    try {
+      await browser.storage.local.set({ historyPageSize: parsed.historyPageSize });
+      log(`📄 historyPageSize: ${parsed.historyPageSize}`);
+    } catch (err) { logError(`historyPageSize の保存に失敗: ${err.message}`); return; }
   }
 
   // ---- historyDisplayMode / groupReadDirection ----
@@ -1183,6 +1192,8 @@ let _historyData = [];
 let _histFilterTag = "";
 let _histFilterMode = "or"; // "or" | "and"
 let _histScrollPos = 0; // 絞り込みなし時のスクロール位置
+let _histPage     = 0;   // 現在ページ（0始まり）
+let _histPageSize = 100; // 1ページの表示件数
 let _histSelected  = new Set();
 
 /** 保存履歴表示モードの設定 */
@@ -1228,6 +1239,7 @@ function setupHistoryTab() {
   if (filterModeSelect) {
     filterModeSelect.addEventListener("change", () => {
       _histFilterMode = filterModeSelect.value;
+      _histPage = 0;
       if (_histFilterTag) renderHistoryGrid();
     });
   }
@@ -1235,6 +1247,7 @@ function setupHistoryTab() {
   filterInput.addEventListener("input", () => {
     const prev = _histFilterTag;
     _histFilterTag = filterInput.value.trim().toLowerCase();
+    _histPage = 0;
     filterClear.style.display = _histFilterTag ? "" : "none";
     updateSelectAllBtn();
     if (!prev && _histFilterTag) {
@@ -1245,11 +1258,23 @@ function setupHistoryTab() {
   });
   filterClear.addEventListener("click", () => {
     _histFilterTag = "";
+    _histPage = 0;
     filterInput.value = "";
     filterClear.style.display = "none";
     updateSelectAllBtn();
     renderHistoryGrid();
   });
+
+  // 件数セレクト
+  const pageSizeSelect = document.getElementById("hist-page-size-select");
+  if (pageSizeSelect) {
+    pageSizeSelect.addEventListener("change", () => {
+      _histPageSize = parseInt(pageSizeSelect.value);
+      _histPage = 0;
+      browser.storage.local.set({ historyPageSize: _histPageSize }).catch(() => {});
+      renderHistoryGrid();
+    });
+  }
 
   // 全選択（絞り込み中の全件）
   selectAllBtn.addEventListener("click", () => {
@@ -1676,6 +1701,7 @@ function setupHistoryTab() {
   if (authorFilterInput) {
     authorFilterInput.addEventListener("input", () => {
       _histAuthorFilter = authorFilterInput.value.trim().toLowerCase();
+      _histPage = 0;
       if (authorFilterClear) authorFilterClear.style.display = _histAuthorFilter ? "" : "none";
       renderHistoryGrid();
     });
@@ -1683,6 +1709,7 @@ function setupHistoryTab() {
   if (authorFilterClear) {
     authorFilterClear.addEventListener("click", () => {
       _histAuthorFilter = "";
+      _histPage = 0;
       if (authorFilterInput) { authorFilterInput.value = ""; }
       authorFilterClear.style.display = "none";
       renderHistoryGrid();
@@ -1691,8 +1718,12 @@ function setupHistoryTab() {
 }
 
 async function renderHistoryTab() {
-  const stored = await browser.storage.local.get("saveHistory");
-  _historyData = stored.saveHistory || [];
+  const stored = await browser.storage.local.get(["saveHistory", "historyPageSize"]);
+  _historyData  = stored.saveHistory    || [];
+  _histPageSize = stored.historyPageSize || 100;
+  // セレクトの値も同期
+  const sel = document.getElementById("hist-page-size-select");
+  if (sel) sel.value = String(_histPageSize);
   _histSelected.clear();
 
   // 容量表示
@@ -1730,22 +1761,39 @@ function renderHistoryGrid() {
     : _historyData;
 
   const isFiltering = hasTagFilter || hasAuthorFilter;
-  document.getElementById("hist-count").textContent =
-    isFiltering ? `${filtered.length} 件（絞り込み中）` : `${_historyData.length} 件`;
+  const totalFiltered = filtered.length;
+
+  // ページ範囲補正
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / _histPageSize));
+  if (_histPage >= totalPages) _histPage = totalPages - 1;
+  const pageSlice = filtered.slice(_histPage * _histPageSize, (_histPage + 1) * _histPageSize);
+
+  const countEl = document.getElementById("hist-count");
+  if (countEl) {
+    const suffix = isFiltering ? "（絞り込み中）" : "";
+    if (totalFiltered <= _histPageSize) {
+      countEl.textContent = `${totalFiltered} 件${suffix}`;
+    } else {
+      countEl.textContent = `${_histPage + 1}/${totalPages} ページ（全 ${totalFiltered} 件${suffix ? "・絞り込み中" : ""}）`;
+    }
+  }
 
   if (filtered.length === 0) {
     grid.innerHTML = `<div class="hist-empty">${
       isFiltering ? "絞り込み条件に一致する履歴がありません" : "保存履歴がありません"
     }</div>`;
+    renderHistoryPager(0);
     return;
   }
+
+  renderHistoryPager(totalFiltered);
 
   // 表示モード判定
   const modeRadio = document.querySelector('input[name="history-display-mode"]:checked');
   const displayMode = modeRadio ? modeRadio.value : "normal";
 
   if (displayMode === "group") {
-    renderHistoryGridGrouped(grid, filtered);
+    renderHistoryGridGrouped(grid, pageSlice);
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
@@ -1754,7 +1802,7 @@ function renderHistoryGrid() {
     return;
   }
 
-  for (const entry of filtered) {
+  for (const entry of pageSlice) {
     const card = document.createElement("div");
     card.className = "hist-card" + (_histSelected.has(entry.id) ? " selected" : "");
     _buildHistCardInner(card, entry);
@@ -1762,17 +1810,28 @@ function renderHistoryGrid() {
   }
 
   document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
-    document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
-    document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
-    document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
-    document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
+  document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
+  document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+  document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
+  document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
+}
 
-  // 絞り込み解除後のスクロール位置復元（DOM描画完了後）
-  if (!_histFilterTag && _histScrollPos > 0) {
-    requestAnimationFrame(() => {
-      if (grid) grid.scrollTop = _histScrollPos;
-    });
-  }
+function renderHistoryPager(total) {
+  const totalPages = Math.max(1, Math.ceil(total / _histPageSize));
+  const pagerHtml = total <= _histPageSize ? "" : `
+    <button class="hist-pager-btn" id="hist-pager-prev" ${_histPage === 0 ? "disabled" : ""}>◀ 前へ</button>
+    <span class="hist-pager-info">${_histPage + 1} / ${totalPages} ページ</span>
+    <button class="hist-pager-btn" id="hist-pager-next" ${_histPage >= totalPages - 1 ? "disabled" : ""}>次へ ▶</button>`;
+
+  ["hist-pager-top", "hist-pager-bottom"].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = pagerHtml;
+    if (pagerHtml) {
+      el.querySelector("#hist-pager-prev")?.addEventListener("click", () => { _histPage--; renderHistoryGrid(); });
+      el.querySelector("#hist-pager-next")?.addEventListener("click", () => { _histPage++; renderHistoryGrid(); });
+    }
+  });
 }
 
 /** グループ表示モード：同一 sessionId をまとめて1タイルに表示 */
@@ -1950,6 +2009,7 @@ function _applyTagFilter(tag) {
 
 function _applyAuthorFilter(author) {
   _histAuthorFilter = author;
+  _histPage = 0;
   const input = document.getElementById("hist-author-filter");
   const clear = document.getElementById("hist-author-filter-clear");
   if (input) input.value = author;

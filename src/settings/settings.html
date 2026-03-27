@@ -298,6 +298,23 @@
     .hist-btn.danger { background: #fde; border-color: #f5b8b8; color: #c0392b; }
     .hist-btn.danger:hover { background: #e74c3c; color: #fff; border-color: #e74c3c; }
     .hist-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .hist-pager {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; padding: 5px 14px; background: #f8f9fd;
+      border-bottom: 1px solid #e8ecf5; font-size: 11px; color: #666;
+    }
+    .hist-pager:empty { display: none; }
+    .hist-pager-btn {
+      background: #fff; border: 1px solid #c8d0e8; border-radius: 5px;
+      padding: 3px 10px; font-size: 11px; cursor: pointer; color: #4a90e2; font-family: inherit;
+    }
+    .hist-pager-btn:disabled { opacity: .4; cursor: default; }
+    .hist-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .hist-pager-info { color: #888; white-space: nowrap; }
+    .hist-page-size-select {
+      border: 1px solid #c8d0e8; border-radius: 4px; padding: 2px 4px;
+      font-size: 11px; background: #fff; color: #444; cursor: pointer; font-family: inherit;
+    }
     .history-grid {
       flex: 1; overflow-y: auto;
       display: flex; flex-wrap: wrap; align-content: flex-start;
@@ -763,6 +780,15 @@
         <span id="hist-count">0 件</span>
         <span id="hist-storage">保存履歴情報: 計算中</span>
         <span id="hist-idb">保存サムネイル: 計算中</span>
+        <label style="font-size:11px;color:#888;display:flex;align-items:center;gap:4px;">
+          表示件数:
+          <select id="hist-page-size-select" class="hist-page-size-select" title="1ページの表示件数">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
       </div>
       <div class="history-toolbar-actions">
         <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
@@ -784,9 +810,11 @@
         <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
       </div>
     </div>
+    <div id="hist-pager-top" class="hist-pager"></div>
     <div class="history-grid" id="hist-grid">
       <div class="hist-empty">読み込み中…</div>
     </div>
+    <div id="hist-pager-bottom" class="hist-pager"></div>
   </div>
 
   <div class="status-bar hidden" id="status-bar"></div>

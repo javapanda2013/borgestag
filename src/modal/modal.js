@@ -3,6 +3,12 @@
  * 別ウィンドウ表示モーダルの UI スクリプト。
  * background.js が browser.windows.create() で開く modal.html から読み込まれる。
  * storage.local の _pendingModal から imageUrl / pageUrl を取得して初期化する。
+ *
+ * セキュリティノート:
+ *   このファイルで innerHTML に動的な値を代入している箇所はすべて、
+ *   escapeHtml() によって HTML 特殊文字をエスケープ済みの文字列のみを使用しています。
+ *   静的解析ツールは動的な値の安全性を検証できないため警告が表示されますが、
+ *   XSS のリスクはありません。
  */
 
 // ウィンドウが開いたら即座に初期化

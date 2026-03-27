@@ -173,6 +173,8 @@ browser.runtime.onMessage.addListener(async (message) => {
     // ---- 保存履歴 ----
     case "GET_SAVE_HISTORY":
       return getSaveHistory();
+    case "UPDATE_HISTORY_ENTRY_TAGS":
+      return updateHistoryEntryTags(message.id, message.tags);
     case "GET_CONTINUOUS_SESSION":
       return getContinuousSession();
     case "SET_CONTINUOUS_SESSION":
@@ -653,6 +655,17 @@ function normalizePath(p) {
 async function getSaveHistory() {
   const stored = await browser.storage.local.get("saveHistory");
   return { saveHistory: stored.saveHistory || [] };
+}
+
+async function updateHistoryEntryTags(id, newTags) {
+  if (!id || !Array.isArray(newTags)) return { ok: false };
+  const stored  = await browser.storage.local.get("saveHistory");
+  const history = stored.saveHistory || [];
+  const idx     = history.findIndex(e => e.id === id);
+  if (idx === -1) return { ok: false };
+  history[idx]  = { ...history[idx], tags: newTags };
+  await browser.storage.local.set({ saveHistory: history });
+  return { ok: true };
 }
 
 async function getContinuousSession() {

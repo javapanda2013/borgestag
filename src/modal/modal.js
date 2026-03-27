@@ -232,10 +232,16 @@ function buildModalHTML(defaultFilename) {
 
     /* プレビュー */
     .preview {
-      width: 100%; max-height: 120px; object-fit: contain;
+      width: 100%; height: 120px; min-height: 40px; max-height: 400px; object-fit: contain;
       border-radius: 6px; border: 1px solid #e8e8e8; background: #f6f6f6;
       flex-shrink: 0;
     }
+    .preview-resizer {
+      height: 5px; flex-shrink: 0; cursor: row-resize;
+      background: #ebebeb; border-radius: 3px;
+      transition: background .15s; margin: 1px 0;
+    }
+    .preview-resizer:hover, .preview-resizer.dragging { background: #4a90e2; }
 
     /* ================================================================
        タグエリア
@@ -645,21 +651,22 @@ function buildModalHTML(defaultFilename) {
       flex: 1; display: flex; flex-direction: column; min-height: 0;
     }
     .recent-tags-list {
-      display: flex; flex-direction: column; gap: 2px;
-      flex: 1; overflow-y: auto; min-height: 0;
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px;
+      align-content: flex-start;
+      overflow-y: auto; min-height: 0;
     }
     .recent-tags-list::-webkit-scrollbar { width: 3px; }
     .recent-tags-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
 
     .recent-tag-item {
-      display: flex; align-items: center; gap: 5px;
-      padding: 4px 6px; border-radius: 5px; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 3px 8px; border-radius: 12px; cursor: pointer;
       font-size: 11px; user-select: none;
-      transition: background .1s; border: 1px solid transparent;
+      transition: background .1s, border-color .1s; border: 1px solid transparent;
     }
     .recent-tag-item:hover { background: #eef3ff; border-color: #c8d8f8; }
     .recent-tag-item.active { background: #ddeaff; border-color: #4a90e2; color: #1a56db; font-weight: 600; }
-    .recent-tag-icon { font-size: 11px; flex-shrink: 0; }
+    .recent-tag-icon { font-size: 10px; flex-shrink: 0; }
 
     /* ブックマーク（左カラム下部） */
     .bookmark-section {
@@ -926,6 +933,56 @@ function buildModalHTML(defaultFilename) {
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .history-btn:hover { background: rgba(255,255,255,0.32); }
+    .history-btn-addtag { flex: 0 0 auto; padding: 4px 6px; }
+
+    /* 履歴タイルのインラインタグエディタ */
+    .history-tag-editor {
+      margin-top: 5px; background: rgba(0,0,0,0.45);
+      border-radius: 5px; padding: 5px 6px;
+      display: none; flex-direction: column; gap: 4px;
+    }
+    .history-tag-editor.visible { display: flex; }
+    .history-tag-editor-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 20px;
+    }
+    .history-tag-editor-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(74,144,226,0.85); color: #fff;
+      border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 600;
+    }
+    .history-tag-editor-chip button {
+      background: none; border: none; cursor: pointer; color: #fff;
+      font-size: 11px; line-height: 1; padding: 0;
+    }
+    .history-tag-editor-chip button:hover { color: #faa; }
+    .history-tag-editor-input-row {
+      display: flex; gap: 4px; align-items: center; position: relative;
+    }
+    .history-tag-editor-input {
+      flex: 1; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px;
+      background: rgba(255,255,255,0.15); color: #fff; font-size: 11px;
+      padding: 2px 6px; outline: none; font-family: inherit;
+    }
+    .history-tag-editor-input::placeholder { color: rgba(255,255,255,0.5); }
+    .history-tag-editor-input:focus { border-color: rgba(255,255,255,0.7); }
+    .history-tag-editor-confirm {
+      background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
+      padding: 2px 7px; font-family: inherit; transition: background .1s; white-space: nowrap;
+    }
+    .history-tag-editor-confirm:hover { background: rgba(255,255,255,0.4); }
+    .history-tag-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 100px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px;
+    }
+    .history-tag-suggestions.visible { display: block; }
+    .history-tag-suggestions .suggestion-item {
+      padding: 5px 9px; cursor: pointer; font-size: 11px; color: #1a1a1a;
+    }
+    .history-tag-suggestions .suggestion-item:hover { background: #f0f4ff; }
 
     /* 複数フォルダ選択ドロップダウン */
     .history-dropdown {
@@ -995,6 +1052,7 @@ function buildModalHTML(defaultFilename) {
           <div class="col-left-scroll">
 
             <img class="preview" id="preview" src="" alt="プレビュー" />
+            <div class="preview-resizer" id="preview-resizer"></div>
 
             <!-- 直近タグ（左カラム下部・スクロール可能） -->
             <div class="recent-tags-section" id="recent-tags-section" style="display:none">
@@ -1597,6 +1655,16 @@ function setupModalEvents(
             <button class="history-btn history-btn-nav" title="${escapeHtml(pathTitle)}">
               🧭 移動
             </button>
+            <button class="history-btn history-btn-addtag" title="タグを追加">🏷️ タグ追加</button>
+          </div>
+          <div class="history-tag-editor">
+            <div class="history-tag-editor-chips"></div>
+            <div class="history-tag-editor-input-row">
+              <input type="text" class="history-tag-editor-input"
+                placeholder="タグを入力..." autocomplete="off" />
+              <button class="history-tag-editor-confirm">✔ 保存</button>
+              <div class="history-tag-suggestions"></div>
+            </div>
           </div>
         </div>`;
 
@@ -1676,6 +1744,149 @@ function setupModalEvents(
       item.querySelector(".history-btn-nav").addEventListener("click", (e) => {
         e.stopPropagation();
         handleHistoryAction(paths, "nav", item);
+      });
+
+      // ---- 🏷️ タグ追加ボタン ----
+      const addTagBtn    = item.querySelector(".history-btn-addtag");
+      const tagEditor    = item.querySelector(".history-tag-editor");
+      const chipsArea    = item.querySelector(".history-tag-editor-chips");
+      const tagEditorIn  = item.querySelector(".history-tag-editor-input");
+      const confirmBtn   = item.querySelector(".history-tag-editor-confirm");
+      const suggestPanel = item.querySelector(".history-tag-suggestions");
+
+      let editorTags = [...(entry.tags || [])];
+
+      function renderEditorChips() {
+        chipsArea.innerHTML = "";
+        for (const t of editorTags) {
+          const chip = document.createElement("span");
+          chip.className = "history-tag-editor-chip";
+          chip.innerHTML = `${escapeHtml(t)}<button type="button" title="削除">×</button>`;
+          chip.querySelector("button").addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            editorTags = editorTags.filter(x => x !== t);
+            renderEditorChips();
+          });
+          chipsArea.appendChild(chip);
+        }
+      }
+
+      function showEditorSuggestions(q) {
+        const matches = q
+          ? existingTags.filter(t => tagMatches(t, q) && !editorTags.includes(t))
+          : existingTags.filter(t => !editorTags.includes(t));
+        if (!matches.length) { hideEditorSuggestions(); return; }
+        suggestPanel.innerHTML = matches.slice(0, 8)
+          .map(t => `<div class="suggestion-item" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)
+          .join("");
+        suggestPanel.classList.add("visible");
+        suggestPanel.querySelectorAll(".suggestion-item").forEach(el => {
+          el.addEventListener("mousedown", (ev) => {
+            ev.preventDefault();
+            if (!editorTags.includes(el.dataset.tag)) {
+              editorTags.push(el.dataset.tag);
+              renderEditorChips();
+            }
+            tagEditorIn.value = "";
+            hideEditorSuggestions();
+            tagEditorIn.focus();
+          });
+        });
+      }
+
+      function hideEditorSuggestions() {
+        suggestPanel.classList.remove("visible");
+        suggestPanel.innerHTML = "";
+      }
+
+      addTagBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const isVisible = tagEditor.classList.contains("visible");
+        // 他の開いているエディタをすべて閉じる
+        document.querySelectorAll(".history-tag-editor.visible").forEach(el => {
+          if (el !== tagEditor) {
+            el.classList.remove("visible");
+            el.closest(".history-item")?.style && (el.closest(".history-item").style.overflow = "");
+          }
+        });
+        if (isVisible) {
+          tagEditor.classList.remove("visible");
+          item.style.overflow = "";
+        } else {
+          editorTags = [...(entry.tags || [])];
+          renderEditorChips();
+          tagEditor.classList.add("visible");
+          item.style.overflow = "visible";
+          setTimeout(() => tagEditorIn.focus(), 30);
+        }
+      });
+
+      tagEditorIn.addEventListener("input", () => {
+        if (tagEditorIn.value) showEditorSuggestions(tagEditorIn.value);
+        else hideEditorSuggestions();
+      });
+
+      tagEditorIn.addEventListener("blur", () => setTimeout(hideEditorSuggestions, 150));
+
+      tagEditorIn.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const val = tagEditorIn.value.trim();
+          if (val && !editorTags.includes(val)) {
+            editorTags.push(val);
+            renderEditorChips();
+          }
+          tagEditorIn.value = "";
+          hideEditorSuggestions();
+        } else if (e.key === "Escape") {
+          tagEditor.classList.remove("visible");
+          item.style.overflow = "";
+          hideEditorSuggestions();
+        } else if (e.key === "Backspace" && !tagEditorIn.value && editorTags.length > 0) {
+          editorTags.pop();
+          renderEditorChips();
+        }
+      });
+
+      async function saveEditorTags() {
+        const pending = tagEditorIn.value.trim();
+        if (pending && !editorTags.includes(pending)) editorTags.push(pending);
+        const res = await browser.runtime.sendMessage({
+          type: "UPDATE_HISTORY_ENTRY_TAGS",
+          id:   entry.id,
+          tags: editorTags,
+        });
+        if (res?.ok) {
+          entry.tags = [...editorTags];
+          const idx = saveHistory.findIndex(h => h.id === entry.id);
+          if (idx !== -1) saveHistory[idx].tags = [...editorTags];
+          // タイルのタグ表示を更新
+          const metaEl = item.querySelector(".history-meta");
+          if (metaEl) {
+            const dateSpan = metaEl.querySelector("span");
+            metaEl.innerHTML = "";
+            if (dateSpan) metaEl.appendChild(dateSpan);
+            for (const t of editorTags) {
+              const span = document.createElement("span");
+              span.className = "history-tag";
+              span.dataset.tag = t;
+              span.textContent = t;
+              metaEl.appendChild(span);
+            }
+          }
+          tagEditor.classList.remove("visible");
+          item.style.overflow = "";
+          tagEditorIn.value = "";
+          showToast(shadow, "✅ タグを更新しました");
+        } else {
+          showToast(shadow, "⚠️ タグ更新に失敗しました", true);
+        }
+      }
+
+      confirmBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        saveEditorTags();
       });
 
       return item;
@@ -3430,6 +3641,49 @@ function setupModalEvents(
     const cur = await browser.storage.local.get("modalSize");
     const ms  = cur.modalSize || {};
     ms.colLeftWidth = Math.round(w);
+    await browser.storage.local.set({ modalSize: ms });
+  });
+
+  // ================================================================
+  // プレビューリサイザー（縦方向）
+  // ================================================================
+  const previewResizer = document.getElementById("preview-resizer");
+  const PREVIEW_MIN_H  = 40;
+  const PREVIEW_MAX_H  = 400;
+
+  if (modalSize?.previewHeight) {
+    previewEl.style.height = modalSize.previewHeight + "px";
+  }
+
+  let previewDragging = false;
+  let previewStartY   = 0;
+  let previewStartH   = 0;
+
+  previewResizer.addEventListener("mousedown", (e) => {
+    previewDragging = true;
+    previewStartY   = e.clientY;
+    previewStartH   = previewEl.getBoundingClientRect().height;
+    previewResizer.classList.add("dragging");
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!previewDragging) return;
+    const newH = Math.min(
+      Math.max(PREVIEW_MIN_H, previewStartH + (e.clientY - previewStartY)),
+      PREVIEW_MAX_H
+    );
+    previewEl.style.height = newH + "px";
+  });
+
+  document.addEventListener("mouseup", async () => {
+    if (!previewDragging) return;
+    previewDragging = false;
+    previewResizer.classList.remove("dragging");
+    const h   = Math.round(previewEl.getBoundingClientRect().height);
+    const cur = await browser.storage.local.get("modalSize");
+    const ms  = cur.modalSize || {};
+    ms.previewHeight = h;
     await browser.storage.local.set({ modalSize: ms });
   });
 

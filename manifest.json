@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Image Saver with Tags",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "右クリックから画像をタグ付きで保存する拡張機能",
   "permissions": [
     "contextMenus",

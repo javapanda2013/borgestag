@@ -1529,6 +1529,18 @@ function setupModalEvents(
     renderHistory();
   }
 
+  // タグチップクリック：既存フィルタートークンへの追加・除去（トグル）
+  function toggleHistoryFilterTag(tag) {
+    const tokens = historyFilterTag ? historyFilterTag.split(/\s+/).filter(Boolean) : [];
+    const idx = tokens.indexOf(tag);
+    if (idx !== -1) {
+      tokens.splice(idx, 1);
+    } else {
+      tokens.push(tag);
+    }
+    setHistoryFilter(tokens.join(" "));
+  }
+
   function setHistoryAuthorFilter(author) {
     historyFilterAuthor = author;
     _histPage = 0;
@@ -1582,16 +1594,26 @@ function setupModalEvents(
     }
 
     // フィルタ適用（タグ・作者 絞り込み）
-    const filterQ      = historyFilterTag.trim().toLowerCase();
-    const authorQ      = historyFilterAuthor.trim().toLowerCase();
-    let filtered       = saveHistory;
-    const hasTagFilter = !!filterQ;
+    const filterQ       = historyFilterTag.trim().toLowerCase();
+    const filterTokens  = filterQ ? filterQ.split(/\s+/).filter(Boolean) : [];
+    const authorQ       = historyFilterAuthor.trim().toLowerCase();
+    let filtered        = saveHistory;
+    const hasTagFilter  = filterTokens.length > 0;
     const hasAuthFilter = !!authorQ;
     if (hasTagFilter || hasAuthFilter) {
       filtered = filtered.filter(e => {
-        const tagMatch    = !hasTagFilter  || (e.tags || []).some(t => t.toLowerCase().includes(filterQ));
+        const entryTags = (e.tags || []).map(t => t.toLowerCase());
+        const tagMatch = !hasTagFilter || (
+          historyFilterMode === "and"
+            ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
+            : filterTokens.some(token => entryTags.some(t => t.includes(token)))
+        );
         const authorMatch = !hasAuthFilter || (e.author || "").toLowerCase().includes(authorQ);
-        return historyFilterMode === "or" ? (tagMatch || authorMatch) : (tagMatch && authorMatch);
+        // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
+        if (hasTagFilter && hasAuthFilter) {
+          return historyFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+        }
+        return tagMatch && authorMatch;
       });
     }
     const isFiltered = hasTagFilter || hasAuthFilter;
@@ -1759,8 +1781,11 @@ function setupModalEvents(
       const isMulti = paths.length > 1;
 
       const savedDate = new Date(entry.savedAt).toLocaleString("ja-JP");
+      const activeTokens = historyFilterTag
+        ? new Set(historyFilterTag.split(/\s+/).filter(Boolean))
+        : new Set();
       const tagHtml = (entry.tags || [])
-        .map(t => `<span class="history-tag${historyFilterTag && t.toLowerCase().includes(historyFilterTag.toLowerCase()) ? ' filter-active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
+        .map(t => `<span class="history-tag${activeTokens.has(t.toLowerCase()) ? ' filter-active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
       const authorHtml = entry.author
         ? `<span class="history-author${historyFilterAuthor && entry.author.toLowerCase().includes(historyFilterAuthor.toLowerCase()) ? ' filter-active' : ''}" data-author="${escapeHtml(entry.author)}">✏️ ${escapeHtml(entry.author)}</span>`
         : "";
@@ -2047,7 +2072,7 @@ function setupModalEvents(
       const tag = e.target.dataset?.tag;
       if (!tag) return;
       e.stopPropagation();
-      setHistoryFilter(historyFilterTag === tag ? "" : tag);
+      toggleHistoryFilterTag(tag);
     } else if (e.target.classList.contains("history-author")) {
       const author = e.target.dataset?.author;
       if (!author) return;

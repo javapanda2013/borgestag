@@ -1750,13 +1750,17 @@ function renderHistoryGrid() {
   const filtered = (hasTagFilter || hasAuthorFilter)
     ? _historyData.filter(e => {
         const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
-        const tagOk = !hasTagFilter || (
+        const tagMatch = !hasTagFilter || (
           _histFilterMode === "and"
             ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
             : filterTokens.some(token => entryTags.some(t => t.includes(token)))
         );
-        const authorOk = !hasAuthorFilter || (e.author || "").toLowerCase().includes(authorQ);
-        return _histFilterMode === "and" ? (tagOk && authorOk) : (tagOk || authorOk);
+        const authorMatch = !hasAuthorFilter || (e.author || "").toLowerCase().includes(authorQ);
+        // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
+        if (hasTagFilter && hasAuthorFilter) {
+          return _histFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+        }
+        return tagMatch && authorMatch;
       })
     : _historyData;
 

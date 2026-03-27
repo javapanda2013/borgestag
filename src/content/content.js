@@ -177,6 +177,7 @@ function hideNow() {
 }
 
 function isValidImg(el) {
+  // proxy オブジェクト（<a>越し検出）は tagName と getBoundingClientRect のみ保証
   if (el.tagName !== "IMG") return false;
   const src = el.src || el.currentSrc;
   if (!src || (src.startsWith("data:") && src.length < 200)) return false;
@@ -189,7 +190,57 @@ document.addEventListener("mousemove", (e) => {
 }, { passive: true });
 
 document.addEventListener("mouseover", (e) => {
-  const img = e.target.closest("img");
+  // ① 通常ケース：<img> 要素に直接マウスが乗っている
+  let img = e.target.closest("img");
+
+  // ② フォールバック：透明な <a> 等のオーバーレイが <img> を覆っているケース
+  //    ターゲットが <img> でなく、かつ自前のボタン要素でもない場合に座標検索
+  if (!img && !e.target.closest("#__image-saver-wrap__")) {
+    // オーバーレイ要素を一時的に pointer-events:none にして下の要素を取得
+    const overlays = [];
+    let el = e.target;
+    while (el && el !== document.body) {
+      if (el.tagName !== "IMG" && el !== document.body && el !== document.documentElement) {
+        overlays.push({ el, pe: el.style.pointerEvents });
+        el.style.pointerEvents = "none";
+      }
+      el = el.parentElement;
+    }
+    const found = document.elementFromPoint(e.clientX, e.clientY);
+    // pointer-events を元に戻す
+    for (const { el: oel, pe } of overlays) oel.style.pointerEvents = pe;
+
+    if (found && found.tagName === "IMG") img = found;
+
+    // ③ <img> も見つからないが <a href> が画像URLを持つケース（bluesky等）
+    //    → <a> の href を src 代わりに使う仮想 img オブジェクトで対応
+    if (!img) {
+      const anchor = e.target.closest("a[href]");
+      if (anchor) {
+        const href = anchor.href || "";
+        // 画像拡張子または画像CDNパターンを持つURLのみ対象
+        if (/\.(jpe?g|png|gif|webp|avif|bmp)(\?|$)/i.test(href) ||
+            /\/img\/feed_(fullsize|thumbnail)|\/images?\/|\/media\//i.test(href)) {
+          // <a> の占有領域が MIN_SIZE 以上かチェック
+          const rect = anchor.getBoundingClientRect();
+          if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE) {
+            // <a> を疑似的に img として扱うプロキシオブジェクト
+            const proxy = {
+              _isProxy: true,
+              _imageUrl: href,
+              tagName: "IMG",
+              src: href,
+              currentSrc: href,
+              getBoundingClientRect: () => anchor.getBoundingClientRect(),
+            };
+            // showAt・isValidImg が proxy を受け取れるよう img に代入
+            img = proxy;
+          }
+        }
+      }
+    }
+  }
+
   if (!img || !isValidImg(img)) return;
   if (img === currentImg) { clearTimeout(hideTimer); return; }
   clearTimeout(hideTimer); clearTimeout(showTimer);

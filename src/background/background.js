@@ -500,10 +500,20 @@ async function handleInstantSave(imageUrl, pageUrl) {
       await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
       if (tags.length > 0) await updateRecentTags(tags);
     }
+
+    // Python側が返すサムネイルデータを使用（通常保存と同じ処理）
+    if (res.thumbError) {
+      addLog("WARN", "即保存: サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
+    }
+    const mime = res.thumbMime || "image/jpeg";
+    const thumbDataUrl = res.thumbData ? `data:${mime};base64,${res.thumbData}` : null;
+    const thumbWidth   = res.thumbWidth  || null;
+    const thumbHeight  = res.thumbHeight || null;
+
     // 履歴に追加
     await addSaveHistory({
       imageUrl, filename, savePath, tags: allTags, pageUrl,
-      thumbDataUrl: null, thumbWidth: null, thumbHeight: null,
+      thumbDataUrl, thumbWidth, thumbHeight,
       sessionId: session?.id || null,
       sessionIndex: session ? (session.count + 1) : null,
     });

@@ -86,6 +86,9 @@ async function initModal() {
     { saveHistory },
     { continuousSession },
     { recentSubTags: recentSubTagsList },
+    { authors: globalAuthors },
+    { recentAuthors },
+    { authorDestinations },
   ] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
     browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
@@ -97,6 +100,9 @@ async function initModal() {
     browser.runtime.sendMessage({ type: "GET_SAVE_HISTORY" }),
     browser.runtime.sendMessage({ type: "GET_CONTINUOUS_SESSION" }),
     browser.runtime.sendMessage({ type: "GET_RECENT_SUBTAGS" }),
+    browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_RECENT_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
   ]);
 
 
@@ -111,7 +117,8 @@ async function initModal() {
     recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
     saveHistory, continuousSession || null, savedFolderSort || "name-asc",
     recentSubTagsList || [],
-    null
+    null,
+    globalAuthors || [], recentAuthors || [], authorDestinations || {}
   );
 }
 
@@ -756,17 +763,31 @@ function buildModalHTML(defaultFilename) {
     .main-tab:hover { color: #4a90e2; }
     .main-tab.active { color: #1a56db; border-bottom-color: #4a90e2; background: #fff; }
 
+    /* 作者チップ */
+    .history-author {
+      display: inline-flex; align-items: center;
+      background: #f3e8ff; color: #7c3aed;
+      border-radius: 4px; padding: 1px 6px; font-size: 10px;
+      cursor: pointer; font-weight: 600;
+    }
+    .history-author:hover { background: #e9d5ff; }
+    .history-author.filter-active { background: #7c3aed; color: #fff; }
+
     /* 履歴タグ絞り込み入力欄 */
     .history-filter-wrap {
-      display: none; align-items: center; gap: 3px;
+      display: none; align-items: center; gap: 3px; flex-wrap: wrap;
       margin: 0 auto; padding-bottom: 4px;
     }
     .history-filter-wrap.visible { display: flex; }
     .history-filter-wrap input[type="text"] {
-      width: 140px; border: 1px solid #d0d0d0; border-radius: 5px;
+      width: 120px; border: 1px solid #d0d0d0; border-radius: 5px;
       padding: 3px 7px; font-size: 11px; outline: none; font-family: inherit;
     }
     .history-filter-wrap input[type="text"]:focus { border-color: #4a90e2; }
+    .history-filter-mode-select {
+      font-size: 10px; border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 4px; cursor: pointer; font-family: inherit; background: #fff; color: #444;
+    }
     .history-filter-clear {
       background: none; border: none; cursor: pointer;
       font-size: 11px; color: #aaa; padding: 2px 4px; border-radius: 3px;
@@ -1085,6 +1106,13 @@ function buildModalHTML(defaultFilename) {
               <input type="text" id="history-filter-input"
                 placeholder="🔍 タグで絞り込み" autocomplete="off" />
               <button class="history-filter-clear" id="history-filter-clear" title="クリア">✕</button>
+              <input type="text" id="history-author-filter"
+                placeholder="✏️ 作者で絞り込み" autocomplete="off" />
+              <button class="history-filter-clear" id="history-author-filter-clear" title="クリア">✕</button>
+              <select id="history-filter-mode" class="history-filter-mode-select" title="タグ・作者の絞り込みモード">
+                <option value="and">AND</option>
+                <option value="or">OR</option>
+              </select>
             </div>
           </div>
 
@@ -1155,6 +1183,18 @@ function buildModalHTML(defaultFilename) {
                   <option value="created-asc">作成日 ↑</option>
                   <option value="created-desc">作成日 ↓</option>
                 </select>
+                <div style="display:flex;align-items:center;gap:3px;position:relative;">
+                  <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 作者:</span>
+                  <input type="text" id="author-input" placeholder="作者名（任意）" autocomplete="off"
+                    style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
+                    font-size:11px;outline:none;font-family:inherit;" />
+                  <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
+                    color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="クリア">✕</button>
+                  <div id="author-suggestions" style="position:absolute;top:calc(100% + 2px);left:0;
+                    background:#fff;border:1px solid #d0d8f0;border-radius:5px;
+                    box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
+                    display:none;z-index:200;min-width:120px;font-size:11px;"></div>
+                </div>
                 <div style="display:flex;align-items:center;gap:3px;margin:0 auto;">
                   <input type="text" id="folder-kw-input" placeholder="🔍 フォルダを絞り込み"
                     autocomplete="off" style="width:160px;border:1px solid #d0d0d0;
@@ -1195,7 +1235,8 @@ function setupModalEvents(
   shadow, host, imageUrl, pageUrl, defaultFilename,
   existingTags, lastSaveDir, tagDestinations,
   recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
-  saveHistory, continuousSession, folderSort, recentSubTags, onCleanup
+  saveHistory, continuousSession, folderSort, recentSubTags, onCleanup,
+  globalAuthors, recentAuthors, authorDestinations
 ) {
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
@@ -1441,18 +1482,30 @@ function setupModalEvents(
   // ================================================================
   // 保存履歴描画
   // ================================================================
-  let historyFilterTag = ""; // 現在の絞り込みタグ
+  let historyFilterTag    = ""; // 現在の絞り込みタグ
+  let historyFilterAuthor = ""; // 現在の絞り込み作者
+  let historyFilterMode   = "and"; // "and" | "or"
   let _historyRenderGen = 0; // renderHistory() の世代番号（非同期競合による二重描画防止）
 
   // 絞り込み入力欄の制御
-  const historyFilterWrap  = document.getElementById("history-filter-wrap");
-  const historyFilterInput = document.getElementById("history-filter-input");
-  const historyFilterClear = document.getElementById("history-filter-clear");
+  const historyFilterWrap        = document.getElementById("history-filter-wrap");
+  const historyFilterInput       = document.getElementById("history-filter-input");
+  const historyFilterClear       = document.getElementById("history-filter-clear");
+  const historyAuthorFilter      = document.getElementById("history-author-filter");
+  const historyAuthorFilterClear = document.getElementById("history-author-filter-clear");
+  const historyFilterModeSelect  = document.getElementById("history-filter-mode");
 
   function setHistoryFilter(tag) {
     historyFilterTag = tag;
     historyFilterInput.value = tag;
     historyFilterClear.classList.toggle("visible", tag !== "");
+    renderHistory();
+  }
+
+  function setHistoryAuthorFilter(author) {
+    historyFilterAuthor = author;
+    historyAuthorFilter.value = author;
+    historyAuthorFilterClear.classList.toggle("visible", author !== "");
     renderHistory();
   }
 
@@ -1462,6 +1515,20 @@ function setupModalEvents(
     renderHistory();
   });
   historyFilterClear.addEventListener("click", () => setHistoryFilter(""));
+
+  historyAuthorFilter.addEventListener("input", () => {
+    historyFilterAuthor = historyAuthorFilter.value;
+    historyAuthorFilterClear.classList.toggle("visible", historyFilterAuthor !== "");
+    renderHistory();
+  });
+  historyAuthorFilterClear.addEventListener("click", () => setHistoryAuthorFilter(""));
+
+  if (historyFilterModeSelect) {
+    historyFilterModeSelect.addEventListener("change", () => {
+      historyFilterMode = historyFilterModeSelect.value;
+      renderHistory();
+    });
+  }
 
 
   function renderHistory() {
@@ -1484,15 +1551,20 @@ function setupModalEvents(
       return;
     }
 
-    // フィルタ適用（タグ絞り込み）
-    const filterQ    = historyFilterTag.trim().toLowerCase();
-    let filtered     = saveHistory;
-    if (filterQ) {
-      filtered = filtered.filter(e =>
-        (e.tags || []).some(t => t.toLowerCase().includes(filterQ))
-      );
+    // フィルタ適用（タグ・作者 絞り込み）
+    const filterQ      = historyFilterTag.trim().toLowerCase();
+    const authorQ      = historyFilterAuthor.trim().toLowerCase();
+    let filtered       = saveHistory;
+    const hasTagFilter = !!filterQ;
+    const hasAuthFilter = !!authorQ;
+    if (hasTagFilter || hasAuthFilter) {
+      filtered = filtered.filter(e => {
+        const tagMatch    = !hasTagFilter  || (e.tags || []).some(t => t.toLowerCase().includes(filterQ));
+        const authorMatch = !hasAuthFilter || (e.author || "").toLowerCase().includes(authorQ);
+        return historyFilterMode === "or" ? (tagMatch || authorMatch) : (tagMatch && authorMatch);
+      });
     }
-    const isFiltered = !!filterQ;
+    const isFiltered = hasTagFilter || hasAuthFilter;
 
     if (countEl) countEl.textContent = isFiltered
       ? `${filtered.length} 件（絞り込み中）`
@@ -1616,6 +1688,9 @@ function setupModalEvents(
       const savedDate = new Date(entry.savedAt).toLocaleString("ja-JP");
       const tagHtml = (entry.tags || [])
         .map(t => `<span class="history-tag${historyFilterTag && t.toLowerCase().includes(historyFilterTag.toLowerCase()) ? ' filter-active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
+      const authorHtml = entry.author
+        ? `<span class="history-author${historyFilterAuthor && entry.author.toLowerCase().includes(historyFilterAuthor.toLowerCase()) ? ' filter-active' : ''}" data-author="${escapeHtml(entry.author)}">✏️ ${escapeHtml(entry.author)}</span>`
+        : "";
 
       const pathLabel = isMulti
         ? `${paths.length} 件のフォルダに保存`
@@ -1642,6 +1717,7 @@ function setupModalEvents(
             ${pageUrlHtml}
             <div class="history-meta">
               <span>${escapeHtml(savedDate)}</span>
+              ${authorHtml}
               ${tagHtml}
             </div>
           </div>
@@ -1892,12 +1968,19 @@ function setupModalEvents(
       return item;
   }
 
-  // タグクリックでフィルタ適用（history-panel に委譲 → 再描画後も有効）
+  // タグ・作者クリックでフィルタ適用（history-panel に委譲 → 再描画後も有効）
   document.getElementById("panel-history").addEventListener("click", (e) => {
-    const tag = e.target.dataset?.tag;
-    if (!tag || !e.target.classList.contains("history-tag")) return;
-    e.stopPropagation();
-    setHistoryFilter(historyFilterTag === tag ? "" : tag);
+    if (e.target.classList.contains("history-tag")) {
+      const tag = e.target.dataset?.tag;
+      if (!tag) return;
+      e.stopPropagation();
+      setHistoryFilter(historyFilterTag === tag ? "" : tag);
+    } else if (e.target.classList.contains("history-author")) {
+      const author = e.target.dataset?.author;
+      if (!author) return;
+      e.stopPropagation();
+      setHistoryAuthorFilter(historyFilterAuthor === author ? "" : author);
+    }
   });
 
   /**
@@ -3464,6 +3547,7 @@ function setupModalEvents(
         imageUrl, filename,
         savePaths: [...selectedPaths], tags: [...selectedTags],
         subTags:   [...selectedSubTags],
+        author:  document.getElementById("author-input")?.value.trim() || "",
         pageUrl: pageUrl || null,
         // サブタグはtagsにマージして送信（管理は同一）
         thumbDataUrl: thumb?.dataUrl   || null,
@@ -3559,6 +3643,7 @@ function setupModalEvents(
         imageUrl, filename, savePath,
         tags:    [...selectedTags],
         subTags: [...selectedSubTags],
+        author:  document.getElementById("author-input")?.value.trim() || "",
         pageUrl: pageUrl || null,
         thumbDataUrl: thumb?.dataUrl   || null,
         thumbWidth:   thumb?.width     || null,
@@ -3600,6 +3685,55 @@ function setupModalEvents(
     const btnSave = document.getElementById("btn-save");
     if (!btnSave.disabled) btnSave.click();
   });
+  // ================================================================
+  // 作者入力欄
+  // ================================================================
+  const authorInput       = document.getElementById("author-input");
+  const authorInputClear  = document.getElementById("author-input-clear");
+  const authorSuggestEl   = document.getElementById("author-suggestions");
+  const allAuthors        = [...new Set([...(recentAuthors || []), ...(globalAuthors || [])])];
+
+  function showAuthorSuggestions(q) {
+    const matches = q
+      ? allAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
+      : allAuthors;
+    if (!matches.length) { hideAuthorSuggestions(); return; }
+    authorSuggestEl.innerHTML = matches.slice(0, 8).map(a =>
+      `<div style="padding:5px 9px;cursor:pointer;color:#1a1a1a;" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
+    ).join("");
+    authorSuggestEl.style.display = "block";
+    authorSuggestEl.querySelectorAll("[data-author]").forEach(el => {
+      el.addEventListener("mouseenter", () => el.style.background = "#f0f4ff");
+      el.addEventListener("mouseleave", () => el.style.background = "");
+      el.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        authorInput.value = el.dataset.author;
+        authorInputClear.style.display = "";
+        hideAuthorSuggestions();
+      });
+    });
+  }
+
+  function hideAuthorSuggestions() {
+    authorSuggestEl.style.display = "none";
+    authorSuggestEl.innerHTML = "";
+  }
+
+  if (authorInput) {
+    authorInput.addEventListener("input", () => {
+      authorInputClear.style.display = authorInput.value ? "" : "none";
+      showAuthorSuggestions(authorInput.value);
+    });
+    authorInput.addEventListener("focus", () => showAuthorSuggestions(authorInput.value));
+    authorInput.addEventListener("blur", () => setTimeout(hideAuthorSuggestions, 150));
+    authorInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions(); }
+    });
+    authorInputClear.addEventListener("click", () => {
+      authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+    });
+  }
+
   // ================================================================
   const colLeft    = document.getElementById("col-left");
   const colResizer = document.getElementById("col-resizer");

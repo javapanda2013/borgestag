@@ -175,6 +175,15 @@ browser.runtime.onMessage.addListener(async (message) => {
       return getSaveHistory();
     case "UPDATE_HISTORY_ENTRY_TAGS":
       return updateHistoryEntryTags(message.id, message.tags);
+    // ---- 作者 ----
+    case "GET_GLOBAL_AUTHORS":
+      return getGlobalAuthors();
+    case "GET_RECENT_AUTHORS":
+      return getRecentAuthors();
+    case "GET_AUTHOR_DESTINATIONS":
+      return getAuthorDestinations();
+    case "SET_AUTHOR_DESTINATIONS":
+      return setAuthorDestinations(message.data);
     case "GET_CONTINUOUS_SESSION":
       return getContinuousSession();
     case "SET_CONTINUOUS_SESSION":
@@ -296,7 +305,7 @@ async function listDir(path) {
 // 保存処理
 // ----------------------------------------------------------------
 async function handleSave(payload) {
-  const { imageUrl, filename, tags, subTags, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・saveTagRecord用（サブタグ含む）
   const fullPath = `${savePath}\\${filename}`;
@@ -333,7 +342,7 @@ async function handleSave(payload) {
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (res.thumbHeight || null);
 
     await addSaveHistory({
-      imageUrl, filename, savePath, tags: allTags, pageUrl,
+      imageUrl, filename, savePath, tags: allTags, author: author || "", pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -668,6 +677,47 @@ async function updateHistoryEntryTags(id, newTags) {
   return { ok: true };
 }
 
+// ----------------------------------------------------------------
+// 作者（Author）ストレージ
+// ----------------------------------------------------------------
+async function getGlobalAuthors() {
+  const stored = await browser.storage.local.get("globalAuthors");
+  return { authors: stored.globalAuthors || [] };
+}
+
+async function updateGlobalAuthor(author) {
+  if (!author) return;
+  const stored  = await browser.storage.local.get("globalAuthors");
+  const authors = stored.globalAuthors || [];
+  if (!authors.includes(author)) {
+    authors.push(author);
+    await browser.storage.local.set({ globalAuthors: authors });
+  }
+}
+
+async function getRecentAuthors() {
+  const stored = await browser.storage.local.get("recentAuthors");
+  return { recentAuthors: stored.recentAuthors || [] };
+}
+
+async function updateRecentAuthors(author) {
+  if (!author) return;
+  const stored  = await browser.storage.local.get("recentAuthors");
+  const recents = (stored.recentAuthors || []).filter(a => a !== author);
+  recents.unshift(author);
+  await browser.storage.local.set({ recentAuthors: recents.slice(0, 10) });
+}
+
+async function getAuthorDestinations() {
+  const stored = await browser.storage.local.get("authorDestinations");
+  return { authorDestinations: stored.authorDestinations || {} };
+}
+
+async function setAuthorDestinations(data) {
+  await browser.storage.local.set({ authorDestinations: data || {} });
+  return { ok: true };
+}
+
 async function getContinuousSession() {
   const stored = await browser.storage.local.get("continuousSession");
   return { continuousSession: stored.continuousSession || null };
@@ -971,7 +1021,7 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 // ----------------------------------------------------------------
 
 async function handleSaveMulti(payload) {
-  const { imageUrl, filename, tags, subTags, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -1018,7 +1068,7 @@ async function handleSaveMulti(payload) {
     const effectiveThumbW = thumbDataUrl ? thumbWidth  : (pyThumbData?.w  || null);
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (pyThumbData?.h || null);
     await addSaveHistoryMulti({
-      imageUrl, filename, savePaths: successPaths, tags: allTags, pageUrl,
+      imageUrl, filename, savePaths: successPaths, tags: allTags, author: author || "", pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -1074,12 +1124,12 @@ async function getStorageSize() {
 }
 
 /** 単一保存先の履歴登録 */
-async function addSaveHistory({ imageUrl, filename, savePath, tags, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
-  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex });
+async function addSaveHistory({ imageUrl, filename, savePath, tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
+  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex });
 }
 
 /** 複数保存先対応の履歴登録 */
-async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
+async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
   const stored  = await browser.storage.local.get("saveHistory");
   const history = stored.saveHistory || [];
 
@@ -1160,11 +1210,17 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, pageUr
     thumbHeight,
     filename,
     savePaths,
-    tags:         tags || [],
+    tags:         tags   || [],
+    author:       author || "",
     savedAt:      new Date().toISOString(),
     sessionId:    sessionId     || null,
     sessionIndex: sessionIndex  || null,
   });
+
+  if (author) {
+    await updateGlobalAuthor(author);
+    await updateRecentAuthors(author);
+  }
 
   await browser.storage.local.set({ saveHistory: history });
 

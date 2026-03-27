@@ -20,6 +20,12 @@ let bookmarks = [];
 // 保存先関連付けなしを含む全タグ一覧
 let globalTags = [];
 
+// 作者
+let globalAuthors      = [];
+let authorDestinations = {};
+// 保存履歴の作者フィルター
+let _histAuthorFilter  = "";
+
 // 開いているタグ行のセット（折りたたみ状態の管理）
 const openTags = new Set();
 
@@ -36,6 +42,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
       // 保存履歴タブに切り替えたら描画
       if (btn.dataset.tab === "history") renderHistoryTab();
+      if (btn.dataset.tab === "authors") renderAuthorsTab();
     });
   });
 
@@ -49,6 +56,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupLogs();
   setupHistoryTab();
   setupHistoryDisplayMode();
+  setupAuthorsTab();
 
   // 削除処理有効化チェックボックス（開いた直後は必ずOFF）
   const chkDeleteMode = document.getElementById("chk-delete-mode");
@@ -95,14 +103,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 async function loadData() {
-  const [destRes, bmRes, tagsRes] = await Promise.all([
+  const [destRes, bmRes, tagsRes, authorsRes, authorDestsRes] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" }),
     browser.runtime.sendMessage({ type: "GET_BOOKMARKS" }),
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
+    browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
   ]);
-  tagDestinations = destRes.tagDestinations || {};
-  bookmarks       = bmRes.bookmarks        || [];
-  globalTags      = tagsRes.tags           || [];
+  tagDestinations    = destRes.tagDestinations               || {};
+  bookmarks          = bmRes.bookmarks                       || [];
+  globalTags         = tagsRes.tags                          || [];
+  globalAuthors      = authorsRes.authors                    || [];
+  authorDestinations = authorDestsRes.authorDestinations     || {};
 }
 
 async function saveData() {
@@ -1657,6 +1669,25 @@ function setupHistoryTab() {
       showStatus(`${targets.length} 件の履歴を削除しました`);
     });
   }
+
+  // 作者フィルター
+  const authorFilterInput = document.getElementById("hist-author-filter");
+  const authorFilterClear = document.getElementById("hist-author-filter-clear");
+  if (authorFilterInput) {
+    authorFilterInput.addEventListener("input", () => {
+      _histAuthorFilter = authorFilterInput.value.trim().toLowerCase();
+      if (authorFilterClear) authorFilterClear.style.display = _histAuthorFilter ? "" : "none";
+      renderHistoryGrid();
+    });
+  }
+  if (authorFilterClear) {
+    authorFilterClear.addEventListener("click", () => {
+      _histAuthorFilter = "";
+      if (authorFilterInput) { authorFilterInput.value = ""; }
+      authorFilterClear.style.display = "none";
+      renderHistoryGrid();
+    });
+  }
 }
 
 async function renderHistoryTab() {
@@ -1681,23 +1712,30 @@ function renderHistoryGrid() {
 
   const filterQ = _histFilterTag;
   const filterTokens = filterQ ? filterQ.split(/\s+/).filter(Boolean) : [];
-  const filtered = filterTokens.length > 0
+  const authorQ = _histAuthorFilter.trim().toLowerCase();
+  const hasTagFilter    = filterTokens.length > 0;
+  const hasAuthorFilter = !!authorQ;
+
+  const filtered = (hasTagFilter || hasAuthorFilter)
     ? _historyData.filter(e => {
         const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
-        if (_histFilterMode === "and") {
-          return filterTokens.every(token => entryTags.some(t => t.includes(token)));
-        } else {
-          return filterTokens.some(token => entryTags.some(t => t.includes(token)));
-        }
+        const tagOk = !hasTagFilter || (
+          _histFilterMode === "and"
+            ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
+            : filterTokens.some(token => entryTags.some(t => t.includes(token)))
+        );
+        const authorOk = !hasAuthorFilter || (e.author || "").toLowerCase().includes(authorQ);
+        return _histFilterMode === "and" ? (tagOk && authorOk) : (tagOk || authorOk);
       })
     : _historyData;
 
+  const isFiltering = hasTagFilter || hasAuthorFilter;
   document.getElementById("hist-count").textContent =
-    filterQ ? `${filtered.length} 件（絞り込み中）` : `${_historyData.length} 件`;
+    isFiltering ? `${filtered.length} 件（絞り込み中）` : `${_historyData.length} 件`;
 
   if (filtered.length === 0) {
     grid.innerHTML = `<div class="hist-empty">${
-      filterQ ? `「${escHtml(_histFilterTag)}」に一致する履歴がありません` : "保存履歴がありません"
+      isFiltering ? "絞り込み条件に一致する履歴がありません" : "保存履歴がありません"
     }</div>`;
     return;
   }
@@ -1910,12 +1948,24 @@ function _applyTagFilter(tag) {
   renderHistoryGrid();
 }
 
+function _applyAuthorFilter(author) {
+  _histAuthorFilter = author;
+  const input = document.getElementById("hist-author-filter");
+  const clear = document.getElementById("hist-author-filter-clear");
+  if (input) input.value = author;
+  if (clear) clear.style.display = author ? "" : "none";
+  renderHistoryGrid();
+}
+
 function _buildHistCardInner(card, entry, onThumbClick) {
   const paths   = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
   const primary = paths[0] ?? "";
   const date    = new Date(entry.savedAt).toLocaleString("ja-JP");
   const tagHtml = (entry.tags || [])
     .map(t => `<span class="hist-card-tag" data-tag="${escHtml(t)}">${escHtml(t)}<button class="hist-tag-del-btn delete-guarded" data-tag="${escHtml(t)}" title="${escHtml(t)}を削除" tabindex="-1">×</button></span>`).join("");
+  const authorHtml = entry.author
+    ? `<span class="hist-card-author" data-author="${escHtml(entry.author)}">✏️ ${escHtml(entry.author)}</span>`
+    : "";
 
   let thumbHtml = `<div class="hist-card-thumb-placeholder">🖼</div>`;
   if (entry.thumbId) {
@@ -1952,13 +2002,23 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       <div class="hist-card-body">
         <div class="hist-card-filename" title="${escHtml(entry.filename)}">${escHtml(entry.filename)}</div>
         <div class="hist-card-path" title="${escHtml(primary)}">${escHtml(primary || "（パスなし）")}</div>
+        ${authorHtml ? `<div class="hist-card-author-row">${authorHtml}</div>` : ""}
         <div class="hist-card-tags">${tagHtml}</div>
         <div class="hist-card-date">${escHtml(date)}</div>
       </div>
       <div class="hist-card-actions">
         <button class="hist-card-btn open-folder" title="${escHtml(primary)}">🗂 保存先フォルダを開く</button>
         <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 保存した画像を開く</button>
+        <button class="hist-card-btn addtag" title="タグを追加">🏷️ タグ追加</button>
         <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
+      </div>
+      <div class="hist-tag-editor" style="display:none">
+        <div class="hist-tag-editor-chips"></div>
+        <div class="hist-tag-editor-input-row">
+          <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
+          <button class="hist-tag-editor-confirm">✔ 保存</button>
+          <div class="hist-tag-editor-suggestions"></div>
+        </div>
       </div>
     </div>`;
 
@@ -1978,6 +2038,107 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       e.stopPropagation();
       _applyTagFilter(el.dataset.tag.toLowerCase());
     });
+  });
+
+  // 作者チップクリックで絞り込み
+  const authorChip = card.querySelector(".hist-card-author");
+  if (authorChip) {
+    authorChip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _applyAuthorFilter(authorChip.dataset.author.toLowerCase());
+    });
+  }
+
+  // タグ追加ボタン・インラインエディタ
+  const addTagBtn = card.querySelector(".hist-card-btn.addtag");
+  const tagEditor = card.querySelector(".hist-tag-editor");
+  const editorChips = card.querySelector(".hist-tag-editor-chips");
+  const editorInput = card.querySelector(".hist-tag-editor-input");
+  const editorConfirm = card.querySelector(".hist-tag-editor-confirm");
+  const editorSuggestions = card.querySelector(".hist-tag-editor-suggestions");
+
+  let pendingTags = new Set(entry.tags || []);
+
+  function renderEditorChips() {
+    editorChips.innerHTML = "";
+    pendingTags.forEach(t => {
+      const chip = document.createElement("span");
+      chip.className = "hist-tag-editor-chip";
+      chip.textContent = t;
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.addEventListener("click", (e) => { e.stopPropagation(); pendingTags.delete(t); renderEditorChips(); });
+      chip.appendChild(del);
+      editorChips.appendChild(chip);
+    });
+  }
+
+  function showSuggestions(query) {
+    editorSuggestions.innerHTML = "";
+    if (!query) { editorSuggestions.style.display = "none"; return; }
+    const q = query.toLowerCase();
+    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t)).slice(0, 8);
+    if (!matches.length) { editorSuggestions.style.display = "none"; return; }
+    matches.forEach(t => {
+      const item = document.createElement("div");
+      item.className = "suggestion-item";
+      item.textContent = t;
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        pendingTags.add(t);
+        editorInput.value = "";
+        editorSuggestions.style.display = "none";
+        renderEditorChips();
+      });
+      editorSuggestions.appendChild(item);
+    });
+    editorSuggestions.style.display = "";
+  }
+
+  addTagBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = tagEditor.style.display !== "none";
+    tagEditor.style.display = isOpen ? "none" : "";
+    if (!isOpen) {
+      pendingTags = new Set(entry.tags || []);
+      renderEditorChips();
+      editorInput.value = "";
+      editorSuggestions.style.display = "none";
+      editorInput.focus();
+    }
+  });
+
+  editorInput.addEventListener("input", () => { showSuggestions(editorInput.value.trim()); });
+  editorInput.addEventListener("blur", () => { setTimeout(() => { editorSuggestions.style.display = "none"; }, 150); });
+  editorInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = editorInput.value.trim();
+      if (val) { pendingTags.add(val); editorInput.value = ""; editorSuggestions.style.display = "none"; renderEditorChips(); }
+    } else if (e.key === "Escape") {
+      tagEditor.style.display = "none";
+    }
+  });
+
+  editorConfirm.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const val = editorInput.value.trim();
+    if (val) pendingTags.add(val);
+    const newTags = [...pendingTags];
+    const stored = await browser.storage.local.get(["saveHistory", "globalTags"]);
+    const history = stored.saveHistory || [];
+    const target = history.find(h => h.id === entry.id);
+    if (target) {
+      target.tags = newTags;
+      // globalTagsにも新タグを追加
+      const gSet = new Set([...(stored.globalTags || []), ...newTags]);
+      await browser.storage.local.set({ saveHistory: history, globalTags: [...gSet] });
+      _historyData = history;
+      globalTags = [...gSet];
+      tagEditor.style.display = "none";
+      renderHistoryGrid();
+      showStatus("タグを保存しました ✔");
+    }
   });
 
   // タグ削除ボタン（削除モード時のみ表示）
@@ -2247,4 +2408,155 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     setFixedNavPositions();
     updateView(currentIdx);
   });
+}
+
+// ----------------------------------------------------------------
+// 作者タブ
+// ----------------------------------------------------------------
+function setupAuthorsTab() {
+  // タブクリック時に renderAuthorsTab が呼ばれるのでここでは初期化のみ
+}
+
+async function renderAuthorsTab() {
+  const list = document.getElementById("author-list");
+  if (!list) return;
+
+  // 最新データを取得
+  const [authorsRes, destsRes] = await Promise.all([
+    browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
+  ]);
+  globalAuthors      = authorsRes.authors                || [];
+  authorDestinations = destsRes.authorDestinations       || {};
+
+  list.innerHTML = "";
+
+  if (globalAuthors.length === 0) {
+    list.innerHTML = `<div style="color:#888;font-size:13px;padding:8px">作者がまだ登録されていません。保存ダイアログで作者名を入力すると自動的に登録されます。</div>`;
+    return;
+  }
+
+  globalAuthors.forEach(author => {
+    const row = _buildAuthorRow(author);
+    list.appendChild(row);
+  });
+}
+
+function _buildAuthorRow(author) {
+  const dests = authorDestinations[author] || [];
+  const hasLink = dests.length > 0;
+
+  const row = document.createElement("div");
+  row.className = "author-row";
+
+  const header = document.createElement("div");
+  header.className = "author-header";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "author-name";
+  nameEl.textContent = author;
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.className = "author-dest-toggle";
+  toggleBtn.textContent = hasLink ? `📁 保存先 ${dests.length} 件` : "📁 保存先を追加";
+  toggleBtn.title = "保存先の関連付けを管理";
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "hist-card-btn del delete-guarded";
+  delBtn.style.cssText = "font-size:11px;padding:2px 7px;margin-left:auto;";
+  delBtn.textContent = "削除";
+
+  header.appendChild(nameEl);
+  header.appendChild(toggleBtn);
+  header.appendChild(delBtn);
+
+  const destList = document.createElement("div");
+  destList.className = "author-dest-list";
+  destList.style.display = "none";
+
+  function renderDestList() {
+    destList.innerHTML = "";
+    const currentDests = authorDestinations[author] || [];
+
+    if (currentDests.length === 0) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "color:#aaa;font-size:11px;padding:4px 0";
+      empty.textContent = "保存先が未登録です";
+      destList.appendChild(empty);
+    } else {
+      currentDests.forEach((dest, idx) => {
+        const item = document.createElement("div");
+        item.className = "author-dest-item";
+        item.innerHTML = `
+          <span class="author-dest-label" title="${escHtml(dest.path)}">${escHtml(dest.label || dest.path)}</span>
+          <span class="author-dest-path">${escHtml(dest.path)}</span>
+          <button class="author-dest-del delete-guarded" data-idx="${idx}" title="削除">×</button>`;
+        destList.appendChild(item);
+      });
+    }
+
+    // 追加行
+    const addRow = document.createElement("div");
+    addRow.className = "author-add-dest-row";
+    addRow.innerHTML = `
+      <select class="author-dest-select">
+        <option value="">-- 保存先を選択 --</option>
+        ${Object.entries(tagDestinations).flatMap(([, arr]) => arr).map(d =>
+          `<option value="${escHtml(d.id)}" data-path="${escHtml(d.path)}" data-label="${escHtml(d.label || d.path)}">${escHtml(d.label || d.path)}</option>`
+        ).join("")}
+      </select>
+      <button class="author-dest-add-btn">追加</button>`;
+    destList.appendChild(addRow);
+
+    // イベント
+    destList.querySelectorAll(".author-dest-del").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const i = parseInt(btn.dataset.idx);
+        authorDestinations[author] = (authorDestinations[author] || []).filter((_, j) => j !== i);
+        await browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations });
+        renderDestList();
+        toggleBtn.textContent = `📁 保存先 ${(authorDestinations[author] || []).length} 件`;
+      });
+    });
+
+    const addBtn = addRow.querySelector(".author-dest-add-btn");
+    const sel    = addRow.querySelector(".author-dest-select");
+    addBtn.addEventListener("click", async () => {
+      const opt = sel.options[sel.selectedIndex];
+      if (!opt?.value) return;
+      const newDest = { id: opt.value, path: opt.dataset.path, label: opt.dataset.label };
+      if (!authorDestinations[author]) authorDestinations[author] = [];
+      if (!authorDestinations[author].some(d => d.id === newDest.id)) {
+        authorDestinations[author].push(newDest);
+        await browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations });
+        renderDestList();
+        toggleBtn.textContent = `📁 保存先 ${authorDestinations[author].length} 件`;
+      }
+    });
+  }
+
+  toggleBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = destList.style.display !== "none";
+    destList.style.display = isOpen ? "none" : "";
+    if (!isOpen) renderDestList();
+  });
+
+  delBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!confirm(`「${author}」を作者一覧から削除しますか？`)) return;
+    globalAuthors = globalAuthors.filter(a => a !== author);
+    delete authorDestinations[author];
+    await Promise.all([
+      browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations }),
+      browser.storage.local.set({ globalAuthors }),
+    ]);
+    row.remove();
+    showStatus("作者を削除しました");
+  });
+
+  row.appendChild(header);
+  row.appendChild(destList);
+  return row;
 }

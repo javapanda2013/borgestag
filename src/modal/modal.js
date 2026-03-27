@@ -687,12 +687,14 @@ function buildModalHTML(defaultFilename) {
     }
     .bookmark-list {
       flex: 1; overflow-y: auto; min-height: 0;
-      display: flex; flex-direction: column; gap: 2px;
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 2px;
+      align-content: flex-start;
     }
     .bookmark-list::-webkit-scrollbar { width: 3px; }
     .bookmark-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
     .bookmark-row {
       display: flex; align-items: center; gap: 5px;
+      width: calc(50% - 1px); box-sizing: border-box;
       padding: 4px 6px; cursor: pointer; border-radius: 5px;
       border: 1px solid transparent;
       transition: background .1s; user-select: none;
@@ -813,6 +815,24 @@ function buildModalHTML(defaultFilename) {
       display: flex; gap: 10px; align-items: center;
     }
     .history-infobar span { color: #4a90e2; font-weight: 600; }
+
+    .history-pager {
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 4px 12px; background: #f8f9fd;
+      border-bottom: 1px solid #e8ecf5; font-size: 10px; color: #666;
+    }
+    .history-pager:empty { display: none; }
+    .history-pager-btn {
+      background: #fff; border: 1px solid #c8d0e8; border-radius: 4px;
+      padding: 2px 8px; font-size: 10px; cursor: pointer; color: #4a90e2;
+    }
+    .history-pager-btn:disabled { opacity: .4; cursor: default; }
+    .history-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .history-pager-info { color: #888; white-space: nowrap; }
+    .history-page-size-select {
+      border: 1px solid #c8d0e8; border-radius: 4px; padding: 1px 3px;
+      font-size: 10px; background: #fff; color: #444; cursor: pointer; font-family: inherit;
+    }
 
     .history-panel { display: flex; flex-direction: column; flex: 1; min-height: 0;
       container-type: size; container-name: history-panel; }
@@ -1219,7 +1239,7 @@ function buildModalHTML(defaultFilename) {
 
           </div>
 
-          <!-- 保存履歴パネル -->\n          <div class=\"main-tab-panel\" id=\"panel-history\">\n            <div class=\"history-panel\">\n              <div class=\"history-infobar\" id=\"history-infobar\">\n                <span id=\"history-count\">0 件</span>\n                保存履歴情報: <span id=\"history-storage-size\">計算中…</span>\n                &nbsp;|&nbsp;保存サムネイル: <span id=\"history-idb-size\">計算中…</span>\n              </div>\n              <div class=\"history-list\" id=\"history-list\">\n                <div class=\"history-empty\">まだ保存履歴がありません</div>\n              </div>\n            </div>\n          </div>
+          <!-- 保存履歴パネル -->\n          <div class=\"main-tab-panel\" id=\"panel-history\">\n            <div class=\"history-panel\">\n              <div class=\"history-infobar\" id=\"history-infobar\">\n                <span id=\"history-count\">0 件</span>\n                保存履歴情報: <span id=\"history-storage-size\">計算中…</span>\n                &nbsp;|&nbsp;保存サムネイル: <span id=\"history-idb-size\">計算中…</span>\n              </div>\n              <div id=\"history-pager-top\" class=\"history-pager\"></div>\n              <div class=\"history-list\" id=\"history-list\">\n                <div class=\"history-empty\">まだ保存履歴がありません</div>\n              </div>\n              <div id=\"history-pager-bottom\" class=\"history-pager\"></div>\n            </div>\n          </div>
 
         </div>
       </div>
@@ -1486,6 +1506,12 @@ function setupModalEvents(
   let historyFilterAuthor = ""; // 現在の絞り込み作者
   let historyFilterMode   = "and"; // "and" | "or"
   let _historyRenderGen = 0; // renderHistory() の世代番号（非同期競合による二重描画防止）
+  let _histPage     = 0;   // 現在ページ（0始まり）
+  let _histPageSize = 100; // 1ページの表示件数
+  // ストレージから件数設定を非同期で読み込む
+  browser.storage.local.get("historyPageSize").then(({ historyPageSize }) => {
+    _histPageSize = historyPageSize || 100;
+  }).catch(() => {});
 
   // 絞り込み入力欄の制御
   const historyFilterWrap        = document.getElementById("history-filter-wrap");
@@ -1497,6 +1523,7 @@ function setupModalEvents(
 
   function setHistoryFilter(tag) {
     historyFilterTag = tag;
+    _histPage = 0;
     historyFilterInput.value = tag;
     historyFilterClear.classList.toggle("visible", tag !== "");
     renderHistory();
@@ -1504,6 +1531,7 @@ function setupModalEvents(
 
   function setHistoryAuthorFilter(author) {
     historyFilterAuthor = author;
+    _histPage = 0;
     historyAuthorFilter.value = author;
     historyAuthorFilterClear.classList.toggle("visible", author !== "");
     renderHistory();
@@ -1518,6 +1546,7 @@ function setupModalEvents(
 
   historyAuthorFilter.addEventListener("input", () => {
     historyFilterAuthor = historyAuthorFilter.value;
+    _histPage = 0;
     historyAuthorFilterClear.classList.toggle("visible", historyFilterAuthor !== "");
     renderHistory();
   });
@@ -1526,6 +1555,7 @@ function setupModalEvents(
   if (historyFilterModeSelect) {
     historyFilterModeSelect.addEventListener("change", () => {
       historyFilterMode = historyFilterModeSelect.value;
+      _histPage = 0;
       renderHistory();
     });
   }
@@ -1566,14 +1596,29 @@ function setupModalEvents(
     }
     const isFiltered = hasTagFilter || hasAuthFilter;
 
-    if (countEl) countEl.textContent = isFiltered
-      ? `${filtered.length} 件（絞り込み中）`
-      : `${saveHistory.length} 件`;
+    const totalFiltered = filtered.length;
+    // ページ範囲を超えないよう補正
+    const totalPages = Math.max(1, Math.ceil(totalFiltered / _histPageSize));
+    if (_histPage >= totalPages) _histPage = totalPages - 1;
+
+    const pageSlice = filtered.slice(_histPage * _histPageSize, (_histPage + 1) * _histPageSize);
+
+    if (countEl) {
+      const suffix = isFiltered ? "（絞り込み中）" : "";
+      if (totalFiltered <= _histPageSize) {
+        countEl.textContent = `${totalFiltered} 件${suffix}`;
+      } else {
+        countEl.textContent = `${_histPage + 1}/${totalPages} ページ（全 ${totalFiltered} 件${suffix ? suffix.replace("（", "・") : ""}）`;
+      }
+    }
 
     if (filtered.length === 0) {
-      list["innerHTML"] = `<div class="history-empty">「${escapeHtml(historyFilterTag)}」に一致する履歴がありません</div>`;
+      list["innerHTML"] = `<div class="history-empty">絞り込み条件に一致する履歴がありません</div>`;
+      renderHistoryPager(0);
       return;
     }
+
+    renderHistoryPager(totalFiltered);
 
     // 表示モード判定（storage.local から非同期取得して再描画）
     browser.storage.local.get("historyDisplayMode").then(({ historyDisplayMode }) => {
@@ -1581,13 +1626,41 @@ function setupModalEvents(
       if (gen !== _historyRenderGen) return;
       const mode = historyDisplayMode || "normal";
       if (mode === "group") {
-        _renderHistoryGrouped(list, filtered);
+        _renderHistoryGrouped(list, pageSlice);
       } else {
-        _renderHistoryNormal(list, filtered);
+        _renderHistoryNormal(list, pageSlice);
       }
     }).catch(() => {
       if (gen !== _historyRenderGen) return;
-      _renderHistoryNormal(list, filtered);
+      _renderHistoryNormal(list, pageSlice);
+    });
+  }
+
+  function renderHistoryPager(total) {
+    const totalPages = Math.max(1, Math.ceil(total / _histPageSize));
+    const pagerHtml = total <= _histPageSize ? "" : `
+      <button class="history-pager-btn" id="history-pager-prev" ${_histPage === 0 ? "disabled" : ""}>◀ 前へ</button>
+      <span class="history-pager-info">${_histPage + 1} / ${totalPages} ページ</span>
+      <button class="history-pager-btn" id="history-pager-next" ${_histPage >= totalPages - 1 ? "disabled" : ""}>次へ ▶</button>
+      <select class="history-page-size-select" id="history-page-size-select" title="表示件数">
+        ${[20,50,100,200].map(n => `<option value="${n}"${n === _histPageSize ? " selected" : ""}>${n}件</option>`).join("")}
+      </select>`;
+
+    ["history-pager-top", "history-pager-bottom"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.innerHTML = pagerHtml;
+        if (pagerHtml) {
+          el.querySelector("#history-pager-prev")?.addEventListener("click", () => { _histPage--; renderHistory(); });
+          el.querySelector("#history-pager-next")?.addEventListener("click", () => { _histPage++; renderHistory(); });
+          el.querySelector("#history-page-size-select")?.addEventListener("change", (e) => {
+            _histPageSize = parseInt(e.target.value);
+            _histPage = 0;
+            browser.storage.local.set({ historyPageSize: _histPageSize }).catch(() => {});
+            renderHistory();
+          });
+        }
+      }
     });
   }
 

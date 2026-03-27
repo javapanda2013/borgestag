@@ -1907,9 +1907,11 @@ function setupModalEvents(
         if (res?.ok && res.dataUrl) {
           const win = window.open();
           if (win) {
-            win.document.write(`<!DOCTYPE html><html><body style="margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh;">
-              <img src="${res.dataUrl}" style="max-width:100%;max-height:100vh;object-fit:contain;" /></body></html>`);
-            win.document.close();
+            win.document.body.style.cssText = "margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh;";
+            const img = win.document.createElement("img");
+            img.src = res.dataUrl;
+            img.style.cssText = "max-width:100%;max-height:100vh;object-fit:contain;";
+            win.document.body.appendChild(img);
           }
         } else {
           showToast(shadow, `⚠️ ファイルを開けませんでした:\n${res?.error || filePath}`, true);

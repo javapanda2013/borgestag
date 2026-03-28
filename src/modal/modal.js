@@ -95,6 +95,7 @@ async function initModal() {
     { authors: globalAuthors },
     { recentAuthors },
     { authorDestinations },
+    { recentTagDisplayCount, bookmarkDisplayCount },
   ] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
     browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
@@ -109,6 +110,7 @@ async function initModal() {
     browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
     browser.runtime.sendMessage({ type: "GET_RECENT_AUTHORS" }),
     browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
+    browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]),
   ]);
 
 
@@ -124,7 +126,8 @@ async function initModal() {
     saveHistory, continuousSession || null, savedFolderSort || "name-asc",
     recentSubTagsList || [],
     null,
-    globalAuthors || [], recentAuthors || [], authorDestinations || {}
+    globalAuthors || [], recentAuthors || [], authorDestinations || {},
+    recentTagDisplayCount || 20, bookmarkDisplayCount || 20
   );
 }
 
@@ -210,7 +213,27 @@ function buildModalHTML(defaultFilename) {
     /* 左カラム内：スクロール可能なコンテンツ領域 */
     .col-left-scroll {
       flex: 1; overflow-y: auto; padding: 14px 12px;
-      display: flex; flex-direction: column; gap: 12px; min-height: 0;
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .left-panel { display: flex; flex-direction: column; position: relative; }
+    .left-panel-hdr {
+      display: flex; align-items: center; justify-content: space-between; min-height: 0;
+    }
+    .left-panel-reorder {
+      display: none; gap: 2px; margin-left: 4px;
+    }
+    .left-panel:hover .left-panel-reorder { display: flex; }
+    .left-panel-reorder button {
+      background: #f0f4ff; border: 1px solid #c0cef0; border-radius: 3px;
+      cursor: pointer; font-size: 9px; padding: 1px 4px; color: #4a70c0; line-height: 1;
+    }
+    .left-panel-reorder button:hover { background: #d8e4ff; }
+    .left-row-resizer {
+      height: 5px; cursor: row-resize; flex-shrink: 0; margin: 2px 0;
+      background: transparent; border-radius: 3px;
+    }
+    .left-row-resizer:hover, .left-row-resizer.dragging {
+      background: rgba(74, 144, 226, 0.35);
     }
     .col-left-scroll::-webkit-scrollbar { width: 4px; }
     .col-left-scroll::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
@@ -1209,13 +1232,16 @@ function buildModalHTML(defaultFilename) {
                   <option value="created-asc">作成日 ↑</option>
                   <option value="created-desc">作成日 ↓</option>
                 </select>
-                <div style="display:flex;align-items:center;gap:3px;position:relative;">
-                  <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 作者:</span>
-                  <input type="text" id="author-input" placeholder="作者名（任意）" autocomplete="off"
-                    style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
-                    font-size:11px;outline:none;font-family:inherit;" />
-                  <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
-                    color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="クリア">✕</button>
+                <div style="display:flex;flex-direction:column;gap:2px;position:relative;">
+                  <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">
+                    <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 作者:</span>
+                    <div id="author-chips" style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;"></div>
+                    <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
+                      style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
+                      font-size:11px;outline:none;font-family:inherit;" />
+                    <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
+                      color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="入力クリア">✕</button>
+                  </div>
                   <div id="author-suggestions" style="position:absolute;top:calc(100% + 2px);left:0;
                     background:#fff;border:1px solid #d0d8f0;border-radius:5px;
                     box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
@@ -1262,7 +1288,8 @@ function setupModalEvents(
   existingTags, lastSaveDir, tagDestinations,
   recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
   saveHistory, continuousSession, folderSort, recentSubTags, onCleanup,
-  globalAuthors, recentAuthors, authorDestinations
+  globalAuthors, recentAuthors, authorDestinations,
+  recentTagDisplayCount = 20, bookmarkDisplayCount = 20
 ) {
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
@@ -1451,7 +1478,7 @@ function setupModalEvents(
       return;
     }
 
-    for (const bm of bookmarks) {
+    for (const bm of bookmarks.slice(0, bookmarkDisplayCount)) {
       const row = document.createElement("div");
       row.className = "bookmark-row" + (selectedPath === bm.path ? " selected" : "");
       row["innerHTML"] = `
@@ -1614,7 +1641,8 @@ function setupModalEvents(
             ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
             : filterTokens.some(token => entryTags.some(t => t.includes(token)))
         );
-        const authorMatch = !hasAuthFilter || (e.author || "").toLowerCase().includes(authorQ);
+        const eAuthors = (e.authors || (e.author ? [e.author] : [])).map(a => a.toLowerCase());
+        const authorMatch = !hasAuthFilter || eAuthors.some(a => a.includes(authorQ));
         // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
         if (hasTagFilter && hasAuthFilter) {
           return historyFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
@@ -1792,9 +1820,10 @@ function setupModalEvents(
         : new Set();
       const tagHtml = (entry.tags || [])
         .map(t => `<span class="history-tag${activeTokens.has(t.toLowerCase()) ? ' filter-active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
-      const authorHtml = entry.author
-        ? `<span class="history-author${historyFilterAuthor && entry.author.toLowerCase().includes(historyFilterAuthor.toLowerCase()) ? ' filter-active' : ''}" data-author="${escapeHtml(entry.author)}">✏️ ${escapeHtml(entry.author)}</span>`
-        : "";
+      const entryAuthors = entry.authors || (entry.author ? [entry.author] : []);
+      const authorHtml = entryAuthors.map(a =>
+        `<span class="history-author${historyFilterAuthor && a.toLowerCase().includes(historyFilterAuthor.toLowerCase()) ? ' filter-active' : ''}" data-author="${escapeHtml(a)}">✏️ ${escapeHtml(a)}</span>`
+      ).join("");
 
       const pathLabel = isMulti
         ? `${paths.length} 件のフォルダに保存`
@@ -2776,7 +2805,7 @@ function setupModalEvents(
   // ② 直近タグ描画（selectedTags 宣言後に定義することで参照エラーを回避）
   function renderRecentTags() {
     recentList["innerHTML"] = "";
-    for (const tag of recentTags) {
+    for (const tag of recentTags.slice(0, recentTagDisplayCount)) {
       const item = document.createElement("div");
       const isActive = selectedTags.includes(tag);
       item.className = "recent-tag-item" + (isActive ? " active" : "");
@@ -3653,7 +3682,7 @@ function setupModalEvents(
         imageUrl, filename,
         savePaths: [...selectedPaths], tags: [...selectedTags],
         subTags:   [...selectedSubTags],
-        author:  document.getElementById("author-input")?.value.trim() || "",
+        authors: selectedAuthors,
         pageUrl: pageUrl || null,
         // サブタグはtagsにマージして送信（管理は同一）
         thumbDataUrl: thumb?.dataUrl   || null,
@@ -3749,7 +3778,7 @@ function setupModalEvents(
         imageUrl, filename, savePath,
         tags:    [...selectedTags],
         subTags: [...selectedSubTags],
-        author:  document.getElementById("author-input")?.value.trim() || "",
+        authors: selectedAuthors,
         pageUrl: pageUrl || null,
         thumbDataUrl: thumb?.dataUrl   || null,
         thumbWidth:   thumb?.width     || null,
@@ -3792,17 +3821,51 @@ function setupModalEvents(
     if (!btnSave.disabled) btnSave.click();
   });
   // ================================================================
-  // 作者入力欄
+  // 作者入力欄（複数対応 チップ式）
   // ================================================================
   const authorInput       = document.getElementById("author-input");
   const authorInputClear  = document.getElementById("author-input-clear");
   const authorSuggestEl   = document.getElementById("author-suggestions");
+  const authorChipsEl     = document.getElementById("author-chips");
   const allAuthors        = [...new Set([...(recentAuthors || []), ...(globalAuthors || [])])];
+  let selectedAuthors     = [];
+
+  function renderAuthorChips() {
+    authorChipsEl.innerHTML = "";
+    selectedAuthors.forEach(a => {
+      const chip = document.createElement("span");
+      chip.style.cssText = "display:inline-flex;align-items:center;gap:2px;background:#e8eeff;" +
+        "color:#3a5ac8;border-radius:10px;padding:1px 7px;font-size:10px;white-space:nowrap;";
+      chip.textContent = a;
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "×";
+      delBtn.style.cssText = "background:none;border:none;cursor:pointer;color:#8a9adc;" +
+        "font-size:12px;padding:0 0 0 2px;line-height:1;";
+      delBtn.title = `${a} を削除`;
+      delBtn.addEventListener("click", () => {
+        selectedAuthors = selectedAuthors.filter(x => x !== a);
+        renderAuthorChips();
+      });
+      chip.appendChild(delBtn);
+      authorChipsEl.appendChild(chip);
+    });
+  }
+
+  function addAuthorChip(name) {
+    const v = name.trim();
+    if (!v || selectedAuthors.includes(v)) return;
+    selectedAuthors.push(v);
+    renderAuthorChips();
+    authorInput.value = "";
+    authorInputClear.style.display = "none";
+    hideAuthorSuggestions();
+  }
 
   function showAuthorSuggestions(q) {
-    const matches = q
+    const matches = (q
       ? allAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
-      : allAuthors;
+      : allAuthors
+    ).filter(a => !selectedAuthors.includes(a));
     if (!matches.length) { hideAuthorSuggestions(); return; }
     authorSuggestEl.innerHTML = matches.slice(0, 8).map(a =>
       `<div style="padding:5px 9px;cursor:pointer;color:#1a1a1a;" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
@@ -3813,9 +3876,7 @@ function setupModalEvents(
       el.addEventListener("mouseleave", () => el.style.background = "");
       el.addEventListener("mousedown", (ev) => {
         ev.preventDefault();
-        authorInput.value = el.dataset.author;
-        authorInputClear.style.display = "";
-        hideAuthorSuggestions();
+        addAuthorChip(el.dataset.author);
       });
     });
   }
@@ -3833,7 +3894,12 @@ function setupModalEvents(
     authorInput.addEventListener("focus", () => showAuthorSuggestions(authorInput.value));
     authorInput.addEventListener("blur", () => setTimeout(hideAuthorSuggestions, 150));
     authorInput.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions(); }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (authorInput.value.trim()) addAuthorChip(authorInput.value);
+      } else if (e.key === "Escape") {
+        authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+      }
     });
     authorInputClear.addEventListener("click", () => {
       authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
@@ -3926,6 +3992,107 @@ function setupModalEvents(
     ms.previewHeight = h;
     await browser.storage.local.set({ modalSize: ms });
   });
+
+  // ================================================================
+  // 左カラム パネル並び替え (a) ・パネル間リサイズ (b)
+  // ================================================================
+  (async () => {
+    const scroll = document.querySelector(".col-left-scroll");
+    if (!scroll) return;
+
+    // 管理するパネルID → 要素
+    const panelDefs = {
+      "preview":     [document.getElementById("preview"), document.getElementById("preview-resizer")],
+      "recent-tags": [document.getElementById("recent-tags-section")],
+      "bookmarks":   [document.getElementById("bookmark-section")],
+    };
+
+    const { leftPanelOrder, leftPanelHeights } = await browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]);
+    const order   = leftPanelOrder  || ["preview", "recent-tags", "bookmarks"];
+    const heights = leftPanelHeights || {};
+
+    // ラッパーを生成（既存要素を包む）
+    const wrappers = {};
+    for (const [id, els] of Object.entries(panelDefs)) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "left-panel";
+      wrapper.dataset.panelId = id;
+
+      // リオーダーボタン：最初の要素の先頭に挿入
+      const reorderDiv = document.createElement("div");
+      reorderDiv.className = "left-panel-reorder";
+      const upBtn = document.createElement("button");
+      upBtn.textContent = "▲"; upBtn.title = "上へ移動";
+      const dnBtn = document.createElement("button");
+      dnBtn.textContent = "▼"; dnBtn.title = "下へ移動";
+      upBtn.addEventListener("click", (e) => { e.stopPropagation(); movePanel(id, -1); });
+      dnBtn.addEventListener("click", (e) => { e.stopPropagation(); movePanel(id,  1); });
+      reorderDiv.appendChild(upBtn);
+      reorderDiv.appendChild(dnBtn);
+      wrapper.appendChild(reorderDiv);
+      els.forEach(el => wrapper.appendChild(el));
+
+      if (heights[id]) {
+        wrapper.style.height = heights[id] + "px";
+        wrapper.style.overflow = "hidden";
+      }
+      wrappers[id] = wrapper;
+    }
+
+    function applyOrder() {
+      scroll.innerHTML = "";
+      order.forEach((id, i) => {
+        if (!wrappers[id]) return;
+        scroll.appendChild(wrappers[id]);
+        if (i < order.length - 1) {
+          const rz = document.createElement("div");
+          rz.className = "left-row-resizer";
+          rz.dataset.abovePanel = id;
+          scroll.appendChild(rz);
+          wireRowResizer(rz, id);
+        }
+      });
+    }
+
+    function movePanel(id, delta) {
+      const idx = order.indexOf(id);
+      const newIdx = idx + delta;
+      if (newIdx < 0 || newIdx >= order.length) return;
+      [order[idx], order[newIdx]] = [order[newIdx], order[idx]];
+      applyOrder();
+      browser.storage.local.set({ leftPanelOrder: [...order] });
+    }
+
+    function wireRowResizer(rz, aboveId) {
+      let dragging = false;
+      let startY = 0;
+      let startH = 0;
+
+      rz.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startY = e.clientY;
+        startH = wrappers[aboveId].getBoundingClientRect().height;
+        rz.classList.add("dragging");
+        e.preventDefault();
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const newH = Math.max(40, startH + (e.clientY - startY));
+        wrappers[aboveId].style.height   = newH + "px";
+        wrappers[aboveId].style.overflow = "hidden";
+      });
+      document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        rz.classList.remove("dragging");
+        const h = Math.round(wrappers[aboveId].getBoundingClientRect().height);
+        heights[aboveId] = h;
+        browser.storage.local.set({ leftPanelHeights: { ...heights } });
+      });
+    }
+
+    applyOrder();
+  })();
 
   // ================================================================
   filenameInput.value = defaultFilename;

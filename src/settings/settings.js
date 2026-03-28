@@ -17,6 +17,16 @@
  */
 
 // ----------------------------------------------------------------
+// ヘルパー
+// ----------------------------------------------------------------
+/** 旧フォーマット(author:string)と新フォーマット(authors:string[])の両方に対応 */
+function getEntryAuthors(entry) {
+  if (Array.isArray(entry.authors)) return entry.authors.filter(Boolean);
+  if (entry.author) return [entry.author];
+  return [];
+}
+
+// ----------------------------------------------------------------
 // 状態
 // ----------------------------------------------------------------
 // { "タグ名": [ { id, path, label }, ... ], ... }
@@ -63,6 +73,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupHistoryTab();
   setupHistoryDisplayMode();
   setupAuthorsTab();
+  setupDisplayCounts();
 
   // 削除処理有効化チェックボックス（開いた直後は必ずOFF）
   const chkDeleteMode = document.getElementById("chk-delete-mode");
@@ -485,6 +496,8 @@ async function exportData() {
     "instantSaveEnabled",
     "minimizeAfterSave",
     "historyPageSize",
+    "recentTagDisplayCount",
+    "bookmarkDisplayCount",
   ]);
 
   // IndexedDB のサムネイルも取得
@@ -724,6 +737,16 @@ async function importData(e) {
       await browser.storage.local.set({ historyPageSize: parsed.historyPageSize });
       log(`📄 historyPageSize: ${parsed.historyPageSize}`);
     } catch (err) { logError(`historyPageSize の保存に失敗: ${err.message}`); return; }
+  }
+
+  // ---- recentTagDisplayCount / bookmarkDisplayCount ----
+  for (const key of ["recentTagDisplayCount", "bookmarkDisplayCount"]) {
+    if (parsed[key] !== undefined) {
+      try {
+        await browser.storage.local.set({ [key]: parsed[key] });
+        log(`📄 ${key}: ${parsed[key]}`);
+      } catch (err) { logError(`${key} の保存に失敗: ${err.message}`); return; }
+    }
   }
 
   // ---- historyDisplayMode / groupReadDirection ----
@@ -1203,6 +1226,24 @@ let _histPageSize = 100; // 1ページの表示件数
 let _histSelected  = new Set();
 
 /** 保存履歴表示モードの設定 */
+async function setupDisplayCounts() {
+  const { recentTagDisplayCount, bookmarkDisplayCount } = await browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]);
+  const rcSel = document.getElementById("recent-tag-count-select");
+  const bmSel = document.getElementById("bookmark-count-select");
+  if (rcSel) {
+    rcSel.value = String(recentTagDisplayCount || 20);
+    rcSel.addEventListener("change", () => {
+      browser.storage.local.set({ recentTagDisplayCount: Number(rcSel.value) });
+    });
+  }
+  if (bmSel) {
+    bmSel.value = String(bookmarkDisplayCount || 20);
+    bmSel.addEventListener("change", () => {
+      browser.storage.local.set({ bookmarkDisplayCount: Number(bmSel.value) });
+    });
+  }
+}
+
 async function setupHistoryDisplayMode() {
   const { historyDisplayMode } = await browser.storage.local.get("historyDisplayMode");
   const mode = historyDisplayMode || "normal";
@@ -1761,7 +1802,8 @@ function renderHistoryGrid() {
             ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
             : filterTokens.some(token => entryTags.some(t => t.includes(token)))
         );
-        const authorMatch = !hasAuthorFilter || (e.author || "").toLowerCase().includes(authorQ);
+        const eAuthors = getEntryAuthors(e).map(a => a.toLowerCase());
+        const authorMatch = !hasAuthorFilter || eAuthors.some(a => a.includes(authorQ));
         // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
         if (hasTagFilter && hasAuthorFilter) {
           return _histFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
@@ -2033,9 +2075,10 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   const date    = new Date(entry.savedAt).toLocaleString("ja-JP");
   const tagHtml = (entry.tags || [])
     .map(t => `<span class="hist-card-tag" data-tag="${escHtml(t)}">${escHtml(t)}<button class="hist-tag-del-btn delete-guarded" data-tag="${escHtml(t)}" title="${escHtml(t)}を削除" tabindex="-1">×</button></span>`).join("");
-  const authorHtml = entry.author
-    ? `<span class="hist-card-author" data-author="${escHtml(entry.author)}">✏️ ${escHtml(entry.author)}</span>`
-    : "";
+  const entryAuthors = getEntryAuthors(entry);
+  const authorHtml = entryAuthors.map(a =>
+    `<span class="hist-card-author" data-author="${escHtml(a)}">✏️ ${escHtml(a)}</span>`
+  ).join("");
 
   let thumbHtml = `<div class="hist-card-thumb-placeholder">🖼</div>`;
   if (entry.thumbId) {
@@ -2079,15 +2122,36 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       <div class="hist-card-actions">
         <button class="hist-card-btn open-folder" title="${escHtml(primary)}">🗂 保存先フォルダを開く</button>
         <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 保存した画像を開く</button>
-        <button class="hist-card-btn addtag" title="タグを追加">🏷️ タグ追加</button>
         <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
+        <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
       </div>
-      <div class="hist-tag-editor" style="display:none">
-        <div class="hist-tag-editor-chips"></div>
-        <div class="hist-tag-editor-input-row">
-          <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
-          <button class="hist-tag-editor-confirm">✔ 保存</button>
-          <div class="hist-tag-editor-suggestions"></div>
+      <div class="hist-info-editor">
+        <div class="hist-info-editor-preview">
+          <img class="hist-info-thumb" src="" alt="" style="display:none;" />
+        </div>
+        <div class="hist-info-field-group">
+          <div class="hist-info-field-label">🏷️ タグ</div>
+          <div class="hist-tag-editor-chips"></div>
+          <div class="hist-tag-editor-input-row">
+            <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
+            <div class="hist-tag-editor-suggestions"></div>
+          </div>
+        </div>
+        <div class="hist-info-field-group">
+          <div class="hist-info-field-label">✏️ 作者</div>
+          <div class="hist-author-chips"></div>
+          <div class="hist-author-input-row">
+            <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" />
+            <div class="hist-author-suggestions"></div>
+          </div>
+        </div>
+        <div class="hist-info-field-group">
+          <div class="hist-info-field-label">📁 保存先</div>
+          <input type="text" class="hist-path-input" placeholder="保存先パス" />
+        </div>
+        <div class="hist-info-editor-actions">
+          <button class="hist-info-editor-cancel">✕ キャンセル</button>
+          <button class="hist-info-editor-save">✔ 保存</button>
         </div>
       </div>
     </div>`;
@@ -2119,16 +2183,24 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     });
   }
 
-  // タグ追加ボタン・インラインエディタ
-  const addTagBtn = card.querySelector(".hist-card-btn.addtag");
-  const tagEditor = card.querySelector(".hist-tag-editor");
-  const editorChips = card.querySelector(".hist-tag-editor-chips");
-  const editorInput = card.querySelector(".hist-tag-editor-input");
-  const editorConfirm = card.querySelector(".hist-tag-editor-confirm");
+  // ── 情報を編集 パネル ──────────────────────────────────────────
+  const infoEditBtn     = card.querySelector(".hist-card-btn.info-edit");
+  const infoEditor      = card.querySelector(".hist-info-editor");
+  const infoThumb       = card.querySelector(".hist-info-thumb");
+  const editorChips     = card.querySelector(".hist-tag-editor-chips");
+  const editorInput     = card.querySelector(".hist-tag-editor-input");
   const editorSuggestions = card.querySelector(".hist-tag-editor-suggestions");
+  const authorChipsEl   = card.querySelector(".hist-author-chips");
+  const authorInput     = card.querySelector(".hist-author-input");
+  const authorSugEl     = card.querySelector(".hist-author-suggestions");
+  const pathInput       = card.querySelector(".hist-path-input");
+  const infoSaveBtn     = card.querySelector(".hist-info-editor-save");
+  const infoCancelBtn   = card.querySelector(".hist-info-editor-cancel");
 
-  let pendingTags = new Set(entry.tags || []);
+  let pendingTags    = new Set(entry.tags || []);
+  let pendingAuthors = [...getEntryAuthors(entry)];
 
+  // ---- タグチップ描画 ----
   function renderEditorChips() {
     editorChips.innerHTML = "";
     pendingTags.forEach(t => {
@@ -2143,7 +2215,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     });
   }
 
-  function showSuggestions(query) {
+  function showTagSuggestions(query) {
     editorSuggestions.innerHTML = "";
     if (!query) { editorSuggestions.style.display = "none"; return; }
     const q = query.toLowerCase();
@@ -2165,20 +2237,84 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     editorSuggestions.style.display = "";
   }
 
-  addTagBtn.addEventListener("click", (e) => {
+  // ---- 作者チップ描画 ----
+  function renderAuthorEditorChips() {
+    authorChipsEl.innerHTML = "";
+    pendingAuthors.forEach(a => {
+      const chip = document.createElement("span");
+      chip.className = "hist-author-chip";
+      chip.textContent = a;
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pendingAuthors = pendingAuthors.filter(x => x !== a);
+        renderAuthorEditorChips();
+      });
+      chip.appendChild(del);
+      authorChipsEl.appendChild(chip);
+    });
+  }
+
+  function showAuthorEditorSuggestions(q) {
+    authorSugEl.innerHTML = "";
+    const matches = (q
+      ? globalAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
+      : globalAuthors
+    ).filter(a => !pendingAuthors.includes(a)).slice(0, 8);
+    if (!matches.length) { authorSugEl.style.display = "none"; return; }
+    matches.forEach(a => {
+      const item = document.createElement("div");
+      item.className = "suggestion-item";
+      item.textContent = a;
+      item.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        if (!pendingAuthors.includes(a)) { pendingAuthors.push(a); renderAuthorEditorChips(); }
+        authorInput.value = "";
+        authorSugEl.style.display = "none";
+      });
+      authorSugEl.appendChild(item);
+    });
+    authorSugEl.style.display = "";
+  }
+
+  // ---- パネル開閉 ----
+  infoEditBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const isOpen = tagEditor.style.display !== "none";
-    tagEditor.style.display = isOpen ? "none" : "";
+    const isOpen = infoEditor.style.display === "flex";
+    infoEditor.style.display = isOpen ? "none" : "flex";
     if (!isOpen) {
-      pendingTags = new Set(entry.tags || []);
+      // 現在値でリセット
+      pendingTags    = new Set(entry.tags || []);
+      pendingAuthors = [...getEntryAuthors(entry)];
+      pathInput.value = primary || "";
       renderEditorChips();
+      renderAuthorEditorChips();
       editorInput.value = "";
       editorSuggestions.style.display = "none";
+      authorInput.value = "";
+      authorSugEl.style.display = "none";
+      // サムネイル表示
+      const imgEl = card.querySelector(".hist-card-thumb, img.hist-card-thumb");
+      if (imgEl?.src) {
+        infoThumb.src = imgEl.src;
+        infoThumb.style.display = "";
+      } else if (entry.thumbId) {
+        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+          .then(r => { if (r?.dataUrl) { infoThumb.src = r.dataUrl; infoThumb.style.display = ""; } })
+          .catch(() => {});
+      }
       editorInput.focus();
     }
   });
 
-  editorInput.addEventListener("input", () => { showSuggestions(editorInput.value.trim()); });
+  infoCancelBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    infoEditor.style.display = "none";
+  });
+
+  // ---- タグ入力配線 ----
+  editorInput.addEventListener("input", () => showTagSuggestions(editorInput.value.trim()));
   editorInput.addEventListener("blur", () => { setTimeout(() => { editorSuggestions.style.display = "none"; }, 150); });
   editorInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -2186,28 +2322,56 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       const val = editorInput.value.trim();
       if (val) { pendingTags.add(val); editorInput.value = ""; editorSuggestions.style.display = "none"; renderEditorChips(); }
     } else if (e.key === "Escape") {
-      tagEditor.style.display = "none";
+      infoEditor.style.display = "none";
     }
   });
 
-  editorConfirm.addEventListener("click", async (e) => {
+  // ---- 作者入力配線 ----
+  authorInput.addEventListener("input", () => showAuthorEditorSuggestions(authorInput.value.trim()));
+  authorInput.addEventListener("blur", () => { setTimeout(() => { authorSugEl.style.display = "none"; }, 150); });
+  authorInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = authorInput.value.trim();
+      if (val && !pendingAuthors.includes(val)) { pendingAuthors.push(val); renderAuthorEditorChips(); }
+      authorInput.value = "";
+      authorSugEl.style.display = "none";
+    }
+  });
+
+  // ---- 保存 ----
+  infoSaveBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const val = editorInput.value.trim();
-    if (val) pendingTags.add(val);
-    const newTags = [...pendingTags];
-    const stored = await browser.storage.local.get(["saveHistory", "globalTags"]);
+    const tagVal = editorInput.value.trim();
+    if (tagVal) pendingTags.add(tagVal);
+    const authorVal = authorInput.value.trim();
+    if (authorVal && !pendingAuthors.includes(authorVal)) pendingAuthors.push(authorVal);
+    const newTags    = [...pendingTags];
+    const newAuthors = [...pendingAuthors];
+    const newPath    = pathInput.value.trim();
+
+    const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
     const history = stored.saveHistory || [];
     const target = history.find(h => h.id === entry.id);
     if (target) {
-      target.tags = newTags;
-      // globalTagsにも新タグを追加
-      const gSet = new Set([...(stored.globalTags || []), ...newTags]);
-      await browser.storage.local.set({ saveHistory: history, globalTags: [...gSet] });
-      _historyData = history;
-      globalTags = [...gSet];
-      tagEditor.style.display = "none";
+      target.tags    = newTags;
+      target.authors = newAuthors;
+      delete target.author; // 旧フォーマット削除
+      if (newPath) target.savePaths = [newPath];
+      // グローバルタグ・作者を更新
+      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags]);
+      const gAuthorSet = new Set([...(stored.globalAuthors || []), ...newAuthors]);
+      await browser.storage.local.set({
+        saveHistory:   history,
+        globalTags:    [...gTagSet],
+        globalAuthors: [...gAuthorSet],
+      });
+      _historyData  = history;
+      globalTags    = [...gTagSet];
+      globalAuthors = [...gAuthorSet];
+      infoEditor.style.display = "none";
       renderHistoryGrid();
-      showStatus("タグを保存しました ✔");
+      showStatus("情報を保存しました ✔");
     }
   });
 
@@ -2520,6 +2684,7 @@ function _buildAuthorRow(author) {
 
   const row = document.createElement("div");
   row.className = "author-row";
+  row.dataset.author = author;
 
   const header = document.createElement("div");
   header.className = "author-header";
@@ -2527,6 +2692,75 @@ function _buildAuthorRow(author) {
   const nameEl = document.createElement("span");
   nameEl.className = "author-name";
   nameEl.textContent = author;
+
+  // インラインリネームUI
+  const renameInput = document.createElement("input");
+  renameInput.type = "text";
+  renameInput.value = author;
+  renameInput.style.cssText = "display:none;font-size:13px;border:1px solid #a0b0e0;border-radius:4px;" +
+    "padding:1px 6px;font-family:inherit;width:160px;";
+  const renameConfirm = document.createElement("button");
+  renameConfirm.textContent = "✔";
+  renameConfirm.title = "変更を確定";
+  renameConfirm.style.cssText = "display:none;font-size:12px;padding:2px 6px;border:1px solid #a0d0a0;" +
+    "border-radius:4px;background:#e8f8e8;cursor:pointer;";
+  const renameCancel = document.createElement("button");
+  renameCancel.textContent = "✕";
+  renameCancel.title = "キャンセル";
+  renameCancel.style.cssText = "display:none;font-size:12px;padding:2px 6px;border:1px solid #d0d0d0;" +
+    "border-radius:4px;background:#f5f5f5;cursor:pointer;";
+  const editBtn = document.createElement("button");
+  editBtn.textContent = "✏";
+  editBtn.title = "名前を変更";
+  editBtn.style.cssText = "font-size:12px;padding:2px 6px;border:1px solid #d0d8f0;border-radius:4px;" +
+    "background:#f0f4ff;cursor:pointer;";
+
+  function startRename() {
+    nameEl.style.display = "none";
+    editBtn.style.display = "none";
+    renameInput.style.display = "";
+    renameConfirm.style.display = "";
+    renameCancel.style.display = "";
+    renameInput.value = author;
+    renameInput.focus();
+    renameInput.select();
+  }
+  function cancelRename() {
+    nameEl.style.display = "";
+    editBtn.style.display = "";
+    renameInput.style.display = "none";
+    renameConfirm.style.display = "none";
+    renameCancel.style.display = "none";
+  }
+  editBtn.addEventListener("click", (e) => { e.stopPropagation(); startRename(); });
+  renameCancel.addEventListener("click", (e) => { e.stopPropagation(); cancelRename(); });
+  renameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") renameConfirm.click();
+    else if (e.key === "Escape") cancelRename();
+  });
+  renameConfirm.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const newName = renameInput.value.trim();
+    if (!newName || newName === author) { cancelRename(); return; }
+    if (globalAuthors.includes(newName)) { alert(`「${newName}」は既に存在します`); return; }
+    // globalAuthors の更新
+    const idx = globalAuthors.indexOf(author);
+    if (idx !== -1) globalAuthors[idx] = newName;
+    // authorDestinations のキー変更
+    if (authorDestinations[author]) {
+      authorDestinations[newName] = authorDestinations[author];
+      delete authorDestinations[author];
+    }
+    await Promise.all([
+      browser.storage.local.set({ globalAuthors }),
+      browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations }),
+    ]);
+    nameEl.textContent = newName;
+    // author 変数を更新（クロージャの参照を更新するため row.dataset を使用）
+    row.dataset.author = newName;
+    cancelRename();
+    showStatus("作者名を変更しました");
+  });
 
   const toggleBtn = document.createElement("button");
   toggleBtn.className = "author-dest-toggle";
@@ -2539,6 +2773,10 @@ function _buildAuthorRow(author) {
   delBtn.textContent = "削除";
 
   header.appendChild(nameEl);
+  header.appendChild(renameInput);
+  header.appendChild(renameConfirm);
+  header.appendChild(renameCancel);
+  header.appendChild(editBtn);
   header.appendChild(toggleBtn);
   header.appendChild(delBtn);
 
@@ -2547,8 +2785,9 @@ function _buildAuthorRow(author) {
   destList.style.display = "none";
 
   function renderDestList() {
+    const curAuthor = row.dataset.author || author; // リネーム後も最新名を参照
     destList.innerHTML = "";
-    const currentDests = authorDestinations[author] || [];
+    const currentDests = authorDestinations[curAuthor] || [];
 
     if (currentDests.length === 0) {
       const empty = document.createElement("div");
@@ -2584,26 +2823,29 @@ function _buildAuthorRow(author) {
     destList.querySelectorAll(".author-dest-del").forEach(btn => {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
+        const n = row.dataset.author || author;
         const i = parseInt(btn.dataset.idx);
-        authorDestinations[author] = (authorDestinations[author] || []).filter((_, j) => j !== i);
+        authorDestinations[n] = (authorDestinations[n] || []).filter((_, j) => j !== i);
         await browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations });
         renderDestList();
-        toggleBtn.textContent = `📁 保存先 ${(authorDestinations[author] || []).length} 件`;
+        toggleBtn.textContent = `📁 保存先 ${(authorDestinations[n] || []).length} 件`;
       });
     });
 
     const addBtn = addRow.querySelector(".author-dest-add-btn");
     const sel    = addRow.querySelector(".author-dest-select");
     addBtn.addEventListener("click", async () => {
+      const n = row.dataset.author || author;
       const opt = sel.options[sel.selectedIndex];
       if (!opt?.value) return;
       const newDest = { id: opt.value, path: opt.dataset.path, label: opt.dataset.label };
-      if (!authorDestinations[author]) authorDestinations[author] = [];
-      if (!authorDestinations[author].some(d => d.id === newDest.id)) {
+      if (!authorDestinations[n]) authorDestinations[n] = [];
+      if (!authorDestinations[n].some(d => d.id === newDest.id)) {
         authorDestinations[author].push(newDest);
         await browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations });
         renderDestList();
-        toggleBtn.textContent = `📁 保存先 ${authorDestinations[author].length} 件`;
+        const n2 = row.dataset.author || author;
+        toggleBtn.textContent = `📁 保存先 ${(authorDestinations[n2] || []).length} 件`;
       }
     });
   }
@@ -2617,9 +2859,10 @@ function _buildAuthorRow(author) {
 
   delBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (!confirm(`「${author}」を作者一覧から削除しますか？`)) return;
-    globalAuthors = globalAuthors.filter(a => a !== author);
-    delete authorDestinations[author];
+    const currentName = row.dataset.author || author;
+    if (!confirm(`「${currentName}」を作者一覧から削除しますか？`)) return;
+    globalAuthors = globalAuthors.filter(a => a !== currentName);
+    delete authorDestinations[currentName];
     await Promise.all([
       browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations }),
       browser.storage.local.set({ globalAuthors }),

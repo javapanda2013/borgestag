@@ -316,6 +316,8 @@
     }
     .hist-pager-btn:disabled { opacity: .4; cursor: default; }
     .hist-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .hist-pager-btn.current { background: #4a90e2; color: #fff; border-color: #3a7fd2; }
+    .hist-pager-dots { color: #aaa; font-size: 12px; padding: 0 2px; user-select: none; }
     .hist-pager-info { color: #888; white-space: nowrap; }
     .hist-page-size-select {
       border: 1px solid #c8d0e8; border-radius: 4px; padding: 2px 4px;
@@ -459,6 +461,12 @@
     .hist-info-editor-preview {
       display: flex; justify-content: center;
     }
+    .hist-info-preview-btn {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
+      padding: 3px 10px; font-family: inherit; transition: background .1s;
+    }
+    .hist-info-preview-btn:hover { background: rgba(255,255,255,0.28); }
     .hist-info-thumb {
       max-width: 100%; max-height: 100px; border-radius: 4px;
       object-fit: contain; background: rgba(0,0,0,.3);

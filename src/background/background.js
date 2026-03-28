@@ -175,6 +175,8 @@ browser.runtime.onMessage.addListener(async (message) => {
       return getSaveHistory();
     case "UPDATE_HISTORY_ENTRY_TAGS":
       return updateHistoryEntryTags(message.id, message.tags);
+    case "UPDATE_HISTORY_ENTRY":
+      return updateHistoryEntry(message.id, message.tags, message.authors);
     // ---- 作者 ----
     case "GET_GLOBAL_AUTHORS":
       return getGlobalAuthors();
@@ -676,6 +678,24 @@ async function updateHistoryEntryTags(id, newTags) {
   if (idx === -1) return { ok: false };
   history[idx]  = { ...history[idx], tags: newTags };
   await browser.storage.local.set({ saveHistory: history });
+  return { ok: true };
+}
+
+async function updateHistoryEntry(id, newTags, newAuthors) {
+  if (!id) return { ok: false };
+  const stored  = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
+  const history = stored.saveHistory || [];
+  const idx     = history.findIndex(e => e.id === id);
+  if (idx === -1) return { ok: false };
+  if (Array.isArray(newTags))    history[idx].tags    = newTags;
+  if (Array.isArray(newAuthors)) { history[idx].authors = newAuthors; delete history[idx].author; }
+  const gTagSet    = new Set([...(stored.globalTags    || []), ...(newTags    || [])]);
+  const gAuthorSet = new Set([...(stored.globalAuthors || []), ...(newAuthors || [])]);
+  await browser.storage.local.set({
+    saveHistory:   history,
+    globalTags:    [...gTagSet],
+    globalAuthors: [...gAuthorSet],
+  });
   return { ok: true };
 }
 

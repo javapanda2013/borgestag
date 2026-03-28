@@ -495,7 +495,7 @@ async function exportData() {
     "groupReadDirection",
     "instantSaveEnabled",
     "minimizeAfterSave",
-    "historyPageSize",
+    "settingsHistoryPageSize",
     "recentTagDisplayCount",
     "bookmarkDisplayCount",
   ]);
@@ -731,12 +731,13 @@ async function importData(e) {
     } catch (err) { logError(`exportAutoSave の保存に失敗: ${err.message}`); return; }
   }
 
-  // ---- historyPageSize ----
-  if (parsed.historyPageSize !== undefined) {
+  // ---- settingsHistoryPageSize (旧キー historyPageSize にも対応) ----
+  const importedPageSize = parsed.settingsHistoryPageSize ?? parsed.historyPageSize;
+  if (importedPageSize !== undefined) {
     try {
-      await browser.storage.local.set({ historyPageSize: parsed.historyPageSize });
-      log(`📄 historyPageSize: ${parsed.historyPageSize}`);
-    } catch (err) { logError(`historyPageSize の保存に失敗: ${err.message}`); return; }
+      await browser.storage.local.set({ settingsHistoryPageSize: importedPageSize });
+      log(`📄 settingsHistoryPageSize: ${importedPageSize}`);
+    } catch (err) { logError(`settingsHistoryPageSize の保存に失敗: ${err.message}`); return; }
   }
 
   // ---- recentTagDisplayCount / bookmarkDisplayCount ----
@@ -1318,7 +1319,7 @@ function setupHistoryTab() {
     pageSizeSelect.addEventListener("change", () => {
       _histPageSize = parseInt(pageSizeSelect.value);
       _histPage = 0;
-      browser.storage.local.set({ historyPageSize: _histPageSize }).catch(() => {});
+      browser.storage.local.set({ settingsHistoryPageSize: _histPageSize }).catch(() => {});
       renderHistoryGrid();
     });
   }
@@ -1765,9 +1766,9 @@ function setupHistoryTab() {
 }
 
 async function renderHistoryTab() {
-  const stored = await browser.storage.local.get(["saveHistory", "historyPageSize"]);
-  _historyData  = stored.saveHistory    || [];
-  _histPageSize = stored.historyPageSize || 100;
+  const stored = await browser.storage.local.get(["saveHistory", "settingsHistoryPageSize"]);
+  _historyData  = stored.saveHistory              || [];
+  _histPageSize = stored.settingsHistoryPageSize  || 100;
   // セレクトの値も同期
   const sel = document.getElementById("hist-page-size-select");
   if (sel) sel.value = String(_histPageSize);
@@ -1870,19 +1871,45 @@ function renderHistoryGrid() {
 
 function renderHistoryPager(total) {
   const totalPages = Math.max(1, Math.ceil(total / _histPageSize));
-  const pagerHtml = total <= _histPageSize ? "" : `
-    <button class="hist-pager-btn" id="hist-pager-prev" ${_histPage === 0 ? "disabled" : ""}>◀ 前へ</button>
-    <span class="hist-pager-info">${_histPage + 1} / ${totalPages} ページ</span>
-    <button class="hist-pager-btn" id="hist-pager-next" ${_histPage >= totalPages - 1 ? "disabled" : ""}>次へ ▶</button>`;
+
+  function buildPager() {
+    const frag = document.createDocumentFragment();
+    if (total <= _histPageSize) return frag;
+
+    const makeBtn = (p) => {
+      const btn = document.createElement("button");
+      btn.className = "hist-pager-btn" + (p === _histPage ? " current" : "");
+      btn.textContent = String(p + 1);
+      btn.disabled = (p === _histPage);
+      btn.addEventListener("click", () => { _histPage = p; renderHistoryGrid(); });
+      return btn;
+    };
+    const makeDots = () => {
+      const s = document.createElement("span");
+      s.className = "hist-pager-dots";
+      s.textContent = "…";
+      return s;
+    };
+
+    if (totalPages <= 5) {
+      for (let p = 0; p < totalPages; p++) frag.appendChild(makeBtn(p));
+    } else {
+      frag.appendChild(makeBtn(0));
+      const rStart = Math.max(1, _histPage - 2);
+      const rEnd   = Math.min(totalPages - 2, _histPage + 2);
+      if (rStart > 1) frag.appendChild(makeDots());
+      for (let p = rStart; p <= rEnd; p++) frag.appendChild(makeBtn(p));
+      if (rEnd < totalPages - 2) frag.appendChild(makeDots());
+      frag.appendChild(makeBtn(totalPages - 1));
+    }
+    return frag;
+  }
 
   ["hist-pager-top", "hist-pager-bottom"].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.innerHTML = pagerHtml;
-    if (pagerHtml) {
-      el.querySelector("#hist-pager-prev")?.addEventListener("click", () => { _histPage--; renderHistoryGrid(); });
-      el.querySelector("#hist-pager-next")?.addEventListener("click", () => { _histPage++; renderHistoryGrid(); });
-    }
+    el.innerHTML = "";
+    el.appendChild(buildPager());
   });
 }
 
@@ -2127,7 +2154,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       </div>
       <div class="hist-info-editor">
         <div class="hist-info-editor-preview">
-          <img class="hist-info-thumb" src="" alt="" style="display:none;" />
+          <button class="hist-info-preview-btn" style="display:none;">🔍 プレビュー</button>
         </div>
         <div class="hist-info-field-group">
           <div class="hist-info-field-label">🏷️ タグ</div>
@@ -2146,7 +2173,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           </div>
         </div>
         <div class="hist-info-field-group">
-          <div class="hist-info-field-label">📁 保存先</div>
+          <div class="hist-info-field-label">📁 保存先情報</div>
           <input type="text" class="hist-path-input" placeholder="保存先パス" />
         </div>
         <div class="hist-info-editor-actions">
@@ -2186,7 +2213,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ── 情報を編集 パネル ──────────────────────────────────────────
   const infoEditBtn     = card.querySelector(".hist-card-btn.info-edit");
   const infoEditor      = card.querySelector(".hist-info-editor");
-  const infoThumb       = card.querySelector(".hist-info-thumb");
+  const infoPreviewBtn  = card.querySelector(".hist-info-preview-btn");
   const editorChips     = card.querySelector(".hist-tag-editor-chips");
   const editorInput     = card.querySelector(".hist-tag-editor-input");
   const editorSuggestions = card.querySelector(".hist-tag-editor-suggestions");
@@ -2294,14 +2321,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       editorSuggestions.style.display = "none";
       authorInput.value = "";
       authorSugEl.style.display = "none";
-      // サムネイル表示
+      // サムネイル取得→プレビューボタン有効化
       const imgEl = card.querySelector(".hist-card-thumb, img.hist-card-thumb");
       if (imgEl?.src) {
-        infoThumb.src = imgEl.src;
-        infoThumb.style.display = "";
+        infoPreviewBtn.dataset.dataUrl = imgEl.src;
+        infoPreviewBtn.style.display = "";
       } else if (entry.thumbId) {
         browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-          .then(r => { if (r?.dataUrl) { infoThumb.src = r.dataUrl; infoThumb.style.display = ""; } })
+          .then(r => { if (r?.dataUrl) { infoPreviewBtn.dataset.dataUrl = r.dataUrl; infoPreviewBtn.style.display = ""; } })
           .catch(() => {});
       }
       editorInput.focus();
@@ -2311,6 +2338,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   infoCancelBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     infoEditor.style.display = "none";
+  });
+
+  infoPreviewBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const dataUrl = infoPreviewBtn.dataset.dataUrl;
+    if (!dataUrl) return;
+    const gIdx = _historyData.findIndex(h => h.id === entry.id);
+    showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
   });
 
   // ---- タグ入力配線 ----

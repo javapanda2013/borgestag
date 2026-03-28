@@ -1022,14 +1022,29 @@ function buildModalHTML(defaultFilename) {
     .history-btn-addtag { flex: 0 0 auto; padding: 4px 6px; }
     .history-btn-info-edit { flex: 0 0 auto; padding: 4px 6px; }
 
-    /* 履歴タイルの情報編集パネル */
+    /* 履歴タイルの情報編集オーバーレイ */
     .history-info-editor {
-      margin-top: 5px; background: rgba(0,0,0,0.5);
-      border-radius: 6px; padding: 7px 8px;
-      display: none; flex-direction: column; gap: 5px;
-      color: #fff; font-size: 11px;
+      display: none; position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.65);
+      align-items: center; justify-content: center;
     }
     .history-info-editor.visible { display: flex; }
+    .history-info-editor-inner {
+      background: #263545; border-radius: 10px;
+      padding: 18px 22px; max-width: 500px; width: 92%;
+      max-height: 85vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+      color: #fff; font-size: 12px;
+    }
+    .history-info-editor-title {
+      font-size: 13px; font-weight: 700; color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 8px; margin-bottom: 2px;
+    }
+    .history-info-thumb {
+      max-width: 100%; max-height: 140px; border-radius: 6px;
+      object-fit: contain; background: rgba(0,0,0,.3);
+    }
     .history-info-field-group { display: flex; flex-direction: column; gap: 3px; }
     .history-info-field-label { font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600; }
     .history-info-author-chips {
@@ -1068,12 +1083,6 @@ function buildModalHTML(defaultFilename) {
     .history-info-editor-actions {
       display: flex; gap: 5px; justify-content: flex-end; align-items: center; margin-top: 2px;
     }
-    .history-info-preview-btn {
-      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.35);
-      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
-      padding: 2px 8px; font-family: inherit; margin-right: auto;
-    }
-    .history-info-preview-btn:hover { background: rgba(255,255,255,0.28); }
     .history-info-editor-cancel {
       background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
       border-radius: 4px; cursor: pointer; color: rgba(255,255,255,0.7); font-size: 10px;
@@ -1983,32 +1992,38 @@ function setupModalEvents(
             <button class="history-btn history-btn-info-edit" title="情報を編集">✏️ 情報を編集</button>
           </div>
           <div class="history-info-editor">
-            <div class="history-info-field-group">
-              <div class="history-info-field-label">🏷️ タグ</div>
-              <div class="history-tag-editor-chips"></div>
-              <div class="history-tag-editor-input-row">
-                <input type="text" class="history-tag-editor-input"
-                  placeholder="タグを入力..." autocomplete="off" />
-                <div class="history-tag-suggestions"></div>
+            <div class="history-info-editor-inner">
+              <div class="history-info-editor-title">✏️ 情報を編集</div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">🖼 プレビュー</div>
+                <img class="history-info-thumb" src="" alt="" style="display:none;" />
               </div>
-            </div>
-            <div class="history-info-field-group">
-              <div class="history-info-field-label">✏️ 作者</div>
-              <div class="history-info-author-chips"></div>
-              <div class="history-info-author-input-row">
-                <input type="text" class="history-info-author-input"
-                  placeholder="追加(Enter)..." autocomplete="off" />
-                <div class="history-info-author-suggestions"></div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">🏷️ タグ</div>
+                <div class="history-tag-editor-chips"></div>
+                <div class="history-tag-editor-input-row">
+                  <input type="text" class="history-tag-editor-input"
+                    placeholder="タグを入力..." autocomplete="off" />
+                  <div class="history-tag-suggestions"></div>
+                </div>
               </div>
-            </div>
-            <div class="history-info-field-group">
-              <div class="history-info-field-label">📁 保存先情報</div>
-              <div class="history-info-path-display"></div>
-            </div>
-            <div class="history-info-editor-actions">
-              <button class="history-info-preview-btn" style="display:none">🔍 プレビュー</button>
-              <button class="history-info-editor-cancel">✕</button>
-              <button class="history-info-editor-save">✔ 保存</button>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">✏️ 作者</div>
+                <div class="history-info-author-chips"></div>
+                <div class="history-info-author-input-row">
+                  <input type="text" class="history-info-author-input"
+                    placeholder="追加(Enter)..." autocomplete="off" />
+                  <div class="history-info-author-suggestions"></div>
+                </div>
+              </div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">📁 保存先情報</div>
+                <div class="history-info-path-display"></div>
+              </div>
+              <div class="history-info-editor-actions">
+                <button class="history-info-editor-cancel">✕</button>
+                <button class="history-info-editor-save">✔ 保存</button>
+              </div>
             </div>
           </div>
         </div>`;
@@ -2103,7 +2118,7 @@ function setupModalEvents(
       const authInput     = item.querySelector(".history-info-author-input");
       const authSugPanel  = item.querySelector(".history-info-author-suggestions");
       const pathDisplay   = item.querySelector(".history-info-path-display");
-      const previewBtn    = item.querySelector(".history-info-preview-btn");
+      const infoThumb     = item.querySelector(".history-info-thumb");
       const cancelBtn     = item.querySelector(".history-info-editor-cancel");
       const saveBtn       = item.querySelector(".history-info-editor-save");
 
@@ -2181,53 +2196,42 @@ function setupModalEvents(
         });
       }
 
-      previewBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const dataUrl = previewBtn.dataset.dataUrl;
-        if (!dataUrl) return;
-        const gIdx = safeAll.findIndex(e2 => e2.id === entry.id);
-        showModalLightbox([entry], 0, safeAll, gIdx, false);
-      });
-
       infoEditBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         const isOpen = infoEditor.classList.contains("visible");
-        document.querySelectorAll(".history-info-editor.visible").forEach(el => {
-          if (el !== infoEditor) el.classList.remove("visible");
-        });
-        if (isOpen) {
-          infoEditor.classList.remove("visible");
-        } else {
-          pendingTags    = new Set(entry.tags || []);
-          pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
-          renderInfoTagChips();
-          renderInfoAuthorChips();
-          tagEditorIn.value = "";
-          tagSugPanel.classList.remove("visible");
-          authInput.value = "";
-          authSugPanel.classList.remove("visible");
-          pathDisplay.textContent = paths.length > 0 ? paths.join(" / ") : "（保存先なし）";
-          infoEditor.classList.add("visible");
-          // サムネイル取得→プレビューボタン有効化
-          const thumbImg = item.querySelector(".history-thumb");
-          if (thumbImg?.src) {
-            previewBtn.dataset.dataUrl = thumbImg.src;
-            previewBtn.style.display = "";
-          } else if (entry.thumbId) {
-            browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
-              .then(({ dataUrl }) => { if (dataUrl) { previewBtn.dataset.dataUrl = dataUrl; previewBtn.style.display = ""; } })
-              .catch(() => {});
-          } else if (entry.thumbnailBase64) {
-            previewBtn.dataset.dataUrl = entry.thumbnailBase64;
-            previewBtn.style.display = "";
-          }
-          setTimeout(() => tagEditorIn.focus(), 30);
+        if (isOpen) { infoEditor.classList.remove("visible"); return; }
+        pendingTags    = new Set(entry.tags || []);
+        pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
+        renderInfoTagChips();
+        renderInfoAuthorChips();
+        tagEditorIn.value = "";
+        tagSugPanel.classList.remove("visible");
+        authInput.value = "";
+        authSugPanel.classList.remove("visible");
+        pathDisplay.textContent = paths.length > 0 ? paths.join(" / ") : "（保存先なし）";
+        // サムネイル取得→インライン表示
+        const thumbImg = item.querySelector(".history-thumb");
+        if (thumbImg?.src) {
+          infoThumb.src = thumbImg.src; infoThumb.style.display = "";
+        } else if (entry.thumbId) {
+          browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+            .then(({ dataUrl }) => { if (dataUrl) { infoThumb.src = dataUrl; infoThumb.style.display = ""; } })
+            .catch(() => {});
+        } else if (entry.thumbnailBase64) {
+          infoThumb.src = entry.thumbnailBase64; infoThumb.style.display = "";
         }
+        infoEditor.classList.add("visible");
+        setTimeout(() => tagEditorIn.focus(), 30);
       });
 
       cancelBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         infoEditor.classList.remove("visible");
+      });
+
+      // オーバーレイ背景クリックで閉じる
+      infoEditor.addEventListener("click", (e) => {
+        if (e.target === infoEditor) infoEditor.classList.remove("visible");
       });
 
       tagEditorIn.addEventListener("input", () => {

@@ -1,6 +1,6 @@
 {
   "name": "image_saver_host",
-  "description": "Image Saver with Tags - ネイティブホスト",
+  "description": "BorgesTag - ネイティブホスト",
   "path": "C:\\firefox-ext-native\\image_saver_wrapper.bat",
   "type": "stdio",
   "allowed_extensions": ["image-saver-tags@example.com"]

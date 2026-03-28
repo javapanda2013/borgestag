@@ -4,7 +4,7 @@ PowerShell の Compress-Archive はバックスラッシュを使うため、
 フォワードスラッシュが必要な Firefox アドオン登録用 ZIP はこのスクリプトで作成する。
 
 使用方法:
-  python make_zip.py v1.9.5
+  python make_zip.py v1.9.6
 """
 import zipfile
 import os
@@ -13,7 +13,7 @@ import sys
 src_dir  = os.path.dirname(os.path.abspath(__file__))
 version  = sys.argv[1] if len(sys.argv) > 1 else "x.x.x"
 out_dir  = os.path.dirname(src_dir)  # リポジトリの1つ上（ZIP 出力先）
-out_file = os.path.join(out_dir, f"image_saver_with_tags_{version}.zip")
+out_file = os.path.join(out_dir, f"borgestag_{version}.zip")
 
 EXCLUDE_DIRS  = {".git", "__pycache__", ".idea", "node_modules"}
 EXCLUDE_FILES = {".DS_Store", "Thumbs.db"}

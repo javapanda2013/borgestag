@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
-  "name": "Image Saver with Tags",
-  "version": "1.9.5",
+  "name": "BorgesTag",
+  "version": "1.9.6",
   "description": "右クリックから画像をタグ付きで保存する拡張機能",
   "permissions": [
     "contextMenus",
@@ -33,7 +33,7 @@
     }
   ],
   "browser_action": {
-    "default_title": "Image Saver 設定を開く",
+    "default_title": "BorgesTag 設定を開く",
     "default_icon": {
       "56": "icons/icon48.png",
       "112": "icons/icon96.png"

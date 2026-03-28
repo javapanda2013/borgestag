@@ -44,8 +44,8 @@ function initZoomMonitor() {
   function updateTitle() {
     const pct = getZoomPct();
     document.title = pct === 100
-      ? "Image Saver"
-      : `Image Saver [${pct}%]`;
+      ? "BorgesTag"
+      : `BorgesTag [${pct}%]`;
   }
 
   updateTitle();
@@ -1197,7 +1197,7 @@ function buildModalHTML(defaultFilename) {
       <!-- ヘッダー（固定） -->
       <div class="header">
         <div class="header-left">
-          <h2>🖼 Image Saver</h2>
+          <h2>🖼 BorgesTag</h2>
           <div class="header-path unset" id="selected-path-display">フォルダが選択されていません</div>
         </div>
         <div class="header-actions">

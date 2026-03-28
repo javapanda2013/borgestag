@@ -279,13 +279,19 @@
     }
     .history-toolbar-info span { color: #4a90e2; font-weight: 600; }
     .history-toolbar-actions {
-      display: flex; gap: 6px; align-items: center;
+      display: flex; flex-direction: column; gap: 5px; width: 100%;
     }
-    .history-toolbar-actions input[type="text"] {
+    .hist-toolbar-btns-row {
+      display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    }
+    .hist-toolbar-filters-row {
+      display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+    }
+    .hist-toolbar-filters-row input[type="text"] {
       width: 160px; border: 1px solid #d0d0d0; border-radius: 5px;
       padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
     }
-    .history-toolbar-actions input[type="text"]:focus { border-color: #4a90e2; }
+    .hist-toolbar-filters-row input[type="text"]:focus { border-color: #4a90e2; }
     .hist-btn-sm {
       background: none; border: none; cursor: pointer;
       font-size: 11px; color: #aaa; padding: 2px 5px; border-radius: 3px;
@@ -891,23 +897,28 @@
         </label>
       </div>
       <div class="history-toolbar-actions">
-        <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
-          <option value="or">OR</option>
-          <option value="and">AND</option>
-        </select>
-        <input type="text" id="hist-filter" placeholder="🔍 タグで絞り込み（スペース区切りで複数）" autocomplete="off" />
-        <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
-        <input type="text" id="hist-author-filter" placeholder="✏️ 作者で絞り込み" autocomplete="off"
-          style="font-size:11px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 7px;outline:none;font-family:inherit;" />
-        <button id="hist-author-filter-clear" class="hist-btn-sm" title="作者フィルタークリア" style="display:none">✕</button>
-        <button id="hist-select-all" class="hist-btn" disabled title="絞り込み中の全件を選択">全選択</button>
-        <button id="hist-deselect-all" class="hist-btn" disabled>選択解除</button>
-        <button id="hist-add-tag-selected" class="hist-btn" disabled>🏷 タグ追加</button>
-        <button id="hist-group-selected" class="hist-btn" disabled title="選択した履歴を連続保存したグループとしてまとめます">🔴 グループ化</button>
-        <button id="hist-ungroup-selected" class="hist-btn" disabled title="選択したグループを解除します（グループ内の全アイテムのセッションIDを削除）">🔵 グループ解除</button>
-        <button id="hist-delete-selected" class="hist-btn danger delete-guarded" disabled>選択削除</button>
-        <button id="hist-delete-period" class="hist-btn danger delete-guarded">期間削除</button>
-        <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
+        <!-- 上段：ボタン -->
+        <div class="hist-toolbar-btns-row">
+          <button id="hist-select-all" class="hist-btn" disabled title="絞り込み中の全件を選択">全選択</button>
+          <button id="hist-deselect-all" class="hist-btn" disabled>選択解除</button>
+          <button id="hist-add-tag-selected" class="hist-btn" disabled>🏷 タグ追加</button>
+          <button id="hist-group-selected" class="hist-btn" disabled title="選択した履歴を連続保存したグループとしてまとめます">🔴 グループ化</button>
+          <button id="hist-ungroup-selected" class="hist-btn" disabled title="選択したグループを解除します（グループ内の全アイテムのセッションIDを削除）">🔵 グループ解除</button>
+          <button id="hist-delete-selected" class="hist-btn danger delete-guarded" disabled>選択削除</button>
+          <button id="hist-delete-period" class="hist-btn danger delete-guarded">期間削除</button>
+          <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
+        </div>
+        <!-- 下段：絞り込みフィルター -->
+        <div class="hist-toolbar-filters-row">
+          <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+            <option value="or">OR</option>
+            <option value="and">AND</option>
+          </select>
+          <input type="text" id="hist-filter" placeholder="🔍 タグで絞り込み（スペース区切りで複数）" autocomplete="off" />
+          <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
+          <input type="text" id="hist-author-filter" placeholder="✏️ 作者で絞り込み" autocomplete="off" />
+          <button id="hist-author-filter-clear" class="hist-btn-sm" title="作者フィルタークリア" style="display:none">✕</button>
+        </div>
       </div>
     </div>
     <div id="hist-pager-top" class="hist-pager"></div>

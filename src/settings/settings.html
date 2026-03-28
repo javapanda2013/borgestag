@@ -378,8 +378,18 @@
     }
     body.delete-mode .hist-tag-del-btn { display: inline; }
     .hist-card-date { font-size: 9px; color: rgba(255,255,255,.55); }
+    .hist-card-pageurl {
+      font-size: 10px; color: #9ab; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+    }
     .hist-card-actions {
       display: flex; flex-direction: column; gap: 4px;
+    }
+    .hist-card-actions-row {
+      display: flex; gap: 4px;
+    }
+    .hist-card-actions-row .hist-card-btn {
+      flex: 1; width: auto;
     }
     .hist-card-btn {
       width: 100%;
@@ -474,8 +484,9 @@
       display: flex; justify-content: center;
     }
     .hist-info-thumb {
-      max-width: 100%; max-height: 140px; border-radius: 6px;
+      width: 220px; max-width: 100%; border-radius: 6px;
       object-fit: contain; background: rgba(0,0,0,.3);
+      aspect-ratio: 11/18;
     }
     .hist-info-field-group {
       display: flex; flex-direction: column; gap: 3px;

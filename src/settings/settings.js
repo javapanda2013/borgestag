@@ -2135,6 +2135,10 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       }).catch(() => {});
   }
 
+  const pageUrlHtml = entry.pageUrl
+    ? `<div class="hist-card-pageurl" title="${escHtml(entry.pageUrl)}">${escHtml(entry.pageUrl)}</div>`
+    : "";
+
   card.innerHTML = `
     <input type="checkbox" class="hist-select-box" ${_histSelected.has(entry.id) ? "checked" : ""} />
     ${thumbHtml}
@@ -2145,12 +2149,15 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         ${authorHtml ? `<div class="hist-card-author-row">${authorHtml}</div>` : ""}
         <div class="hist-card-tags">${tagHtml}</div>
         <div class="hist-card-date">${escHtml(date)}</div>
+        ${pageUrlHtml}
       </div>
       <div class="hist-card-actions">
-        <button class="hist-card-btn open-folder" title="${escHtml(primary)}">🗂 保存先フォルダを開く</button>
-        <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 保存した画像を開く</button>
-        <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
-        <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
+        <button class="hist-card-btn open-folder" title="${escHtml(primary)}">🗂 保存先</button>
+        <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 保存した画像</button>
+        <div class="hist-card-actions-row">
+          <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
+          <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
+        </div>
       </div>
       <div class="hist-info-editor">
         <div class="hist-info-editor-inner">

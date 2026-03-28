@@ -236,7 +236,14 @@ function buildModalHTML(defaultFilename) {
     .left-panel-reorder {
       display: none; gap: 2px; margin-left: 4px;
     }
-    .left-panel:hover .left-panel-reorder { display: flex; }
+    .panel-reorder-mode .left-panel-reorder { display: flex; }
+    #chk-panel-reorder-label {
+      display: inline-flex; align-items: center; gap: 3px;
+      font-size: 10px; color: #6a8ab0; cursor: pointer; user-select: none;
+      padding: 1px 5px; border-radius: 3px;
+    }
+    #chk-panel-reorder-label:hover { color: #4a70c0; }
+    #chk-panel-reorder-label input { cursor: pointer; }
     .left-panel-reorder button {
       background: #f0f4ff; border: 1px solid #c0cef0; border-radius: 3px;
       cursor: pointer; font-size: 9px; padding: 1px 4px; color: #4a70c0; line-height: 1;
@@ -1042,8 +1049,9 @@ function buildModalHTML(defaultFilename) {
       border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 8px; margin-bottom: 2px;
     }
     .history-info-thumb {
-      max-width: 100%; max-height: 140px; border-radius: 6px;
+      width: 220px; max-width: 100%; border-radius: 6px;
       object-fit: contain; background: rgba(0,0,0,.3);
+      aspect-ratio: 11/18;
     }
     .history-info-field-group { display: flex; flex-direction: column; gap: 3px; }
     .history-info-field-label { font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600; }
@@ -1981,10 +1989,10 @@ function setupModalEvents(
           </div>
           <div class="history-actions">
             <button class="history-btn history-btn-open" title="${escapeHtml(pathTitle)}">
-              🗂 保存先フォルダを開く
+              🗂 保存先
             </button>
             <button class="history-btn history-btn-open-file" title="${escapeHtml(pathTitle)}">
-              🖼 保存した画像を開く
+              🖼 保存した画像
             </button>
             <button class="history-btn history-btn-nav" title="${escapeHtml(pathTitle)}">
               🧭 移動
@@ -4303,6 +4311,24 @@ function setupModalEvents(
         browser.storage.local.set({ leftPanelHeights: { ...heights } });
       });
     }
+
+    // パネル入れ替えモード チェックボックス
+    const reorderChkWrap = document.createElement("div");
+    reorderChkWrap.style.cssText = "padding: 2px 6px 0; display: flex; justify-content: flex-end;";
+    const reorderChk = document.createElement("input");
+    reorderChk.type = "checkbox";
+    reorderChk.id = "chk-panel-reorder";
+    const reorderLbl = document.createElement("label");
+    reorderLbl.id = "chk-panel-reorder-label";
+    reorderLbl.htmlFor = "chk-panel-reorder";
+    reorderLbl.textContent = "並替";
+    reorderLbl.title = "パネル入れ替えモード";
+    reorderLbl.prepend(reorderChk);
+    reorderChkWrap.appendChild(reorderLbl);
+    scroll.parentNode.insertBefore(reorderChkWrap, scroll);
+    reorderChk.addEventListener("change", () => {
+      scroll.classList.toggle("panel-reorder-mode", reorderChk.checked);
+    });
 
     applyOrder();
   })();

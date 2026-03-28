@@ -73,6 +73,16 @@ function initZoomMonitor() {
 // ----------------------------------------------------------------
 // モーダルを開く
 // ----------------------------------------------------------------
+// ウィンドウが最小幅を下回ったら強制リサイズ
+const MODAL_MIN_WIDTH = 700;
+window.addEventListener("resize", () => {
+  if (window.outerWidth < MODAL_MIN_WIDTH) {
+    browser.windows.getCurrent()
+      .then(w => browser.windows.update(w.id, { width: MODAL_MIN_WIDTH }))
+      .catch(() => {});
+  }
+});
+
 async function initModal() {
   // 画像情報を storage から取得
   const { _pendingModal } = await browser.storage.local.get("_pendingModal");
@@ -140,6 +150,10 @@ function buildModalHTML(defaultFilename) {
     *, *::before, *::after {
       box-sizing: border-box; margin: 0; padding: 0;
     }
+    html, body {
+      min-width: 700px; /* ウィンドウ縮小時のクリッピング防止 */
+      overflow-x: auto;
+    }
     body, #modal-root {
       color: #1a1a1a;
       font-family: "Segoe UI", -apple-system, sans-serif;
@@ -158,7 +172,7 @@ function buildModalHTML(defaultFilename) {
     .card {
       background: #fff;
       width: 100%; height: 100%;
-      min-width: 600px; min-height: 360px;
+      min-width: 700px; min-height: 360px;
       display: flex; flex-direction: column;
     }
 

@@ -451,24 +451,30 @@
     }
     .hist-tag-editor-suggestions .suggestion-item:hover { background: #f0f4ff; }
 
-    /* 情報を編集 パネル */
+    /* 情報を編集 オーバーレイ */
     .hist-info-editor {
-      margin-top: 5px; background: rgba(0,0,0,0.5);
-      border-radius: 6px; padding: 7px 8px;
-      display: none; flex-direction: column; gap: 6px;
-      color: #fff; font-size: 11px;
+      display: none; position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.65);
+      align-items: center; justify-content: center;
+    }
+    .hist-info-editor.open { display: flex; }
+    .hist-info-editor-inner {
+      background: #263545; border-radius: 10px;
+      padding: 18px 22px; max-width: 500px; width: 92%;
+      max-height: 85vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+      color: #fff; font-size: 12px;
+    }
+    .hist-info-editor-title {
+      font-size: 13px; font-weight: 700; color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 8px; margin-bottom: 2px;
     }
     .hist-info-editor-preview {
       display: flex; justify-content: center;
     }
-    .hist-info-preview-btn {
-      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.35);
-      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
-      padding: 3px 10px; font-family: inherit; transition: background .1s;
-    }
-    .hist-info-preview-btn:hover { background: rgba(255,255,255,0.28); }
     .hist-info-thumb {
-      max-width: 100%; max-height: 100px; border-radius: 4px;
+      max-width: 100%; max-height: 140px; border-radius: 6px;
       object-fit: contain; background: rgba(0,0,0,.3);
     }
     .hist-info-field-group {

@@ -2153,32 +2153,35 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
       </div>
       <div class="hist-info-editor">
-        <div class="hist-info-editor-preview">
-          <button class="hist-info-preview-btn" style="display:none;">🔍 プレビュー</button>
-        </div>
-        <div class="hist-info-field-group">
-          <div class="hist-info-field-label">🏷️ タグ</div>
-          <div class="hist-tag-editor-chips"></div>
-          <div class="hist-tag-editor-input-row">
-            <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
-            <div class="hist-tag-editor-suggestions"></div>
+        <div class="hist-info-editor-inner">
+          <div class="hist-info-editor-title">✏️ 情報を編集</div>
+          <div class="hist-info-editor-preview">
+            <img class="hist-info-thumb" src="" alt="" style="display:none;" />
           </div>
-        </div>
-        <div class="hist-info-field-group">
-          <div class="hist-info-field-label">✏️ 作者</div>
-          <div class="hist-author-chips"></div>
-          <div class="hist-author-input-row">
-            <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" />
-            <div class="hist-author-suggestions"></div>
+          <div class="hist-info-field-group">
+            <div class="hist-info-field-label">🏷️ タグ</div>
+            <div class="hist-tag-editor-chips"></div>
+            <div class="hist-tag-editor-input-row">
+              <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
+              <div class="hist-tag-editor-suggestions"></div>
+            </div>
           </div>
-        </div>
-        <div class="hist-info-field-group">
-          <div class="hist-info-field-label">📁 保存先情報</div>
-          <input type="text" class="hist-path-input" placeholder="保存先パス" />
-        </div>
-        <div class="hist-info-editor-actions">
-          <button class="hist-info-editor-cancel">✕ キャンセル</button>
-          <button class="hist-info-editor-save">✔ 保存</button>
+          <div class="hist-info-field-group">
+            <div class="hist-info-field-label">✏️ 作者</div>
+            <div class="hist-author-chips"></div>
+            <div class="hist-author-input-row">
+              <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" />
+              <div class="hist-author-suggestions"></div>
+            </div>
+          </div>
+          <div class="hist-info-field-group">
+            <div class="hist-info-field-label">📁 保存先情報</div>
+            <input type="text" class="hist-path-input" placeholder="保存先パス" />
+          </div>
+          <div class="hist-info-editor-actions">
+            <button class="hist-info-editor-cancel">✕ キャンセル</button>
+            <button class="hist-info-editor-save">✔ 保存</button>
+          </div>
         </div>
       </div>
     </div>`;
@@ -2213,7 +2216,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ── 情報を編集 パネル ──────────────────────────────────────────
   const infoEditBtn     = card.querySelector(".hist-card-btn.info-edit");
   const infoEditor      = card.querySelector(".hist-info-editor");
-  const infoPreviewBtn  = card.querySelector(".hist-info-preview-btn");
+  const infoThumb       = card.querySelector(".hist-info-thumb");
   const editorChips     = card.querySelector(".hist-tag-editor-chips");
   const editorInput     = card.querySelector(".hist-tag-editor-input");
   const editorSuggestions = card.querySelector(".hist-tag-editor-suggestions");
@@ -2308,44 +2311,40 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ---- パネル開閉 ----
   infoEditBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const isOpen = infoEditor.style.display === "flex";
-    infoEditor.style.display = isOpen ? "none" : "flex";
-    if (!isOpen) {
-      // 現在値でリセット
-      pendingTags    = new Set(entry.tags || []);
-      pendingAuthors = [...getEntryAuthors(entry)];
-      pathInput.value = primary || "";
-      renderEditorChips();
-      renderAuthorEditorChips();
-      editorInput.value = "";
-      editorSuggestions.style.display = "none";
-      authorInput.value = "";
-      authorSugEl.style.display = "none";
-      // サムネイル取得→プレビューボタン有効化
-      const imgEl = card.querySelector(".hist-card-thumb, img.hist-card-thumb");
-      if (imgEl?.src) {
-        infoPreviewBtn.dataset.dataUrl = imgEl.src;
-        infoPreviewBtn.style.display = "";
-      } else if (entry.thumbId) {
-        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-          .then(r => { if (r?.dataUrl) { infoPreviewBtn.dataset.dataUrl = r.dataUrl; infoPreviewBtn.style.display = ""; } })
-          .catch(() => {});
-      }
-      editorInput.focus();
+    const isOpen = infoEditor.classList.contains("open");
+    if (isOpen) { infoEditor.classList.remove("open"); return; }
+    // 現在値でリセット
+    pendingTags    = new Set(entry.tags || []);
+    pendingAuthors = [...getEntryAuthors(entry)];
+    pathInput.value = primary || "";
+    renderEditorChips();
+    renderAuthorEditorChips();
+    editorInput.value = "";
+    editorSuggestions.style.display = "none";
+    authorInput.value = "";
+    authorSugEl.style.display = "none";
+    // サムネイル取得→インライン表示
+    const imgEl = card.querySelector(".hist-card-thumb, img.hist-card-thumb");
+    if (imgEl?.src) {
+      infoThumb.src = imgEl.src;
+      infoThumb.style.display = "";
+    } else if (entry.thumbId) {
+      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+        .then(r => { if (r?.dataUrl) { infoThumb.src = r.dataUrl; infoThumb.style.display = ""; } })
+        .catch(() => {});
     }
+    infoEditor.classList.add("open");
+    editorInput.focus();
   });
 
   infoCancelBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    infoEditor.style.display = "none";
+    infoEditor.classList.remove("open");
   });
 
-  infoPreviewBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const dataUrl = infoPreviewBtn.dataset.dataUrl;
-    if (!dataUrl) return;
-    const gIdx = _historyData.findIndex(h => h.id === entry.id);
-    showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
+  // オーバーレイ背景クリックで閉じる
+  infoEditor.addEventListener("click", (e) => {
+    if (e.target === infoEditor) infoEditor.classList.remove("open");
   });
 
   // ---- タグ入力配線 ----
@@ -2357,7 +2356,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       const val = editorInput.value.trim();
       if (val) { pendingTags.add(val); editorInput.value = ""; editorSuggestions.style.display = "none"; renderEditorChips(); }
     } else if (e.key === "Escape") {
-      infoEditor.style.display = "none";
+      infoEditor.classList.remove("open");
     }
   });
 
@@ -2404,7 +2403,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       _historyData  = history;
       globalTags    = [...gTagSet];
       globalAuthors = [...gAuthorSet];
-      infoEditor.style.display = "none";
+      infoEditor.classList.remove("open");
       renderHistoryGrid();
       showStatus("情報を保存しました ✔");
     }

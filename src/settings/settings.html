@@ -443,6 +443,79 @@
     }
     .hist-tag-editor-suggestions .suggestion-item:hover { background: #f0f4ff; }
 
+    /* 情報を編集 パネル */
+    .hist-info-editor {
+      margin-top: 5px; background: rgba(0,0,0,0.5);
+      border-radius: 6px; padding: 7px 8px;
+      display: none; flex-direction: column; gap: 6px;
+      color: #fff; font-size: 11px;
+    }
+    .hist-info-editor-preview {
+      display: flex; justify-content: center;
+    }
+    .hist-info-thumb {
+      max-width: 100%; max-height: 100px; border-radius: 4px;
+      object-fit: contain; background: rgba(0,0,0,.3);
+    }
+    .hist-info-field-group {
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .hist-info-field-label {
+      font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600;
+    }
+    .hist-author-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 16px;
+    }
+    .hist-author-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(200,220,255,0.25); color: #d0e8ff;
+      border-radius: 10px; padding: 1px 6px; font-size: 10px;
+    }
+    .hist-author-chip button {
+      background: none; border: none; cursor: pointer;
+      color: rgba(200,200,255,0.7); font-size: 11px; padding: 0 0 0 2px; line-height: 1;
+    }
+    .hist-author-chip button:hover { color: #faa; }
+    .hist-author-input-row {
+      display: flex; align-items: center; gap: 4px; position: relative;
+    }
+    .hist-author-input {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; color: #fff; font-size: 10px;
+      padding: 2px 6px; font-family: inherit; outline: none; flex: 1; min-width: 0;
+    }
+    .hist-author-input::placeholder { color: rgba(255,255,255,0.5); }
+    .hist-author-input:focus { border-color: rgba(255,255,255,0.7); }
+    .hist-author-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 100px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px;
+    }
+    .hist-path-input {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; color: #fff; font-size: 10px;
+      padding: 2px 6px; font-family: inherit; outline: none; width: 100%; box-sizing: border-box;
+    }
+    .hist-path-input::placeholder { color: rgba(255,255,255,0.5); }
+    .hist-path-input:focus { border-color: rgba(255,255,255,0.7); }
+    .hist-info-editor-actions {
+      display: flex; gap: 5px; justify-content: flex-end; margin-top: 2px;
+    }
+    .hist-info-editor-cancel {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; cursor: pointer; color: rgba(255,255,255,0.7); font-size: 10px;
+      padding: 2px 8px; font-family: inherit;
+    }
+    .hist-info-editor-cancel:hover { background: rgba(255,255,255,0.2); }
+    .hist-info-editor-save {
+      background: rgba(100,200,100,0.3); border: 1px solid rgba(100,200,100,0.5);
+      border-radius: 4px; cursor: pointer; color: #aeffa0; font-size: 10px;
+      padding: 2px 8px; font-family: inherit; font-weight: 600;
+    }
+    .hist-info-editor-save:hover { background: rgba(100,200,100,0.5); }
+
     /* 作者タブ */
     .author-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
     .author-empty { padding: 24px; text-align: center; font-size: 12px; color: #bbb; }
@@ -718,6 +791,33 @@
             <div style="font-size:12px;color:#888;margin-top:2px;">▶ ボタンで次ページへ進む（写真・横書きコンテンツ向け）</div>
           </div>
         </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存ウィンドウの表示件数</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          保存ウィンドウの左カラムに表示する「直近タグ」と「ブックマーク」の最大件数を設定します。
+        </div>
+        <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+            直近タグ：
+            <select id="recent-tag-count-select" style="font-size:12px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 6px;font-family:inherit;">
+              <option value="20">20件</option>
+              <option value="50">50件</option>
+              <option value="100">100件</option>
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+            ブックマーク：
+            <select id="bookmark-count-select" style="font-size:12px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 6px;font-family:inherit;">
+              <option value="20">20件</option>
+              <option value="50">50件</option>
+              <option value="100">100件</option>
+            </select>
+          </label>
+        </div>
       </div>
     </div>
 

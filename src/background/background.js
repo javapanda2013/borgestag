@@ -305,7 +305,7 @@ async function listDir(path) {
 // 保存処理
 // ----------------------------------------------------------------
 async function handleSave(payload) {
-  const { imageUrl, filename, tags, subTags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・saveTagRecord用（サブタグ含む）
   const fullPath = `${savePath}\\${filename}`;
@@ -341,8 +341,10 @@ async function handleSave(payload) {
     const effectiveThumbW = thumbDataUrl ? thumbWidth  : (res.thumbWidth  || null);
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (res.thumbHeight || null);
 
+    const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean)
+      : (author ? [String(author)] : []);
     await addSaveHistory({
-      imageUrl, filename, savePath, tags: allTags, author: author || "", pageUrl,
+      imageUrl, filename, savePath, tags: allTags, authors: resolvedAuthors, pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -1021,7 +1023,7 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 // ----------------------------------------------------------------
 
 async function handleSaveMulti(payload) {
-  const { imageUrl, filename, tags, subTags, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -1067,8 +1069,10 @@ async function handleSaveMulti(payload) {
       || (pyThumbData ? pyThumbData.dataUrl : null);
     const effectiveThumbW = thumbDataUrl ? thumbWidth  : (pyThumbData?.w  || null);
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (pyThumbData?.h || null);
+    const resolvedAuthorsMulti = Array.isArray(authors) ? authors.filter(Boolean)
+      : (author ? [String(author)] : []);
     await addSaveHistoryMulti({
-      imageUrl, filename, savePaths: successPaths, tags: allTags, author: author || "", pageUrl,
+      imageUrl, filename, savePaths: successPaths, tags: allTags, authors: resolvedAuthorsMulti, pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -1124,12 +1128,12 @@ async function getStorageSize() {
 }
 
 /** 単一保存先の履歴登録 */
-async function addSaveHistory({ imageUrl, filename, savePath, tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
-  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex });
+async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
+  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex });
 }
 
 /** 複数保存先対応の履歴登録 */
-async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
+async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
   const stored  = await browser.storage.local.get("saveHistory");
   const history = stored.saveHistory || [];
 
@@ -1210,16 +1214,16 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     thumbHeight,
     filename,
     savePaths,
-    tags:         tags   || [],
-    author:       author || "",
+    tags:         tags    || [],
+    authors:      Array.isArray(authors) ? authors.filter(Boolean) : [],
     savedAt:      new Date().toISOString(),
     sessionId:    sessionId     || null,
     sessionIndex: sessionIndex  || null,
   });
 
-  if (author) {
-    await updateGlobalAuthor(author);
-    await updateRecentAuthors(author);
+  for (const a of (Array.isArray(authors) ? authors.filter(Boolean) : [])) {
+    await updateGlobalAuthor(a);
+    await updateRecentAuthors(a);
   }
 
   await browser.storage.local.set({ saveHistory: history });

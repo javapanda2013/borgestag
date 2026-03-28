@@ -1255,7 +1255,7 @@ function buildModalHTML(defaultFilename) {
                 placeholder="🔍 タグで絞り込み" autocomplete="off" />
               <button class="history-filter-clear" id="history-filter-clear" title="クリア">✕</button>
               <input type="text" id="history-author-filter"
-                placeholder="✏️ 作者で絞り込み" autocomplete="off" />
+                placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
               <button class="history-filter-clear" id="history-author-filter-clear" title="クリア">✕</button>
               <select id="history-filter-mode" class="history-filter-mode-select" title="タグ・作者の絞り込みモード">
                 <option value="and">AND</option>
@@ -1333,7 +1333,7 @@ function buildModalHTML(defaultFilename) {
                 </select>
                 <div style="display:flex;flex-direction:column;gap:2px;position:relative;">
                   <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">
-                    <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 作者:</span>
+                    <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 権利者:</span>
                     <div id="author-chips" style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;"></div>
                     <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
                       style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
@@ -1737,11 +1737,11 @@ function setupModalEvents(
         const entryTags = (e.tags || []).map(t => t.toLowerCase());
         const tagMatch = !hasTagFilter || (
           historyFilterMode === "and"
-            ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
-            : filterTokens.some(token => entryTags.some(t => t.includes(token)))
+            ? filterTokens.every(token => entryTags.some(t => t === token))
+            : filterTokens.some(token => entryTags.some(t => t === token))
         );
         const eAuthors = (e.authors || (e.author ? [e.author] : [])).map(a => a.toLowerCase());
-        const authorMatch = !hasAuthFilter || eAuthors.some(a => a.includes(authorQ));
+        const authorMatch = !hasAuthFilter || eAuthors.some(a => a === authorQ);
         // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
         if (hasTagFilter && hasAuthFilter) {
           return historyFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
@@ -2016,7 +2016,7 @@ function setupModalEvents(
                 </div>
               </div>
               <div class="history-info-field-group">
-                <div class="history-info-field-label">✏️ 作者</div>
+                <div class="history-info-field-label">✏️ 権利者</div>
                 <div class="history-info-author-chips"></div>
                 <div class="history-info-author-input-row">
                   <input type="text" class="history-info-author-input"
@@ -4132,9 +4132,10 @@ function setupModalEvents(
   const colResizer = document.getElementById("col-resizer");
   const body       = document.querySelector(".body");
 
-  // 保存済みの幅を復元
+  // 保存済みの幅を復元（異なる解像度モニターでも上限クランプ）
   if (modalSize?.colLeftWidth) {
-    colLeft.style.width = modalSize.colLeftWidth + "px";
+    const maxW = Math.floor(window.innerWidth * 0.5);
+    colLeft.style.width = Math.min(modalSize.colLeftWidth, maxW) + "px";
   }
 
   let resizerDragging = false;
@@ -4179,7 +4180,8 @@ function setupModalEvents(
   const PREVIEW_MAX_H  = 400;
 
   if (modalSize?.previewHeight) {
-    previewEl.style.height = modalSize.previewHeight + "px";
+    const maxH = Math.floor(window.innerHeight * 0.6);
+    previewEl.style.height = Math.min(modalSize.previewHeight, maxH) + "px";
   }
 
   let previewDragging = false;
@@ -4254,7 +4256,8 @@ function setupModalEvents(
       els.forEach(el => wrapper.appendChild(el));
 
       if (heights[id]) {
-        wrapper.style.height = heights[id] + "px";
+        const maxH = Math.floor(window.innerHeight * 0.7);
+        wrapper.style.height = Math.min(heights[id], maxH) + "px";
         wrapper.style.overflow = "hidden";
       }
       wrappers[id] = wrapper;

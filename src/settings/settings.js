@@ -2174,7 +2174,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
             </div>
           </div>
           <div class="hist-info-field-group">
-            <div class="hist-info-field-label">✏️ 作者</div>
+            <div class="hist-info-field-label">✏️ 権利者</div>
             <div class="hist-author-chips"></div>
             <div class="hist-author-input-row">
               <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" />
@@ -2691,7 +2691,10 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
 // 作者タブ
 // ----------------------------------------------------------------
 function setupAuthorsTab() {
-  // タブクリック時に renderAuthorsTab が呼ばれるのでここでは初期化のみ
+  const sortSel = document.getElementById("author-sort-select");
+  if (sortSel) {
+    sortSel.addEventListener("change", () => _renderAuthorList());
+  }
 }
 
 async function renderAuthorsTab() {
@@ -2703,17 +2706,41 @@ async function renderAuthorsTab() {
     browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
     browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
   ]);
-  globalAuthors      = authorsRes.authors                || [];
-  authorDestinations = destsRes.authorDestinations       || {};
+  globalAuthors      = authorsRes.authors          || [];
+  authorDestinations = destsRes.authorDestinations || {};
+
+  _renderAuthorList();
+}
+
+function _renderAuthorList() {
+  const list       = document.getElementById("author-list");
+  const countLabel = document.getElementById("author-count-label");
+  const sortSel    = document.getElementById("author-sort-select");
+  if (!list) return;
 
   list.innerHTML = "";
 
+  if (countLabel) countLabel.textContent = `${globalAuthors.length} 件`;
+
   if (globalAuthors.length === 0) {
-    list.innerHTML = `<div style="color:#888;font-size:13px;padding:8px">作者がまだ登録されていません。保存ダイアログで作者名を入力すると自動的に登録されます。</div>`;
+    list.innerHTML = `<div style="color:#888;font-size:13px;padding:8px">権利者がまだ登録されていません。保存ダイアログで権利者名を入力すると自動的に登録されます。</div>`;
     return;
   }
 
-  globalAuthors.forEach(author => {
+  const sortVal = sortSel?.value || "registered";
+  const sorted  = [...globalAuthors].sort((a, b) => {
+    switch (sortVal) {
+      case "registered":      return globalAuthors.indexOf(a) - globalAuthors.indexOf(b);
+      case "registered-desc": return globalAuthors.indexOf(b) - globalAuthors.indexOf(a);
+      case "name":            return a.localeCompare(b, "ja");
+      case "name-desc":       return b.localeCompare(a, "ja");
+      case "count-desc":      return (authorDestinations[b]?.length || 0) - (authorDestinations[a]?.length || 0);
+      case "count-asc":       return (authorDestinations[a]?.length || 0) - (authorDestinations[b]?.length || 0);
+      default:                return 0;
+    }
+  });
+
+  sorted.forEach(author => {
     const row = _buildAuthorRow(author);
     list.appendChild(row);
   });
@@ -2800,7 +2827,7 @@ function _buildAuthorRow(author) {
     // author 変数を更新（クロージャの参照を更新するため row.dataset を使用）
     row.dataset.author = newName;
     cancelRename();
-    showStatus("作者名を変更しました");
+    showStatus("権利者名を変更しました");
   });
 
   const toggleBtn = document.createElement("button");
@@ -2810,7 +2837,7 @@ function _buildAuthorRow(author) {
 
   const delBtn = document.createElement("button");
   delBtn.className = "hist-card-btn del delete-guarded";
-  delBtn.style.cssText = "font-size:11px;padding:2px 7px;margin-left:auto;";
+  delBtn.style.cssText = "font-size:11px;padding:2px 7px;margin-left:auto;width:auto;flex-shrink:0;";
   delBtn.textContent = "削除";
 
   header.appendChild(nameEl);
@@ -2901,7 +2928,7 @@ function _buildAuthorRow(author) {
   delBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     const currentName = row.dataset.author || author;
-    if (!confirm(`「${currentName}」を作者一覧から削除しますか？`)) return;
+    if (!confirm(`「${currentName}」を権利者一覧から削除しますか？`)) return;
     globalAuthors = globalAuthors.filter(a => a !== currentName);
     delete authorDestinations[currentName];
     await Promise.all([
@@ -2909,7 +2936,7 @@ function _buildAuthorRow(author) {
       browser.storage.local.set({ globalAuthors }),
     ]);
     row.remove();
-    showStatus("作者を削除しました");
+    showStatus("権利者を削除しました");
   });
 
   row.appendChild(header);

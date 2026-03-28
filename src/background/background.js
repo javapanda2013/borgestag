@@ -604,11 +604,11 @@ async function updateRecentSubTags(tags) {
 async function updateRecentTags(tags) {
   const stored = await browser.storage.local.get("recentTags");
   const current = stored.recentTags || [];
-  // 使ったタグを先頭に挿入、既存の同タグは除去、20件上限
+  // 使ったタグを先頭に挿入、既存の同タグは除去、100件上限（設定画面の最大表示件数に合わせる）
   const next = [
     ...tags,
     ...current.filter((t) => !tags.includes(t)),
-  ].slice(0, 20);
+  ].slice(0, 100);
   await browser.storage.local.set({ recentTags: next });
 }
 

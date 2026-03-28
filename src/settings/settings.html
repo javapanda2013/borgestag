@@ -684,7 +684,7 @@
     <button class="tab-btn"        data-tab="bookmarks">⭐ ブックマーク</button>
     <button class="tab-btn"        data-tab="tags">🏷 タグ・保存先</button>
     <button class="tab-btn"        data-tab="history">📋 保存履歴</button>
-    <button class="tab-btn"        data-tab="authors">👤 作者</button>
+    <button class="tab-btn"        data-tab="authors">👤 権利者</button>
     <button class="tab-btn"        data-tab="sns">🔗 SNS連携</button>
   </div>
 
@@ -840,6 +840,9 @@
               <option value="100">100件</option>
             </select>
           </label>
+          <div style="font-size:11px;color:#888;margin-top:2px;width:100%;">
+            ※ 件数を減らしてもストレージ上の保存データは削除されません
+          </div>
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
             ブックマーク：
             <select id="bookmark-count-select" style="font-size:12px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 6px;font-family:inherit;">
@@ -941,8 +944,8 @@
           </select>
           <input type="text" id="hist-filter" placeholder="🔍 タグで絞り込み（スペース区切りで複数）" autocomplete="off" />
           <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
-          <input type="text" id="hist-author-filter" placeholder="✏️ 作者で絞り込み" autocomplete="off" />
-          <button id="hist-author-filter-clear" class="hist-btn-sm" title="作者フィルタークリア" style="display:none">✕</button>
+          <input type="text" id="hist-author-filter" placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
+          <button id="hist-author-filter-clear" class="hist-btn-sm" title="権利者フィルタークリア" style="display:none">✕</button>
         </div>
       </div>
     </div>
@@ -959,7 +962,19 @@
   <div class="tab-panel" id="tab-authors">
     <div>
       <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
-        作者別 保存先管理
+        権利者別 保存先管理
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;color:#555">
+          <span id="author-count-label" style="color:#888;font-size:11px;"></span>
+          <label for="author-sort-select">並び順</label>
+          <select id="author-sort-select" style="font-size:12px;padding:3px 6px;border:1px solid #ccc;border-radius:5px;font-family:inherit">
+            <option value="registered">登録順（古い順）</option>
+            <option value="registered-desc">登録順（新しい順）</option>
+            <option value="name">名前順（昇順）</option>
+            <option value="name-desc">名前順（降順）</option>
+            <option value="count-desc">保存先が多い順</option>
+            <option value="count-asc">保存先が少ない順</option>
+          </select>
+        </div>
       </div>
       <div class="author-list" id="author-list">
         <div class="author-empty">読み込み中…</div>

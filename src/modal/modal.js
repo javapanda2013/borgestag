@@ -871,6 +871,8 @@ function buildModalHTML(defaultFilename) {
     }
     .history-pager-btn:disabled { opacity: .4; cursor: default; }
     .history-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .history-pager-btn.current { background: #4a90e2; color: #fff; border-color: #3a7fd2; }
+    .history-pager-dots { color: #aaa; font-size: 11px; padding: 0 2px; user-select: none; }
     .history-pager-info { color: #888; white-space: nowrap; }
     .history-page-size-select {
       border: 1px solid #c8d0e8; border-radius: 4px; padding: 1px 3px;
@@ -1018,6 +1020,72 @@ function buildModalHTML(defaultFilename) {
     }
     .history-btn:hover { background: rgba(255,255,255,0.32); }
     .history-btn-addtag { flex: 0 0 auto; padding: 4px 6px; }
+    .history-btn-info-edit { flex: 0 0 auto; padding: 4px 6px; }
+
+    /* 履歴タイルの情報編集パネル */
+    .history-info-editor {
+      margin-top: 5px; background: rgba(0,0,0,0.5);
+      border-radius: 6px; padding: 7px 8px;
+      display: none; flex-direction: column; gap: 5px;
+      color: #fff; font-size: 11px;
+    }
+    .history-info-editor.visible { display: flex; }
+    .history-info-field-group { display: flex; flex-direction: column; gap: 3px; }
+    .history-info-field-label { font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600; }
+    .history-info-author-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 16px;
+    }
+    .history-info-author-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(200,220,255,0.25); color: #d0e8ff;
+      border-radius: 10px; padding: 1px 6px; font-size: 10px;
+    }
+    .history-info-author-chip button {
+      background: none; border: none; cursor: pointer;
+      color: rgba(200,200,255,0.7); font-size: 11px; padding: 0 0 0 2px; line-height: 1;
+    }
+    .history-info-author-chip button:hover { color: #faa; }
+    .history-info-author-input-row {
+      display: flex; align-items: center; gap: 4px; position: relative;
+    }
+    .history-info-author-input {
+      flex: 1; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px;
+      background: rgba(255,255,255,0.15); color: #fff; font-size: 11px;
+      padding: 2px 6px; outline: none; font-family: inherit;
+    }
+    .history-info-author-input::placeholder { color: rgba(255,255,255,0.5); }
+    .history-info-author-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0; border-radius: 5px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.2); max-height: 120px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px; font-size: 11px;
+    }
+    .history-info-author-suggestions.visible { display: block; }
+    .history-info-path-display {
+      font-size: 10px; color: rgba(255,255,255,0.6); word-break: break-all;
+      background: rgba(255,255,255,0.08); border-radius: 3px; padding: 2px 5px;
+    }
+    .history-info-editor-actions {
+      display: flex; gap: 5px; justify-content: flex-end; align-items: center; margin-top: 2px;
+    }
+    .history-info-preview-btn {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
+      padding: 2px 8px; font-family: inherit; margin-right: auto;
+    }
+    .history-info-preview-btn:hover { background: rgba(255,255,255,0.28); }
+    .history-info-editor-cancel {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; cursor: pointer; color: rgba(255,255,255,0.7); font-size: 10px;
+      padding: 2px 8px; font-family: inherit;
+    }
+    .history-info-editor-cancel:hover { background: rgba(255,255,255,0.2); }
+    .history-info-editor-save {
+      background: rgba(100,200,100,0.3); border: 1px solid rgba(100,200,100,0.5);
+      border-radius: 4px; cursor: pointer; color: #aeffa0; font-size: 10px;
+      padding: 2px 8px; font-family: inherit; font-weight: 600;
+    }
+    .history-info-editor-save:hover { background: rgba(100,200,100,0.5); }
 
     /* 履歴タイルのインラインタグエディタ */
     .history-tag-editor {
@@ -1556,8 +1624,8 @@ function setupModalEvents(
   let _histPage     = 0;   // 現在ページ（0始まり）
   let _histPageSize = 100; // 1ページの表示件数
   // ストレージから件数設定を非同期で読み込む
-  browser.storage.local.get("historyPageSize").then(({ historyPageSize }) => {
-    _histPageSize = historyPageSize || 100;
+  browser.storage.local.get("modalHistoryPageSize").then(({ modalHistoryPageSize }) => {
+    _histPageSize = modalHistoryPageSize || 100;
   }).catch(() => {});
 
   // 絞り込み入力欄の制御
@@ -1708,29 +1776,63 @@ function setupModalEvents(
 
   function renderHistoryPager(total) {
     const totalPages = Math.max(1, Math.ceil(total / _histPageSize));
-    const pagerHtml = total <= _histPageSize ? "" : `
-      <button class="history-pager-btn" id="history-pager-prev" ${_histPage === 0 ? "disabled" : ""}>◀ 前へ</button>
-      <span class="history-pager-info">${_histPage + 1} / ${totalPages} ページ</span>
-      <button class="history-pager-btn" id="history-pager-next" ${_histPage >= totalPages - 1 ? "disabled" : ""}>次へ ▶</button>
-      <select class="history-page-size-select" id="history-page-size-select" title="表示件数">
-        ${[20,50,100,200].map(n => `<option value="${n}"${n === _histPageSize ? " selected" : ""}>${n}件</option>`).join("")}
-      </select>`;
+
+    function buildPager() {
+      const frag = document.createDocumentFragment();
+      if (total <= _histPageSize) return frag;
+
+      const makeBtn = (p) => {
+        const btn = document.createElement("button");
+        btn.className = "history-pager-btn" + (p === _histPage ? " current" : "");
+        btn.textContent = String(p + 1);
+        btn.disabled = (p === _histPage);
+        btn.addEventListener("click", () => { _histPage = p; renderHistory(); });
+        return btn;
+      };
+      const makeDots = () => {
+        const s = document.createElement("span");
+        s.className = "history-pager-dots";
+        s.textContent = "…";
+        return s;
+      };
+
+      if (totalPages <= 5) {
+        for (let p = 0; p < totalPages; p++) frag.appendChild(makeBtn(p));
+      } else {
+        frag.appendChild(makeBtn(0));
+        const rStart = Math.max(1, _histPage - 2);
+        const rEnd   = Math.min(totalPages - 2, _histPage + 2);
+        if (rStart > 1) frag.appendChild(makeDots());
+        for (let p = rStart; p <= rEnd; p++) frag.appendChild(makeBtn(p));
+        if (rEnd < totalPages - 2) frag.appendChild(makeDots());
+        frag.appendChild(makeBtn(totalPages - 1));
+      }
+
+      const sizeSelect = document.createElement("select");
+      sizeSelect.className = "history-page-size-select";
+      sizeSelect.title = "表示件数";
+      [20, 50, 100, 200].forEach(n => {
+        const opt = document.createElement("option");
+        opt.value = String(n);
+        opt.textContent = `${n}件`;
+        if (n === _histPageSize) opt.selected = true;
+        sizeSelect.appendChild(opt);
+      });
+      sizeSelect.addEventListener("change", (e) => {
+        _histPageSize = parseInt(e.target.value);
+        _histPage = 0;
+        browser.storage.local.set({ modalHistoryPageSize: _histPageSize }).catch(() => {});
+        renderHistory();
+      });
+      frag.appendChild(sizeSelect);
+      return frag;
+    }
 
     ["history-pager-top", "history-pager-bottom"].forEach(id => {
       const el = document.getElementById(id);
-      if (el) {
-        el.innerHTML = pagerHtml;
-        if (pagerHtml) {
-          el.querySelector("#history-pager-prev")?.addEventListener("click", () => { _histPage--; renderHistory(); });
-          el.querySelector("#history-pager-next")?.addEventListener("click", () => { _histPage++; renderHistory(); });
-          el.querySelector("#history-page-size-select")?.addEventListener("change", (e) => {
-            _histPageSize = parseInt(e.target.value);
-            _histPage = 0;
-            browser.storage.local.set({ historyPageSize: _histPageSize }).catch(() => {});
-            renderHistory();
-          });
-        }
-      }
+      if (!el) return;
+      el.innerHTML = "";
+      el.appendChild(buildPager());
     });
   }
 
@@ -1878,15 +1980,35 @@ function setupModalEvents(
             <button class="history-btn history-btn-nav" title="${escapeHtml(pathTitle)}">
               🧭 移動
             </button>
-            <button class="history-btn history-btn-addtag" title="タグを追加">🏷️ タグ追加</button>
+            <button class="history-btn history-btn-info-edit" title="情報を編集">✏️ 情報を編集</button>
           </div>
-          <div class="history-tag-editor">
-            <div class="history-tag-editor-chips"></div>
-            <div class="history-tag-editor-input-row">
-              <input type="text" class="history-tag-editor-input"
-                placeholder="タグを入力..." autocomplete="off" />
-              <button class="history-tag-editor-confirm">✔ 保存</button>
-              <div class="history-tag-suggestions"></div>
+          <div class="history-info-editor">
+            <div class="history-info-field-group">
+              <div class="history-info-field-label">🏷️ タグ</div>
+              <div class="history-tag-editor-chips"></div>
+              <div class="history-tag-editor-input-row">
+                <input type="text" class="history-tag-editor-input"
+                  placeholder="タグを入力..." autocomplete="off" />
+                <div class="history-tag-suggestions"></div>
+              </div>
+            </div>
+            <div class="history-info-field-group">
+              <div class="history-info-field-label">✏️ 作者</div>
+              <div class="history-info-author-chips"></div>
+              <div class="history-info-author-input-row">
+                <input type="text" class="history-info-author-input"
+                  placeholder="追加(Enter)..." autocomplete="off" />
+                <div class="history-info-author-suggestions"></div>
+              </div>
+            </div>
+            <div class="history-info-field-group">
+              <div class="history-info-field-label">📁 保存先情報</div>
+              <div class="history-info-path-display"></div>
+            </div>
+            <div class="history-info-editor-actions">
+              <button class="history-info-preview-btn" style="display:none">🔍 プレビュー</button>
+              <button class="history-info-editor-cancel">✕</button>
+              <button class="history-info-editor-save">✔ 保存</button>
             </div>
           </div>
         </div>`;
@@ -1971,147 +2093,220 @@ function setupModalEvents(
         handleHistoryAction(paths, "nav", item);
       });
 
-      // ---- 🏷️ タグ追加ボタン ----
-      const addTagBtn    = item.querySelector(".history-btn-addtag");
-      const tagEditor    = item.querySelector(".history-tag-editor");
-      const chipsArea    = item.querySelector(".history-tag-editor-chips");
-      const tagEditorIn  = item.querySelector(".history-tag-editor-input");
-      const confirmBtn   = item.querySelector(".history-tag-editor-confirm");
-      const suggestPanel = item.querySelector(".history-tag-suggestions");
+      // ---- ✏️ 情報を編集ボタン ----
+      const infoEditBtn   = item.querySelector(".history-btn-info-edit");
+      const infoEditor    = item.querySelector(".history-info-editor");
+      const tagChipsArea  = item.querySelector(".history-tag-editor-chips");
+      const tagEditorIn   = item.querySelector(".history-tag-editor-input");
+      const tagSugPanel   = item.querySelector(".history-tag-suggestions");
+      const authChipsArea = item.querySelector(".history-info-author-chips");
+      const authInput     = item.querySelector(".history-info-author-input");
+      const authSugPanel  = item.querySelector(".history-info-author-suggestions");
+      const pathDisplay   = item.querySelector(".history-info-path-display");
+      const previewBtn    = item.querySelector(".history-info-preview-btn");
+      const cancelBtn     = item.querySelector(".history-info-editor-cancel");
+      const saveBtn       = item.querySelector(".history-info-editor-save");
 
-      let editorTags = [...(entry.tags || [])];
+      let pendingTags    = new Set(entry.tags || []);
+      let pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
 
-      function renderEditorChips() {
-        chipsArea.innerHTML = "";
-        for (const t of editorTags) {
+      function renderInfoTagChips() {
+        tagChipsArea.innerHTML = "";
+        pendingTags.forEach(t => {
           const chip = document.createElement("span");
           chip.className = "history-tag-editor-chip";
           chip.innerHTML = `${escapeHtml(t)}<button type="button" title="削除">×</button>`;
           chip.querySelector("button").addEventListener("click", (ev) => {
             ev.stopPropagation();
-            editorTags = editorTags.filter(x => x !== t);
-            renderEditorChips();
+            pendingTags.delete(t);
+            renderInfoTagChips();
           });
-          chipsArea.appendChild(chip);
-        }
+          tagChipsArea.appendChild(chip);
+        });
       }
 
-      function showEditorSuggestions(q) {
+      function showInfoTagSuggestions(q) {
         const matches = q
-          ? existingTags.filter(t => tagMatches(t, q) && !editorTags.includes(t))
-          : existingTags.filter(t => !editorTags.includes(t));
-        if (!matches.length) { hideEditorSuggestions(); return; }
-        suggestPanel.innerHTML = matches.slice(0, 8)
+          ? existingTags.filter(t => tagMatches(t, q) && !pendingTags.has(t))
+          : existingTags.filter(t => !pendingTags.has(t));
+        if (!matches.length) { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; return; }
+        tagSugPanel.innerHTML = matches.slice(0, 8)
           .map(t => `<div class="suggestion-item" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)
           .join("");
-        suggestPanel.classList.add("visible");
-        suggestPanel.querySelectorAll(".suggestion-item").forEach(el => {
+        tagSugPanel.classList.add("visible");
+        tagSugPanel.querySelectorAll(".suggestion-item").forEach(el => {
           el.addEventListener("mousedown", (ev) => {
             ev.preventDefault();
-            if (!editorTags.includes(el.dataset.tag)) {
-              editorTags.push(el.dataset.tag);
-              renderEditorChips();
-            }
+            pendingTags.add(el.dataset.tag);
+            renderInfoTagChips();
             tagEditorIn.value = "";
-            hideEditorSuggestions();
-            tagEditorIn.focus();
+            tagSugPanel.classList.remove("visible");
+            tagSugPanel.innerHTML = "";
           });
         });
       }
 
-      function hideEditorSuggestions() {
-        suggestPanel.classList.remove("visible");
-        suggestPanel.innerHTML = "";
+      function renderInfoAuthorChips() {
+        authChipsArea.innerHTML = "";
+        pendingAuthors.forEach(a => {
+          const chip = document.createElement("span");
+          chip.className = "history-info-author-chip";
+          chip.innerHTML = `${escapeHtml(a)}<button type="button" title="削除">×</button>`;
+          chip.querySelector("button").addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            pendingAuthors = pendingAuthors.filter(x => x !== a);
+            renderInfoAuthorChips();
+          });
+          authChipsArea.appendChild(chip);
+        });
       }
 
-      addTagBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const isVisible = tagEditor.classList.contains("visible");
-        // 他の開いているエディタをすべて閉じる
-        document.querySelectorAll(".history-tag-editor.visible").forEach(el => {
-          if (el !== tagEditor) {
-            el.classList.remove("visible");
-            el.closest(".history-item")?.style && (el.closest(".history-item").style.overflow = "");
-          }
+      function showInfoAuthorSuggestions(q) {
+        const matches = (q
+          ? globalAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
+          : globalAuthors
+        ).filter(a => !pendingAuthors.includes(a)).slice(0, 8);
+        if (!matches.length) { authSugPanel.classList.remove("visible"); authSugPanel.innerHTML = ""; return; }
+        authSugPanel.innerHTML = matches.map(a => `<div class="suggestion-item">${escapeHtml(a)}</div>`).join("");
+        authSugPanel.classList.add("visible");
+        authSugPanel.querySelectorAll(".suggestion-item").forEach(el => {
+          el.addEventListener("mousedown", (ev) => {
+            ev.preventDefault();
+            const a = el.textContent;
+            if (!pendingAuthors.includes(a)) { pendingAuthors.push(a); renderInfoAuthorChips(); }
+            authInput.value = "";
+            authSugPanel.classList.remove("visible");
+            authSugPanel.innerHTML = "";
+          });
         });
-        if (isVisible) {
-          tagEditor.classList.remove("visible");
-          item.style.overflow = "";
+      }
+
+      previewBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const dataUrl = previewBtn.dataset.dataUrl;
+        if (!dataUrl) return;
+        const gIdx = safeAll.findIndex(e2 => e2.id === entry.id);
+        showModalLightbox([entry], 0, safeAll, gIdx, false);
+      });
+
+      infoEditBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const isOpen = infoEditor.classList.contains("visible");
+        document.querySelectorAll(".history-info-editor.visible").forEach(el => {
+          if (el !== infoEditor) el.classList.remove("visible");
+        });
+        if (isOpen) {
+          infoEditor.classList.remove("visible");
         } else {
-          editorTags = [...(entry.tags || [])];
-          renderEditorChips();
-          tagEditor.classList.add("visible");
-          item.style.overflow = "visible";
+          pendingTags    = new Set(entry.tags || []);
+          pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
+          renderInfoTagChips();
+          renderInfoAuthorChips();
+          tagEditorIn.value = "";
+          tagSugPanel.classList.remove("visible");
+          authInput.value = "";
+          authSugPanel.classList.remove("visible");
+          pathDisplay.textContent = paths.length > 0 ? paths.join(" / ") : "（保存先なし）";
+          infoEditor.classList.add("visible");
+          // サムネイル取得→プレビューボタン有効化
+          const thumbImg = item.querySelector(".history-thumb");
+          if (thumbImg?.src) {
+            previewBtn.dataset.dataUrl = thumbImg.src;
+            previewBtn.style.display = "";
+          } else if (entry.thumbId) {
+            browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+              .then(({ dataUrl }) => { if (dataUrl) { previewBtn.dataset.dataUrl = dataUrl; previewBtn.style.display = ""; } })
+              .catch(() => {});
+          } else if (entry.thumbnailBase64) {
+            previewBtn.dataset.dataUrl = entry.thumbnailBase64;
+            previewBtn.style.display = "";
+          }
           setTimeout(() => tagEditorIn.focus(), 30);
         }
       });
 
-      tagEditorIn.addEventListener("input", () => {
-        if (tagEditorIn.value) showEditorSuggestions(tagEditorIn.value);
-        else hideEditorSuggestions();
+      cancelBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        infoEditor.classList.remove("visible");
       });
 
-      tagEditorIn.addEventListener("blur", () => setTimeout(hideEditorSuggestions, 150));
-
+      tagEditorIn.addEventListener("input", () => {
+        if (tagEditorIn.value) showInfoTagSuggestions(tagEditorIn.value);
+        else { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }
+      });
+      tagEditorIn.addEventListener("blur", () => setTimeout(() => { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }, 150));
       tagEditorIn.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
           e.preventDefault();
           const val = tagEditorIn.value.trim();
-          if (val && !editorTags.includes(val)) {
-            editorTags.push(val);
-            renderEditorChips();
-          }
+          if (val && !pendingTags.has(val)) { pendingTags.add(val); renderInfoTagChips(); }
           tagEditorIn.value = "";
-          hideEditorSuggestions();
+          tagSugPanel.classList.remove("visible");
         } else if (e.key === "Escape") {
-          tagEditor.classList.remove("visible");
-          item.style.overflow = "";
-          hideEditorSuggestions();
-        } else if (e.key === "Backspace" && !tagEditorIn.value && editorTags.length > 0) {
-          editorTags.pop();
-          renderEditorChips();
+          infoEditor.classList.remove("visible");
+        } else if (e.key === "Backspace" && !tagEditorIn.value && pendingTags.size > 0) {
+          const last = [...pendingTags].at(-1);
+          pendingTags.delete(last);
+          renderInfoTagChips();
         }
       });
 
-      async function saveEditorTags() {
-        const pending = tagEditorIn.value.trim();
-        if (pending && !editorTags.includes(pending)) editorTags.push(pending);
+      authInput.addEventListener("input", () => showInfoAuthorSuggestions(authInput.value.trim()));
+      authInput.addEventListener("blur", () => setTimeout(() => { authSugPanel.classList.remove("visible"); authSugPanel.innerHTML = ""; }, 150));
+      authInput.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const val = authInput.value.trim();
+          if (val && !pendingAuthors.includes(val)) { pendingAuthors.push(val); renderInfoAuthorChips(); }
+          authInput.value = "";
+          authSugPanel.classList.remove("visible");
+        } else if (e.key === "Escape") {
+          infoEditor.classList.remove("visible");
+        }
+      });
+
+      saveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const tagVal = tagEditorIn.value.trim();
+        if (tagVal && !pendingTags.has(tagVal)) pendingTags.add(tagVal);
+        const authVal = authInput.value.trim();
+        if (authVal && !pendingAuthors.includes(authVal)) pendingAuthors.push(authVal);
+        const newTags    = [...pendingTags];
+        const newAuthors = [...pendingAuthors];
         const res = await browser.runtime.sendMessage({
-          type: "UPDATE_HISTORY_ENTRY_TAGS",
-          id:   entry.id,
-          tags: editorTags,
+          type:    "UPDATE_HISTORY_ENTRY",
+          id:      entry.id,
+          tags:    newTags,
+          authors: newAuthors,
         });
         if (res?.ok) {
-          entry.tags = [...editorTags];
+          entry.tags = newTags; entry.authors = newAuthors; delete entry.author;
           const idx = saveHistory.findIndex(h => h.id === entry.id);
-          if (idx !== -1) saveHistory[idx].tags = [...editorTags];
-          // タイルのタグ表示を更新
+          if (idx !== -1) { saveHistory[idx].tags = newTags; saveHistory[idx].authors = newAuthors; delete saveHistory[idx].author; }
+          // タイルのメタ表示を更新
           const metaEl = item.querySelector(".history-meta");
           if (metaEl) {
             const dateSpan = metaEl.querySelector("span");
             metaEl.innerHTML = "";
             if (dateSpan) metaEl.appendChild(dateSpan);
-            for (const t of editorTags) {
-              const span = document.createElement("span");
-              span.className = "history-tag";
-              span.dataset.tag = t;
-              span.textContent = t;
-              metaEl.appendChild(span);
+            for (const a of newAuthors) {
+              const sp = document.createElement("span");
+              sp.className = "history-author"; sp.dataset.author = a;
+              sp.textContent = `✏️ ${a}`; metaEl.appendChild(sp);
+            }
+            for (const t of newTags) {
+              const sp = document.createElement("span");
+              sp.className = "history-tag"; sp.dataset.tag = t;
+              sp.textContent = t; metaEl.appendChild(sp);
             }
           }
-          tagEditor.classList.remove("visible");
-          item.style.overflow = "";
-          tagEditorIn.value = "";
-          showToast(shadow, "✅ タグを更新しました");
+          infoEditor.classList.remove("visible");
+          showToast(shadow, "✅ 情報を更新しました");
         } else {
-          showToast(shadow, "⚠️ タグ更新に失敗しました", true);
+          showToast(shadow, "⚠️ 更新に失敗しました", true);
         }
-      }
-
-      confirmBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        saveEditorTags();
       });
 
       return item;

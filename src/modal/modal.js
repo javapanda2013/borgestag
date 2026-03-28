@@ -3965,6 +3965,9 @@ async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startG
     <button class="mlb-up"   title="前の履歴（全体）" style="${btnStyle}font-size:24px;top:20px;left:50%;">&#8963;</button>
     <button class="mlb-down" title="次の履歴（全体）" style="${btnStyle}font-size:24px;bottom:60px;left:50%;">&#8964;</button>
     <img class="mlb-img" style="max-width:90vw;max-height:85vh;object-fit:contain;border-radius:4px;box-shadow:0 8px 32px rgba(0,0,0,.5);cursor:default;" />
+    <div class="mlb-fallback-note" style="display:none;position:fixed;bottom:52px;left:50%;transform:translateX(-50%);
+      background:rgba(160,80,0,.88);color:#fff;font-size:11px;padding:4px 14px;border-radius:16px;
+      white-space:nowrap;z-index:10001;"></div>
     <div class="mlb-info" style="position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
       background:rgba(0,0,0,.6);color:#fff;font-size:11px;padding:4px 14px;border-radius:16px;
       display:flex;gap:12px;align-items:center;white-space:nowrap;z-index:10001;">
@@ -3976,7 +3979,8 @@ async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startG
   `;
   document.body.appendChild(ov);
 
-  const img        = ov.querySelector(".mlb-img");
+  const img          = ov.querySelector(".mlb-img");
+  const fallbackNote = ov.querySelector(".mlb-fallback-note");
   const counter    = ov.querySelector(".mlb-counter");
   const filename   = ov.querySelector(".mlb-filename");
   const globalLbl  = ov.querySelector(".mlb-global-label");
@@ -4021,8 +4025,14 @@ async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startG
 
   async function loadEntry(entry) {
     img.src = "";
+    fallbackNote.style.display = "none";
     const p = (Array.isArray(entry.savePaths) ? entry.savePaths[0] : entry.savePath) || "";
-    if (!p || !entry.filename) return;
+
+    if (!p || !entry.filename) {
+      await _loadThumbFallback(entry, "保存先情報がありません");
+      return;
+    }
+
     const filePath = p.replace(/[\\/]+$/, "") + "\\" + entry.filename;
     const res = await browser.runtime.sendMessage({ type: "FETCH_FILE_AS_DATAURL", path: filePath });
     if (res?.ok && res.dataUrl) {
@@ -4030,7 +4040,28 @@ async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startG
       img.alt = entry.filename;
       if (img.complete && img.naturalWidth) reposNavBtns();
       else img.onload = () => { reposNavBtns(); img.onload = null; };
+    } else {
+      const reason = res?.error || "ファイルが見つかりません";
+      await _loadThumbFallback(entry, reason);
     }
+  }
+
+  async function _loadThumbFallback(entry, reason) {
+    if (entry.thumbId) {
+      const thumbRes = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+        .catch(() => null);
+      if (thumbRes?.dataUrl) {
+        img.src = thumbRes.dataUrl;
+        img.alt = entry.filename;
+        if (img.complete && img.naturalWidth) reposNavBtns();
+        else img.onload = () => { reposNavBtns(); img.onload = null; };
+        fallbackNote.textContent = `⚠️ ${reason} — サムネイルを表示しています`;
+        fallbackNote.style.display = "";
+        return;
+      }
+    }
+    fallbackNote.textContent = `⚠️ ${reason} — プレビューを表示できません`;
+    fallbackNote.style.display = "";
   }
 
   function updateGroup(idx) {

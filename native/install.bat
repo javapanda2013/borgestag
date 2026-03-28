@@ -25,7 +25,7 @@ set "JSON_DST=%NATIVE_DIR%\image_saver_registered.json"
 
 :: Generate the manifest JSON via Python
 :: (avoids cmd.exe bracket / encoding issues with inline echo)
-python -c "import json,sys; d={'name':'image_saver_host','description':'Image Saver with Tags','path':sys.argv[1],'type':'stdio','allowed_extensions':['image-saver-tags@example.com']}; open(sys.argv[2],'w',encoding='utf-8').write(json.dumps(d,indent=2,ensure_ascii=False))" "%BAT_PATH%" "%JSON_DST%"
+python -c "import json,sys; d={'name':'image_saver_host','description':'BorgesTag','path':sys.argv[1],'type':'stdio','allowed_extensions':['image-saver-tags@example.com']}; open(sys.argv[2],'w',encoding='utf-8').write(json.dumps(d,indent=2,ensure_ascii=False))" "%BAT_PATH%" "%JSON_DST%"
 
 if errorlevel 1 (
     echo [ERROR] Failed to generate JSON manifest. Is Python installed?

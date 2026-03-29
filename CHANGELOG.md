@@ -1,7 +1,16 @@
 # Changelog
 
-このプロジェクトの変更履歴です。  
+このプロジェクトの変更履歴です。
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に基づいています。
+
+---
+
+## [1.10.0] - 2026-03-30
+
+### Added
+- **ファイル名設定（設定画面 > 全般）**：保存時のファイル名にタグ・サブタグ・権利者名を付加するオプションを追加。各項目はチェックボックスで個別にON/OFF可能。付加した値は `-`（ハイフン）で区切られ、ファイル名に使用できない文字（`\ / : * ? " < > |`）は自動除去される
+- `buildFilenameWithMeta` ヘルパー関数を追加（background.js）
+- ファイル名設定（`filenameIncludeTag` / `filenameIncludeSubtag` / `filenameIncludeAuthor`）をエクスポート・インポート対象に追加
 
 ---
 

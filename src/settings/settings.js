@@ -68,6 +68,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupRootPath();
   setupInstantSave();
   setupMinimizeAfterSave();
+  setupFilenameSettings();
   setupBookmarks();
   setupLogs();
   setupHistoryTab();
@@ -495,6 +496,9 @@ async function exportData() {
     "groupReadDirection",
     "instantSaveEnabled",
     "minimizeAfterSave",
+    "filenameIncludeTag",
+    "filenameIncludeSubtag",
+    "filenameIncludeAuthor",
     "settingsHistoryPageSize",
     "recentTagDisplayCount",
     "bookmarkDisplayCount",
@@ -779,6 +783,28 @@ async function importData(e) {
     } catch (err) { logError(`minimizeAfterSave の保存に失敗: ${err.message}`); return; }
   }
 
+  // ---- filenameIncludeTag ----
+  if (parsed.filenameIncludeTag !== undefined) {
+    try {
+      await browser.storage.local.set({ filenameIncludeTag: parsed.filenameIncludeTag });
+      log(`📝 filenameIncludeTag: ${parsed.filenameIncludeTag}`);
+    } catch (err) { logError(`filenameIncludeTag の保存に失敗: ${err.message}`); return; }
+  }
+  // ---- filenameIncludeSubtag ----
+  if (parsed.filenameIncludeSubtag !== undefined) {
+    try {
+      await browser.storage.local.set({ filenameIncludeSubtag: parsed.filenameIncludeSubtag });
+      log(`📝 filenameIncludeSubtag: ${parsed.filenameIncludeSubtag}`);
+    } catch (err) { logError(`filenameIncludeSubtag の保存に失敗: ${err.message}`); return; }
+  }
+  // ---- filenameIncludeAuthor ----
+  if (parsed.filenameIncludeAuthor !== undefined) {
+    try {
+      await browser.storage.local.set({ filenameIncludeAuthor: parsed.filenameIncludeAuthor });
+      log(`📝 filenameIncludeAuthor: ${parsed.filenameIncludeAuthor}`);
+    } catch (err) { logError(`filenameIncludeAuthor の保存に失敗: ${err.message}`); return; }
+  }
+
   // ---- recentTags ----
   if (Array.isArray(parsed.recentTags)) {
     try {
@@ -866,6 +892,7 @@ async function importData(e) {
   renderAll();
   setupRootPath();
   setupInstantSave();
+  setupFilenameSettings();
   // エクスポートパス
   const { exportPath, exportAutoSave } = await browser.storage.local.get(["exportPath", "exportAutoSave"]);
   const pathInput = document.getElementById("export-path-input");
@@ -949,6 +976,26 @@ async function setupMinimizeAfterSave() {
   chk.addEventListener("change", async () => {
     await browser.storage.local.set({ minimizeAfterSave: chk.checked });
   });
+}
+
+// ----------------------------------------------------------------
+// ファイル名設定
+// ----------------------------------------------------------------
+async function setupFilenameSettings() {
+  const chkTag    = document.getElementById("chk-filename-include-tag");
+  const chkSubtag = document.getElementById("chk-filename-include-subtag");
+  const chkAuthor = document.getElementById("chk-filename-include-author");
+  if (!chkTag || !chkSubtag || !chkAuthor) return;
+
+  const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
+    await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
+  chkTag.checked    = !!filenameIncludeTag;    // デフォルトOFF
+  chkSubtag.checked = !!filenameIncludeSubtag; // デフォルトOFF
+  chkAuthor.checked = !!filenameIncludeAuthor; // デフォルトOFF
+
+  chkTag.addEventListener("change",    async () => { await browser.storage.local.set({ filenameIncludeTag:    chkTag.checked    }); });
+  chkSubtag.addEventListener("change", async () => { await browser.storage.local.set({ filenameIncludeSubtag: chkSubtag.checked }); });
+  chkAuthor.addEventListener("change", async () => { await browser.storage.local.set({ filenameIncludeAuthor: chkAuthor.checked }); });
 }
 
 // ----------------------------------------------------------------

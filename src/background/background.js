@@ -304,13 +304,60 @@ async function listDir(path) {
 }
 
 // ----------------------------------------------------------------
+// ファイル名メタデータ付与ヘルパー
+// ----------------------------------------------------------------
+
+/**
+ * ファイル名設定に基づいて、ファイル名にタグ・サブタグ・権利者名を付加する。
+ * ファイル名に使えない文字（\ / : * ? " < > |）は除去する。
+ *
+ * @param {string}   filename  元のファイル名（例: "image.jpg"）
+ * @param {string[]} tags      メインタグ配列
+ * @param {string[]} subTags   サブタグ配列
+ * @param {string[]} authors   権利者名配列
+ * @param {{ filenameIncludeTag: boolean, filenameIncludeSubtag: boolean, filenameIncludeAuthor: boolean }} settings
+ * @returns {string} 新しいファイル名
+ */
+function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
+  const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } = settings;
+  if (!filenameIncludeTag && !filenameIncludeSubtag && !filenameIncludeAuthor) return filename;
+
+  // 拡張子を分離
+  const dotIdx = filename.lastIndexOf(".");
+  const stem = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
+  const ext  = dotIdx > 0 ? filename.slice(dotIdx) : "";
+
+  // ファイル名に使えない文字を除去するヘルパー
+  const sanitize = (s) => s.replace(/[\\/:*?"<>|]/g, "").trim();
+
+  const parts = [];
+  if (filenameIncludeTag    && tags?.length)    parts.push(...tags.map(sanitize).filter(Boolean));
+  if (filenameIncludeSubtag && subTags?.length)  parts.push(...subTags.map(sanitize).filter(Boolean));
+  if (filenameIncludeAuthor && authors?.length)  parts.push(...authors.map(sanitize).filter(Boolean));
+
+  if (parts.length === 0) return filename;
+  return `${stem}-${parts.join("-")}${ext}`;
+}
+
+// ----------------------------------------------------------------
 // 保存処理
 // ----------------------------------------------------------------
 async function handleSave(payload) {
   const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・saveTagRecord用（サブタグ含む）
-  const fullPath = `${savePath}\\${filename}`;
+  const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
+
+  // ファイル名設定に基づいてタグ・サブタグ・権利者名をファイル名に付加
+  const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
+    await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
+  const effectiveFilename = buildFilenameWithMeta(filename, tags || [], subTags || [], resolvedAuthors, {
+    filenameIncludeTag:    !!filenameIncludeTag,
+    filenameIncludeSubtag: !!filenameIncludeSubtag,
+    filenameIncludeAuthor: !!filenameIncludeAuthor,
+  });
+
+  const fullPath = `${savePath}\\${effectiveFilename}`;
 
   addLog("INFO", `保存開始: ${filename}`, `→ ${savePath}`);
 
@@ -343,10 +390,8 @@ async function handleSave(payload) {
     const effectiveThumbW = thumbDataUrl ? thumbWidth  : (res.thumbWidth  || null);
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (res.thumbHeight || null);
 
-    const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean)
-      : (author ? [String(author)] : []);
     await addSaveHistory({
-      imageUrl, filename, savePath, tags: allTags, authors: resolvedAuthors, pageUrl,
+      imageUrl, filename: effectiveFilename, savePath, tags: allTags, authors: resolvedAuthors, pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -499,13 +544,23 @@ async function handleInstantSave(imageUrl, pageUrl) {
     const urlObj = new URL(imageUrl);
     const basename = urlObj.pathname.split("/").pop() || "image.jpg";
     const filename = basename.split("?")[0] || "image.jpg";
-    const fullPath = `${savePath}\\${filename}`;
 
     // 連続保存セッション中はタグ・サブタグを引き継ぎ
     const session = stored.continuousSession;
     const tags    = session?.tags    || [];
     const subTags = session?.subTags || [];
     const allTags = [...new Set([...tags, ...subTags])];
+
+    // ファイル名設定に基づいてタグ・サブタグをファイル名に付加（即保存は権利者なし）
+    const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
+      await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
+    const effectiveFilenameInstant = buildFilenameWithMeta(filename, tags, subTags, [], {
+      filenameIncludeTag:    !!filenameIncludeTag,
+      filenameIncludeSubtag: !!filenameIncludeSubtag,
+      filenameIncludeAuthor: !!filenameIncludeAuthor,
+    });
+
+    const fullPath = `${savePath}\\${effectiveFilenameInstant}`;
 
     const res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
     if (!res.ok) return { success: false, error: res.error };
@@ -527,7 +582,7 @@ async function handleInstantSave(imageUrl, pageUrl) {
 
     // 履歴に追加
     await addSaveHistory({
-      imageUrl, filename, savePath, tags: allTags, pageUrl,
+      imageUrl, filename: effectiveFilenameInstant, savePath, tags: allTags, pageUrl,
       thumbDataUrl, thumbWidth, thumbHeight,
       sessionId: session?.id || null,
       sessionIndex: session ? (session.count + 1) : null,
@@ -1048,13 +1103,24 @@ async function handleSaveMulti(payload) {
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
   }
-  addLog("INFO", `一括保存開始: ${filename}`, `${savePaths.length} 件`);
+
+  // ファイル名設定に基づいてタグ・サブタグ・権利者名をファイル名に付加
+  const resolvedAuthorsMulti = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
+  const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
+    await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
+  const effectiveFilenameMulti = buildFilenameWithMeta(filename, tags || [], subTags || [], resolvedAuthorsMulti, {
+    filenameIncludeTag:    !!filenameIncludeTag,
+    filenameIncludeSubtag: !!filenameIncludeSubtag,
+    filenameIncludeAuthor: !!filenameIncludeAuthor,
+  });
+
+  addLog("INFO", `一括保存開始: ${effectiveFilenameMulti}`, `${savePaths.length} 件`);
 
   const results = [];
   let pyThumbData = null; // Python側で生成したサムネイル（最初の成功分を使用）
   for (const rawPath of savePaths) {
     const savePath = normalizePath(rawPath);
-    const fullPath = `${savePath}\\${filename}`;
+    const fullPath = `${savePath}\\${effectiveFilenameMulti}`;
     try {
       const res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
       if (!res.ok) throw new Error(res.error || "不明なエラー");
@@ -1089,10 +1155,8 @@ async function handleSaveMulti(payload) {
       || (pyThumbData ? pyThumbData.dataUrl : null);
     const effectiveThumbW = thumbDataUrl ? thumbWidth  : (pyThumbData?.w  || null);
     const effectiveThumbH = thumbDataUrl ? thumbHeight : (pyThumbData?.h || null);
-    const resolvedAuthorsMulti = Array.isArray(authors) ? authors.filter(Boolean)
-      : (author ? [String(author)] : []);
     await addSaveHistoryMulti({
-      imageUrl, filename, savePaths: successPaths, tags: allTags, authors: resolvedAuthorsMulti, pageUrl,
+      imageUrl, filename: effectiveFilenameMulti, savePaths: successPaths, tags: allTags, authors: resolvedAuthorsMulti, pageUrl,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,

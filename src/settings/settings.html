@@ -715,6 +715,12 @@
           </label>
         </div>
 
+        <!-- 差分エクスポートオプション -->
+        <label class="export-auto-label" style="margin-top:4px;">
+          <input type="checkbox" id="chk-diff-export" />
+          差分エクスポートモード（前回エクスポート以降の新規エントリのみを対象にする）
+        </label>
+
         <div class="backup-actions">
           <button class="backup-btn export" id="btn-export">⬇ エクスポート（JSONファイル保存）</button>
           <label class="backup-btn import" id="label-import">
@@ -722,6 +728,7 @@
             <input type="file" id="input-import" accept=".json" style="display:none" />
           </label>
         </div>
+        <div class="import-result" id="export-result" style="display:none"></div>
         <div class="import-result" id="import-result"></div>
       </div>
     </div>

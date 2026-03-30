@@ -69,6 +69,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupInstantSave();
   setupMinimizeAfterSave();
   setupFilenameSettings();
+  setupDiffExport();
   setupBookmarks();
   setupLogs();
   setupHistoryTab();
@@ -474,8 +475,27 @@ async function setupBackup() {
 /**
  * storage.local の全データを JSON ファイルとしてダウンロードする。
  * exportPath が設定されていて exportAutoSave が ON の場合は Native 経由で保存。
+ * diffExportEnabled が ON の場合は前回エクスポート以降の差分エントリのみを対象にする。
  */
 async function exportData() {
+  // ---- 進捗表示ヘルパー ----
+  const resultEl = document.getElementById("export-result");
+  const logLines = [];
+  function log(msg) {
+    logLines.push(msg);
+    resultEl.className = "import-result success";
+    resultEl.style.display = "block";
+    resultEl["innerHTML"] = logLines.map(l => escHtml(l)).join("<br>");
+  }
+  function logError(msg) {
+    logLines.push("❌ " + msg);
+    resultEl.className = "import-result error";
+    resultEl.style.display = "block";
+    resultEl["innerHTML"] = logLines.map(l => escHtml(l)).join("<br>");
+  }
+
+  log("⏳ エクスポート準備中...");
+
   // storage.local のバックアップ対象キー
   const stored = await browser.storage.local.get([
     "tagDestinations",
@@ -502,7 +522,10 @@ async function exportData() {
     "settingsHistoryPageSize",
     "recentTagDisplayCount",
     "bookmarkDisplayCount",
+    "diffExportEnabled",
+    "lastExportedAt",
   ]);
+  log("📦 設定データ取得完了");
 
   // IndexedDB のサムネイルも取得
   let idbThumbs = [];
@@ -510,47 +533,83 @@ async function exportData() {
     const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
     if (res?.ok) idbThumbs = res.thumbs;
   } catch {}
+  log(`🖼 サムネイル取得完了（${idbThumbs.length} 件）`);
 
+  // ---- 差分エクスポート処理 ----
+  const isDiff = !!stored.diffExportEnabled && !!stored.lastExportedAt;
+  let exportHistory = stored.saveHistory || [];
+  let exportThumbs  = idbThumbs;
+
+  if (isDiff) {
+    const lastAt = new Date(stored.lastExportedAt);
+    const fullCount = exportHistory.length;
+    exportHistory = exportHistory.filter(entry => entry.savedAt && new Date(entry.savedAt) > lastAt);
+    // 差分エントリで参照されるサムネイルのみに絞る
+    const thumbIdSet = new Set(exportHistory.map(e => e.thumbId).filter(Boolean));
+    exportThumbs = idbThumbs.filter(t => thumbIdSet.has(t.id));
+    log(`🔍 差分: ${exportHistory.length} 件 / 全 ${fullCount} 件（前回エクスポート: ${stored.lastExportedAt.slice(0, 19).replace("T", " ")}）`);
+    if (exportHistory.length === 0) {
+      log("ℹ️ 差分なし（前回エクスポート以降の新規エントリはありません）");
+      return;
+    }
+  }
+
+  // ---- ペイロード生成 ----
+  // 差分モード時は saveHistory・_idbThumbs を差分のみに置き換える
+  const exportedAt = new Date().toISOString();
   const payload = {
     _meta: {
-      exportedAt: new Date().toISOString(),
-      version:    "1.5.65",
-      app:        "image-saver-tags",
+      exportedAt,
+      version:  "1.11.0",
+      app:      "image-saver-tags",
+      isDiff:   isDiff,
+      diffBase: isDiff ? stored.lastExportedAt : null,
     },
     ...stored,
-    _idbThumbs: idbThumbs,  // IDB サムネイル（差分インポート用）
+    saveHistory: exportHistory,
+    _idbThumbs:  exportThumbs,  // IDB サムネイル（差分インポート用）
   };
 
-  const json = JSON.stringify(payload, null, 2);
+  const json    = JSON.stringify(payload, null, 2);
+  const sizeKB  = (json.length / 1024).toFixed(1);
+  log(`📝 JSON 生成完了（${sizeKB} KB）`);
 
-  const ts   = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
-  const name = `image-saver-backup-${ts}.json`;
+  const prefix = isDiff ? "image-saver-diff" : "image-saver-backup";
+  const ts     = exportedAt.slice(0, 19).replace(/[T:]/g, "-");
+  const name   = `${prefix}-${ts}.json`;
 
-  // エクスポート先 + 即保存オプションの確認
+  // ---- エクスポート先 + 即保存オプションの確認 ----
   const { exportPath, exportAutoSave } = await browser.storage.local.get(["exportPath", "exportAutoSave"]);
   if (exportPath && exportAutoSave) {
     // Native Messaging 経由でファイルに直接書き出す
     const savePath = exportPath.replace(/[\\/]+$/, "") + "\\" + name;
+    log("💾 ファイル書き込み中...");
     const res = await browser.runtime.sendMessage({
       type: "WRITE_FILE",
       path: savePath,
       content: json,
     });
     if (res?.ok) {
-      showCenterToast(`✅ エクスポートしました
-${savePath}
-（サムネイル ${idbThumbs.length} 件含む）`);
+      // エクスポート成功時に lastExportedAt を更新
+      await browser.storage.local.set({ lastExportedAt: exportedAt });
+      log(`✅ エクスポート完了: ${savePath}（サムネイル ${exportThumbs.length} 件含む）`);
+      showCenterToast(`✅ エクスポートしました\n${savePath}\n（サムネイル ${exportThumbs.length} 件含む）`);
     } else {
       const msg = res?.errorCode === "DIR_NOT_FOUND"
         ? `⚠️ フォルダが存在しません: ${exportPath}\n設定画面でエクスポート先を確認してください`
         : `⚠️ 直接保存に失敗しました。ダウンロードに切り替えます: ${res?.error || ""}`;
+      logError(msg);
       showStatus(msg, true);
-      _downloadJson(json, name, idbThumbs.length);
+      _downloadJson(json, name, exportThumbs.length);
+      await browser.storage.local.set({ lastExportedAt: exportedAt });
     }
     return;
   }
 
-  _downloadJson(json, name, idbThumbs.length);
+  _downloadJson(json, name, exportThumbs.length);
+  // ダウンロード開始後に lastExportedAt を更新
+  await browser.storage.local.set({ lastExportedAt: exportedAt });
+  log(`✅ ダウンロード開始（サムネイル ${exportThumbs.length} 件含む）`);
 }
 
 function _downloadJson(json, name, thumbCount) {
@@ -805,6 +864,21 @@ async function importData(e) {
     } catch (err) { logError(`filenameIncludeAuthor の保存に失敗: ${err.message}`); return; }
   }
 
+  // ---- diffExportEnabled ----
+  if (parsed.diffExportEnabled !== undefined) {
+    try {
+      await browser.storage.local.set({ diffExportEnabled: parsed.diffExportEnabled });
+      log(`🔀 diffExportEnabled: ${parsed.diffExportEnabled}`);
+    } catch (err) { logError(`diffExportEnabled の保存に失敗: ${err.message}`); return; }
+  }
+  // ---- lastExportedAt ----
+  if (parsed.lastExportedAt !== undefined) {
+    try {
+      await browser.storage.local.set({ lastExportedAt: parsed.lastExportedAt });
+      log(`🕐 lastExportedAt: ${parsed.lastExportedAt}`);
+    } catch (err) { logError(`lastExportedAt の保存に失敗: ${err.message}`); return; }
+  }
+
   // ---- recentTags ----
   if (Array.isArray(parsed.recentTags)) {
     try {
@@ -893,6 +967,7 @@ async function importData(e) {
   setupRootPath();
   setupInstantSave();
   setupFilenameSettings();
+  setupDiffExport();
   // エクスポートパス
   const { exportPath, exportAutoSave } = await browser.storage.local.get(["exportPath", "exportAutoSave"]);
   const pathInput = document.getElementById("export-path-input");
@@ -975,6 +1050,19 @@ async function setupMinimizeAfterSave() {
   chk.checked = !!minimizeAfterSave; // デフォルトOFF
   chk.addEventListener("change", async () => {
     await browser.storage.local.set({ minimizeAfterSave: chk.checked });
+  });
+}
+
+// ----------------------------------------------------------------
+// 差分エクスポート設定
+// ----------------------------------------------------------------
+async function setupDiffExport() {
+  const chk = document.getElementById("chk-diff-export");
+  if (!chk) return;
+  const { diffExportEnabled } = await browser.storage.local.get("diffExportEnabled");
+  chk.checked = !!diffExportEnabled; // デフォルトOFF
+  chk.addEventListener("change", async () => {
+    await browser.storage.local.set({ diffExportEnabled: chk.checked });
   });
 }
 

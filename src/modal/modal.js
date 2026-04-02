@@ -106,6 +106,7 @@ async function initModal() {
     { recentAuthors },
     { authorDestinations },
     { recentTagDisplayCount, bookmarkDisplayCount },
+    { retainTag, retainSubTag, retainAuthor },
   ] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
     browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
@@ -121,6 +122,7 @@ async function initModal() {
     browser.runtime.sendMessage({ type: "GET_RECENT_AUTHORS" }),
     browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
     browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]),
+    browser.storage.local.get(["retainTag", "retainSubTag", "retainAuthor"]),
   ]);
 
 
@@ -137,7 +139,8 @@ async function initModal() {
     recentSubTagsList || [],
     null,
     globalAuthors || [], recentAuthors || [], authorDestinations || {},
-    recentTagDisplayCount || 20, bookmarkDisplayCount || 20
+    recentTagDisplayCount || 20, bookmarkDisplayCount || 20,
+    !!retainTag, !!retainSubTag, !!retainAuthor
   );
 }
 
@@ -795,6 +798,25 @@ function buildModalHTML(defaultFilename) {
     }
     .continuous-badge.active { display: flex; }
 
+    /* 引き継ぎチェック */
+    .retain-section {
+      display: flex; align-items: center; gap: 4px;
+      margin-left: 6px;
+    }
+    .retain-label {
+      font-size: 11px; color: #999; white-space: nowrap;
+    }
+    .retain-toggle {
+      display: flex; align-items: center; gap: 3px;
+      cursor: pointer; user-select: none;
+    }
+    .retain-toggle input[type="checkbox"] {
+      width: 12px; height: 12px; accent-color: #1abc9c; cursor: pointer; flex-shrink: 0;
+    }
+    .retain-toggle span {
+      font-size: 11px; color: #666; white-space: nowrap;
+    }
+
     .hint { font-size: 10px; color: #aaa; font-weight: 400; }
 
     /* ================================================================
@@ -1205,11 +1227,17 @@ function buildModalHTML(defaultFilename) {
             placeholder="ファイル名" />
           <button class="btn btn-save" id="btn-save" disabled>保存</button>
           <label class="continuous-toggle" id="continuous-toggle"
-            title="連続保存モード：漫画等の複数画像を同一セッションとして記録します。ONにするとタグが引き継がれ、保存履歴でまとめて表示できます。">
+            title="連続保存モード：漫画等の複数画像を同一セッションとして記録します。保存履歴でまとめて表示できます。">
             <input type="checkbox" id="chk-continuous" />
             <span class="ct-label">連続保存</span>
           </label>
           <span class="continuous-badge" id="continuous-badge">🔴 連続保存中</span>
+          <span class="retain-section">
+            <span class="retain-label">引き継ぎ:</span>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-tag" /><span>タグ</span></label>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-subtag" /><span>サブタグ</span></label>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-author" /><span>権利者</span></label>
+          </span>
         </div>
       </div>
 
@@ -1388,7 +1416,8 @@ function setupModalEvents(
   recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
   saveHistory, continuousSession, folderSort, recentSubTags, onCleanup,
   globalAuthors, recentAuthors, authorDestinations,
-  recentTagDisplayCount = 20, bookmarkDisplayCount = 20
+  recentTagDisplayCount = 20, bookmarkDisplayCount = 20,
+  initialRetainTag = false, initialRetainSubTag = false, initialRetainAuthor = false
 ) {
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
@@ -3574,16 +3603,25 @@ function setupModalEvents(
 
   /** 保存後最小化用：ウィンドウを閉じずにUIをリセット（closeModalと同じリセット内容） */
   function resetModalUI() {
-    // タグをリセット
-    selectedTags.length = 0;
-    tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
-    tagInput.value = "";
-    hideSuggestions();
-    // サブタグをリセット
-    selectedSubTags.length = 0;
-    subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
-    subTagInput.value = "";
-    hideSubSuggestions();
+    // タグをリセット（引き継ぎOFFのみ）
+    if (!retainTag) {
+      selectedTags.length = 0;
+      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      tagInput.value = "";
+      hideSuggestions();
+    }
+    // サブタグをリセット（引き継ぎOFFのみ）
+    if (!retainSubTag) {
+      selectedSubTags.length = 0;
+      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      subTagInput.value = "";
+      hideSubSuggestions();
+    }
+    // 権利者をリセット（引き継ぎOFFのみ）
+    if (!retainAuthor) {
+      selectedAuthors = [];
+      renderAuthorChips();
+    }
     // ファイル名をリセット
     document.getElementById("input-filename").value = "";
     // プレビューをリセット
@@ -3613,18 +3651,34 @@ function setupModalEvents(
     // ファイル名をリセット
     document.getElementById("input-filename").value = "";
 
-    // サブタグをリセット
-    selectedSubTags.length = 0;
-    subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
-    subTagInput.value = "";
-    hideSubSuggestions();
+    // タグをリセット（引き継ぎOFFのみ）
+    if (!retainTag) {
+      selectedTags.length = 0;
+      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      tagInput.value = "";
+      hideSuggestions();
+    }
+
+    // サブタグをリセット（引き継ぎOFFのみ）
+    if (!retainSubTag) {
+      selectedSubTags.length = 0;
+      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      subTagInput.value = "";
+      hideSubSuggestions();
+    }
+
+    // 権利者をリセット（引き継ぎOFFのみ）
+    if (!retainAuthor) {
+      selectedAuthors = [];
+      renderAuthorChips();
+    }
 
     // プレビューをリセット
     const previewEl = document.getElementById("preview");
     previewEl.src = "";
 
-    // サジェスト・絞り込みをリセット
-    hideSuggestions();
+    // サジェスト・絞り込みをリセット（retainTagがOFFの場合は既に呼び済みだが副作用なし）
+    if (retainTag) hideSuggestions();
 
     // 保存ボタンを再び無効化（次の画像が来るまで押せない状態に）
     const btnSave = document.getElementById("btn-save");
@@ -3725,6 +3779,34 @@ function setupModalEvents(
   }
 
   // ================================================================
+  // 引き継ぎチェック
+  // ================================================================
+  let retainTag    = initialRetainTag;
+  let retainSubTag = initialRetainSubTag;
+  let retainAuthor = initialRetainAuthor;
+
+  const chkRetainTag    = document.getElementById("chk-retain-tag");
+  const chkRetainSubtag = document.getElementById("chk-retain-subtag");
+  const chkRetainAuthor = document.getElementById("chk-retain-author");
+
+  chkRetainTag.checked    = retainTag;
+  chkRetainSubtag.checked = retainSubTag;
+  chkRetainAuthor.checked = retainAuthor;
+
+  chkRetainTag.addEventListener("change", () => {
+    retainTag = chkRetainTag.checked;
+    browser.storage.local.set({ retainTag });
+  });
+  chkRetainSubtag.addEventListener("change", () => {
+    retainSubTag = chkRetainSubtag.checked;
+    browser.storage.local.set({ retainSubTag });
+  });
+  chkRetainAuthor.addEventListener("change", () => {
+    retainAuthor = chkRetainAuthor.checked;
+    browser.storage.local.set({ retainAuthor });
+  });
+
+  // ================================================================
   // 連続保存モード
   // ================================================================
   const chkContinuous   = document.getElementById("chk-continuous");
@@ -3741,19 +3823,6 @@ function setupModalEvents(
     chkContinuous.checked = active;
     continuousBadge.classList.toggle("active", active);
     if (!active) return;
-
-    // タグを引き継ぎ
-    if (csSession.tags?.length) {
-      for (const t of csSession.tags) {
-        if (!selectedTags.includes(t)) addTag(t);
-      }
-    }
-    // サブタグを引き継ぎ
-    if (csSession.subTags?.length) {
-      for (const t of csSession.subTags) {
-        if (!selectedSubTags.includes(t)) addSubTag(t);
-      }
-    }
 
     // 候補モードの保存先を引き継ぎ（refreshCandidatePanel後に適用するため少し遅延）
     if (csSession.savePaths?.length || csSession.selectedPath) {
@@ -3780,8 +3849,6 @@ function setupModalEvents(
       csSession = {
         id:        crypto.randomUUID(),
         startedAt: new Date().toISOString(),
-        tags:      [...selectedTags],
-        subTags:   [...selectedSubTags],
         count:     0,
       };
       await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
@@ -3862,12 +3929,10 @@ function setupModalEvents(
     });
   }
 
-  /** 保存成功後にセッション情報を更新（タグ・保存先を引き継ぎ用に保存） */
-  async function updateContinuousSession(usedTags, usedSubTags, usedSavePaths, usedSelectedPath) {
+  /** 保存成功後にセッション情報を更新（保存先を引き継ぎ用に保存） */
+  async function updateContinuousSession(usedSavePaths, usedSelectedPath) {
     if (!csSession) return;
     csSession.count        = (csSession.count || 0) + 1;
-    csSession.tags         = usedTags;
-    csSession.subTags      = usedSubTags      || [];
     csSession.savePaths    = usedSavePaths    || [];
     csSession.selectedPath = usedSelectedPath || null;
     await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
@@ -3916,7 +3981,7 @@ function setupModalEvents(
     });
 
     if (result && result.success && result.failCount === 0) {
-      await updateContinuousSession([...selectedTags], [...selectedSubTags], [...selectedPaths], null);
+      await updateContinuousSession([...selectedPaths], null);
       if (csSession) {
         await stayOpenForContinuous();
       } else {
@@ -4011,7 +4076,7 @@ function setupModalEvents(
     });
 
     if (result && result.success) {
-      await updateContinuousSession([...selectedTags], [...selectedSubTags], [...selectedPaths], selectedPath);
+      await updateContinuousSession([...selectedPaths], selectedPath);
       if (csSession) {
         await stayOpenForContinuous();
       } else {

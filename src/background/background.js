@@ -362,7 +362,15 @@ async function handleSave(payload) {
   addLog("INFO", `保存開始: ${filename}`, `→ ${savePath}`);
 
   try {
-    const res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+    let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+    if (!res.ok && (res.error || "").includes("403")) {
+      // 認証が必要な画像（Fanbox など）はブラウザ Cookie 付き XHR でフォールバック
+      addLog("INFO", `SAVE_IMAGE 403 → Cookie付きフォールバック: ${imageUrl}`);
+      const fetched = await fetchImageAsDataUrl(imageUrl);
+      if (fetched.dataUrl) {
+        res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
+      }
+    }
     if (!res.ok) throw new Error(res.error || "不明なエラー");
 
     addLog("INFO", `保存成功: ${fullPath}`);
@@ -1122,7 +1130,15 @@ async function handleSaveMulti(payload) {
     const savePath = normalizePath(rawPath);
     const fullPath = `${savePath}\\${effectiveFilenameMulti}`;
     try {
-      const res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+      let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+      if (!res.ok && (res.error || "").includes("403")) {
+        // 認証が必要な画像（Fanbox など）はブラウザ Cookie 付き XHR でフォールバック
+        addLog("INFO", `SAVE_IMAGE 403 → Cookie付きフォールバック: ${imageUrl}`);
+        const fetched = await fetchImageAsDataUrl(imageUrl);
+        if (fetched.dataUrl) {
+          res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
+        }
+      }
       if (!res.ok) throw new Error(res.error || "不明なエラー");
       addLog("INFO", `一括保存成功: ${fullPath}`);
       await browser.storage.local.set({ lastSaveDir: savePath });
@@ -1382,6 +1398,7 @@ function getRefererForUrl(url) {
     const REFERER_MAP = {
       "i.pximg.net":            "https://www.pixiv.net/",
       "img-original.pixiv.net": "https://www.pixiv.net/",
+      "downloads.fanbox.cc":    "https://www.fanbox.cc/",
     };
     return Object.entries(REFERER_MAP).find(
       ([k]) => hostname === k || hostname.endsWith("." + k)

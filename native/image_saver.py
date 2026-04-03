@@ -215,6 +215,60 @@ def handle_save_image(url, save_path):
         return {"ok": False, "error": str(e)}
 
 
+def handle_save_image_base64(data_url, save_path):
+    """
+    Base64 データURL から画像をファイルに保存する。
+    ブラウザ側で取得した画像データ（認証済み）をそのまま書き出すため、
+    Cookie が必要なサイト（Fanbox など）の画像保存に使用する。
+    """
+    try:
+        b64_data = data_url.split(",", 1)[1]
+        data = base64.b64decode(b64_data)
+    except Exception as e:
+        return {"ok": False, "error": f"Base64デコード失敗: {e}"}
+
+    try:
+        save_dir = os.path.dirname(save_path)
+        if not os.path.isdir(save_dir):
+            return {"ok": False, "error": f"保存先フォルダが存在しません: {save_dir}", "errorCode": "DIR_NOT_FOUND"}
+        final_path = unique_path(save_path)
+        with open(final_path, "wb") as f:
+            f.write(data)
+    except PermissionError:
+        return {"ok": False, "error": f"書き込み権限がありません: {save_path}"}
+    except Exception as e:
+        return {"ok": False, "error": f"ファイル書き込み失敗: {e}"}
+
+    # サムネイル生成（handle_save_image と同じロジック）
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(_io.BytesIO(data))
+        img = img.convert("RGB")
+        MAX = 600
+        w, h = img.size
+        scale = min(MAX / w, MAX / h, 1.0)
+        if scale < 1.0:
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        thumb_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {
+            "ok": True,
+            "savedPath": final_path,
+            "thumbData": thumb_b64,
+            "thumbMime": "image/jpeg",
+        }
+    except Exception as thumb_err:
+        return {
+            "ok": True,
+            "savedPath": final_path,
+            "thumbError": str(thumb_err),
+        }
+
+
 def handle_mkdir(path):
     """
     フォルダを新規作成する
@@ -426,6 +480,12 @@ def main():
             result = handle_write_file(
                 message.get("path", ""),
                 message.get("content", "")
+            )
+
+        elif cmd == "SAVE_IMAGE_BASE64":
+            result = handle_save_image_base64(
+                message.get("dataUrl", ""),
+                message.get("savePath", "")
             )
 
         elif cmd == "OPEN_EXPLORER":

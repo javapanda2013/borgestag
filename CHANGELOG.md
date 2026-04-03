@@ -5,6 +5,13 @@
 
 ---
 
+## [1.12.3] - 2026-04-04
+
+### Fixed
+- **Fanbox フォールバックが発動しないバグを修正**：Python の `urllib.error.HTTPError` は `URLError` のサブクラスのため、従来は `except URLError` でまとめて捕捉され `e.reason` が `"Forbidden"`（数字なし）になっていた。`HTTPError` を先に個別キャッチして `"HTTP {code} {reason}"` 形式に変更し、background.js 側の検出条件（`.includes("403")`）と一致するよう修正。background.js 側にも `"Forbidden"` 文字列での検出を追加（保険）
+
+---
+
 ## [1.12.2] - 2026-04-04
 
 ### Fixed

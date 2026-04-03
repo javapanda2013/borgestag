@@ -207,6 +207,8 @@ def handle_save_image(url, save_path):
                 "thumbError": str(thumb_err),
             }
 
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"ダウンロード失敗: HTTP {e.code} {e.reason}"}
     except urllib.error.URLError as e:
         return {"ok": False, "error": f"ダウンロード失敗: {e.reason}"}
     except PermissionError:

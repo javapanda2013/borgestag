@@ -363,9 +363,9 @@ async function handleSave(payload) {
 
   try {
     let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
-    if (!res.ok && (res.error || "").includes("403")) {
-      // 認証が必要な画像（Fanbox など）はブラウザ Cookie 付き XHR でフォールバック
-      addLog("INFO", `SAVE_IMAGE 403 → Cookie付きフォールバック: ${imageUrl}`);
+    if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
+      // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
+      addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
       const fetched = await fetchImageAsDataUrl(imageUrl);
       if (fetched.dataUrl) {
         res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
@@ -1131,9 +1131,9 @@ async function handleSaveMulti(payload) {
     const fullPath = `${savePath}\\${effectiveFilenameMulti}`;
     try {
       let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
-      if (!res.ok && (res.error || "").includes("403")) {
-        // 認証が必要な画像（Fanbox など）はブラウザ Cookie 付き XHR でフォールバック
-        addLog("INFO", `SAVE_IMAGE 403 → Cookie付きフォールバック: ${imageUrl}`);
+      if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
+        // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
+        addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
         const fetched = await fetchImageAsDataUrl(imageUrl);
         if (fetched.dataUrl) {
           res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });

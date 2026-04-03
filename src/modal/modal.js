@@ -1298,6 +1298,23 @@ function buildModalHTML(defaultFilename) {
           <!-- 保存先パネル -->
           <div class="main-tab-panel active" id="panel-dest">
 
+            <!-- 権利者入力（常時表示・中央寄せ） -->
+            <div style="display:flex;justify-content:center;padding:3px 0 2px;flex-wrap:wrap;gap:2px;position:relative;">
+              <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">
+                <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 権利者:</span>
+                <div id="author-chips" style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;"></div>
+                <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
+                  style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
+                  font-size:11px;outline:none;font-family:inherit;" />
+                <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
+                  color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="入力クリア">✕</button>
+              </div>
+              <div id="author-suggestions" style="position:absolute;top:calc(100% + 2px);left:50%;transform:translateX(-50%);
+                background:#fff;border:1px solid #d0d8f0;border-radius:5px;
+                box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
+                display:none;z-index:200;min-width:120px;font-size:11px;"></div>
+            </div>
+
             <!-- タブバー（タグ追加後に表示） + タグ入力（中央） -->
             <div class="dest-tabbar" id="dest-tabbar">
               <button class="dest-tab active" id="dest-tab-suggest">💡 候補から選ぶ</button>
@@ -1362,21 +1379,6 @@ function buildModalHTML(defaultFilename) {
                   <option value="created-asc">作成日 ↑</option>
                   <option value="created-desc">作成日 ↓</option>
                 </select>
-                <div style="display:flex;flex-direction:column;gap:2px;position:relative;">
-                  <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">
-                    <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 権利者:</span>
-                    <div id="author-chips" style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;"></div>
-                    <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
-                      style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
-                      font-size:11px;outline:none;font-family:inherit;" />
-                    <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
-                      color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="入力クリア">✕</button>
-                  </div>
-                  <div id="author-suggestions" style="position:absolute;top:calc(100% + 2px);left:0;
-                    background:#fff;border:1px solid #d0d8f0;border-radius:5px;
-                    box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
-                    display:none;z-index:200;min-width:120px;font-size:11px;"></div>
-                </div>
                 <div style="display:flex;align-items:center;gap:3px;margin:0 auto;">
                   <input type="text" id="folder-kw-input" placeholder="🔍 フォルダを絞り込み"
                     autocomplete="off" style="width:160px;border:1px solid #d0d0d0;
@@ -3453,6 +3455,10 @@ function setupModalEvents(
         e.preventDefault();
         addSubTag(subTagInput.value);
       }
+    } else if (e.key === "Backspace" && !subTagInput.value) {
+      // 入力が空の状態でバックスペース → 末尾のサブタグを削除（タグ入力欄と同仕様）
+      subTagArea.querySelectorAll(".tag-chip").forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      selectedSubTags.pop();
     }
     if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
   });

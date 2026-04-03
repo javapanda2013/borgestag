@@ -83,9 +83,10 @@ async function openModalWindow(imageUrl, pageUrl) {
           await browser.windows.update(modalWindowId, { state: "normal" });
         }
         await browser.windows.update(modalWindowId, { focused: true });
-        // modal.js に再初期化を通知
+        // modal.js に再初期化を通知（モーダルタブを明示的にアクティブ化してからフォーカス）
         const tabs = await browser.tabs.query({ windowId: modalWindowId });
         if (tabs[0]) {
+          await browser.tabs.update(tabs[0].id, { active: true });
           browser.tabs.sendMessage(tabs[0].id, { type: "MODAL_NEW_IMAGE", imageUrl, pageUrl });
         }
         return;
@@ -706,7 +707,10 @@ async function getModalSize() {
 
 /** モーダルサイズを保存する（リサイズ操作の終端から呼ばれる） */
 async function setModalSize(size) {
-  await browser.storage.local.set({ modalSize: size });
+  // 既存フィールド（previewHeight など）を保持するため読み書きで更新する
+  const cur = await browser.storage.local.get("modalSize");
+  const ms  = cur.modalSize || {};
+  await browser.storage.local.set({ modalSize: { ...ms, ...size } });
   return { ok: true };
 }
 

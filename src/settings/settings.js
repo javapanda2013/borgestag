@@ -1354,6 +1354,7 @@ function escHtml(str) {
 // 保存履歴タブ
 // ----------------------------------------------------------------
 let _historyData = [];
+let _currentFilteredHistory = null; // 絞り込み中はフィルター後配列、なしは null
 let _histFilterTag = "";
 let _histFilterMode = "or"; // "or" | "and"
 let _histScrollPos = 0; // 絞り込みなし時のスクロール位置
@@ -1948,6 +1949,9 @@ function renderHistoryGrid() {
       })
     : _historyData;
 
+  // 絞り込み結果をライトボックスのグローバルナビ用に保持
+  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter) ? filtered : null;
+
   const isFiltering = hasTagFilter || hasAuthorFilter;
   const totalFiltered = filtered.length;
 
@@ -2148,7 +2152,8 @@ function renderHistoryGridGrouped(grid, entries) {
               img.src = r.dataUrl;
               img.style.cursor = "zoom-in";
               img.addEventListener("click", () => {
-                const gIdx = _historyData.findIndex(h => h.id === first.id);
+                const _navData = _currentFilteredHistory ?? _historyData;
+                const gIdx = _navData.findIndex(h => h.id === first.id);
                 showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
               });
               placeholder.replaceWith(img);
@@ -2178,7 +2183,8 @@ function renderHistoryGridGrouped(grid, entries) {
             sub.style.cssText = "width:220px;height:360px;flex-shrink:0;";
             _buildHistCardInner(sub, item, (dataUrl) => {
               allDataUrls[idx] = dataUrl;
-              const gIdx = _historyData.findIndex(h => h.id === item.id);
+              const _navData = _currentFilteredHistory ?? _historyData;
+              const gIdx = _navData.findIndex(h => h.id === item.id);
               showGroupLightbox(allDataUrls, idx, orderedItemsForLb, { startEntryIndex: gIdx });
             });
             expandArea.appendChild(sub);
@@ -2259,8 +2265,9 @@ function _buildHistCardInner(card, entry, onThumbClick) {
               if (onThumbClick) {
                 onThumbClick(r.dataUrl, img);
               } else {
-                // 全体ナビ付きでシングル表示
-                const gIdx = _historyData.findIndex(h => h.id === entry.id);
+                // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
+                const _navData = _currentFilteredHistory ?? _historyData;
+                const gIdx = _navData.findIndex(h => h.id === entry.id);
                 showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
               }
             });
@@ -2698,13 +2705,15 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     const upBtn    = overlay.querySelector(".lb-up");
     const downBtn  = overlay.querySelector(".lb-down");
 
-    // 全体ナビ用：現在表示中の _historyData インデックス
+    // 全体ナビ用：現在表示中のインデックス（絞り込み中は絞り込み結果内）
+    const _globalData = _currentFilteredHistory ?? _historyData;
     let globalIdx = globalCtx?.startEntryIndex ?? -1;
-    const totalGlobal = _historyData.length;
+    const totalGlobal = _globalData.length;
 
     function updateGlobalLabel() {
       if (globalIdx < 0) { labelAll.textContent = ""; return; }
-      labelAll.textContent = `全体 ${totalGlobal - globalIdx} / ${totalGlobal}`;
+      const label = _currentFilteredHistory ? "絞り込み結果" : "全体";
+      labelAll.textContent = `${label} ${totalGlobal - globalIdx} / ${totalGlobal}`;
       upBtn.style.opacity   = globalIdx > 0 ? "1" : "0.3";
       downBtn.style.opacity = globalIdx < totalGlobal - 1 ? "1" : "0.3";
     }
@@ -2723,7 +2732,7 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     }
 
     function openGlobalEntry(gIdx) {
-      const entry = _historyData[gIdx];
+      const entry = _globalData[gIdx];
       if (!entry) return;
       if (entry.thumbId) {
         browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })

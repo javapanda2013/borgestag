@@ -5,6 +5,14 @@
 
 ---
 
+## [1.12.2] - 2026-04-04
+
+### Fixed
+- **Fanbox 画像の 403 Forbidden エラーを修正**：Python ネイティブの `urllib.request` では認証 Cookie を送れないため Fanbox CDN（`downloads.fanbox.cc`）が 403 を返す問題に対応。`SAVE_IMAGE` が 403 エラーになった場合、ブラウザの Cookie を利用できる XHR（`fetchImageAsDataUrl`）で画像データを取得し、新設した `SAVE_IMAGE_BASE64` コマンドで保存するフォールバックを追加。403 以外のエラー（404 等）ではフォールバックしない
+- `getRefererForUrl()` に `downloads.fanbox.cc` → `https://www.fanbox.cc/` のマッピングを追加
+
+---
+
 ## [1.12.1] - 2026-04-03
 
 ### Fixed

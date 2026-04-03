@@ -107,6 +107,7 @@ async function initModal() {
     { authorDestinations },
     { recentTagDisplayCount, bookmarkDisplayCount },
     { retainTag, retainSubTag, retainAuthor },
+    { retainedTags, retainedSubTags, retainedAuthors },
   ] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
     browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
@@ -123,6 +124,7 @@ async function initModal() {
     browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
     browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]),
     browser.storage.local.get(["retainTag", "retainSubTag", "retainAuthor"]),
+    browser.storage.local.get(["retainedTags", "retainedSubTags", "retainedAuthors"]),
   ]);
 
 
@@ -140,7 +142,8 @@ async function initModal() {
     null,
     globalAuthors || [], recentAuthors || [], authorDestinations || {},
     recentTagDisplayCount || 20, bookmarkDisplayCount || 20,
-    !!retainTag, !!retainSubTag, !!retainAuthor
+    !!retainTag, !!retainSubTag, !!retainAuthor,
+    retainedTags || [], retainedSubTags || [], retainedAuthors || []
   );
 }
 
@@ -1417,7 +1420,8 @@ function setupModalEvents(
   saveHistory, continuousSession, folderSort, recentSubTags, onCleanup,
   globalAuthors, recentAuthors, authorDestinations,
   recentTagDisplayCount = 20, bookmarkDisplayCount = 20,
-  initialRetainTag = false, initialRetainSubTag = false, initialRetainAuthor = false
+  initialRetainTag = false, initialRetainSubTag = false, initialRetainAuthor = false,
+  initialRetainedTags = [], initialRetainedSubTags = [], initialRetainedAuthors = []
 ) {
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
@@ -3982,6 +3986,11 @@ function setupModalEvents(
 
     if (result && result.success && result.failCount === 0) {
       await updateContinuousSession([...selectedPaths], null);
+      await browser.storage.local.set({
+        retainedTags:    [...selectedTags],
+        retainedSubTags: [...selectedSubTags],
+        retainedAuthors: [...selectedAuthors],
+      });
       if (csSession) {
         await stayOpenForContinuous();
       } else {
@@ -4077,6 +4086,11 @@ function setupModalEvents(
 
     if (result && result.success) {
       await updateContinuousSession([...selectedPaths], selectedPath);
+      await browser.storage.local.set({
+        retainedTags:    [...selectedTags],
+        retainedSubTags: [...selectedSubTags],
+        retainedAuthors: [...selectedAuthors],
+      });
       if (csSession) {
         await stayOpenForContinuous();
       } else {
@@ -4135,6 +4149,18 @@ function setupModalEvents(
       chip.appendChild(delBtn);
       authorChipsEl.appendChild(chip);
     });
+  }
+
+  // 引き継ぎ設定による初期値復元（次回ウィンドウ起動時）
+  if (retainTag && initialRetainedTags.length) {
+    for (const t of initialRetainedTags) if (!selectedTags.includes(t)) addTag(t);
+  }
+  if (retainSubTag && initialRetainedSubTags.length) {
+    for (const t of initialRetainedSubTags) if (!selectedSubTags.includes(t)) addSubTag(t);
+  }
+  if (retainAuthor && initialRetainedAuthors.length) {
+    selectedAuthors = [...initialRetainedAuthors];
+    renderAuthorChips();
   }
 
   function addAuthorChip(name) {

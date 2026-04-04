@@ -1128,6 +1128,7 @@ async function setupMigrationSubTags() {
 
       let count = 0;
       for (const entry of history) {
+        if (entry.source !== "external_import") continue;
         if (!entry.subTags || !entry.subTags.length) continue;
         entry.tags = [...new Set([...(entry.tags || []), ...entry.subTags])];
         delete entry.subTags;

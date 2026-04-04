@@ -58,6 +58,21 @@ let _extImporting     = false;  // インポート中フラグ（beforeunload用
 // 初期化
 // ----------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
+  // ---- タブスクロールインジケーター ----
+  const _tabBar      = document.querySelector(".tab-bar");
+  const _indLeft     = document.querySelector(".tab-scroll-left");
+  const _indRight    = document.querySelector(".tab-scroll-right");
+  function _updateTabIndicators() {
+    if (!_tabBar || !_indLeft || !_indRight) return;
+    const hasLeft  = _tabBar.scrollLeft > 1;
+    const hasRight = _tabBar.scrollLeft < _tabBar.scrollWidth - _tabBar.clientWidth - 1;
+    _indLeft.classList.toggle("visible",  hasLeft);
+    _indRight.classList.toggle("visible", hasRight);
+  }
+  if (_tabBar) _tabBar.addEventListener("scroll", _updateTabIndicators);
+  // 初期状態チェック（レイアウト確定後）
+  requestAnimationFrame(_updateTabIndicators);
+
   // ---- タブ切り替え ----
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {

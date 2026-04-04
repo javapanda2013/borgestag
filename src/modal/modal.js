@@ -295,7 +295,7 @@ function buildModalHTML(defaultFilename) {
 
     /* プレビュー */
     .preview {
-      width: 100%; height: 120px; min-height: 40px; max-height: 400px; object-fit: contain;
+      width: 100%; height: 120px; min-height: 40px; object-fit: contain;
       border-radius: 6px; border: 1px solid #e8e8e8; background: #f6f6f6;
       flex-shrink: 0;
     }

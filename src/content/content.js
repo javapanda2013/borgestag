@@ -185,8 +185,18 @@ function isValidImg(el) {
   return rect.width >= MIN_SIZE && rect.height >= MIN_SIZE;
 }
 
+let _initialMoveHandled = false;
 document.addEventListener("mousemove", (e) => {
   lastMouseX = e.clientX; lastMouseY = e.clientY;
+  // タブ切り替え・ページ遷移直後はカーソルが既に画像の上にあっても mouseover が発火しない。
+  // 最初の mousemove 時にカーソル下の要素を確認し、mouseover をエミュレートして補完する。
+  if (!_initialMoveHandled) {
+    _initialMoveHandled = true;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    if (el) el.dispatchEvent(
+      new MouseEvent("mouseover", { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY })
+    );
+  }
 }, { passive: true });
 
 document.addEventListener("mouseover", (e) => {

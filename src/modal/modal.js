@@ -819,6 +819,12 @@ function buildModalHTML(defaultFilename) {
     .retain-toggle span {
       font-size: 11px; color: #666; white-space: nowrap;
     }
+    .retain-reset-btn {
+      background: none; border: 1px solid #ccc; border-radius: 3px;
+      cursor: pointer; color: #999; font-size: 12px; padding: 0 4px;
+      line-height: 1.4; flex-shrink: 0;
+    }
+    .retain-reset-btn:hover { color: #e74c3c; border-color: #e74c3c; }
 
     .hint { font-size: 10px; color: #aaa; font-weight: 400; }
 
@@ -1240,6 +1246,7 @@ function buildModalHTML(defaultFilename) {
             <label class="retain-toggle"><input type="checkbox" id="chk-retain-tag" /><span>タグ</span></label>
             <label class="retain-toggle"><input type="checkbox" id="chk-retain-subtag" /><span>サブタグ</span></label>
             <label class="retain-toggle"><input type="checkbox" id="chk-retain-author" /><span>権利者</span></label>
+            <button id="btn-retain-reset" class="retain-reset-btn" title="引き継ぎチェックとタグ/サブタグ/権利者をリセット">↺</button>
           </span>
         </div>
       </div>
@@ -3814,6 +3821,36 @@ function setupModalEvents(
   chkRetainAuthor.addEventListener("change", () => {
     retainAuthor = chkRetainAuthor.checked;
     browser.storage.local.set({ retainAuthor });
+  });
+
+  // 引き継ぎリセットボタン：チェックを全OFF + 現在の入力・保存済み引き継ぎ値をクリア
+  document.getElementById("btn-retain-reset").addEventListener("click", () => {
+    retainTag    = false;
+    retainSubTag = false;
+    retainAuthor = false;
+    chkRetainTag.checked    = false;
+    chkRetainSubtag.checked = false;
+    chkRetainAuthor.checked = false;
+    // フォームクリア
+    selectedTags.length = 0;
+    tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+    tagInput.value = "";
+    hideSuggestions();
+    selectedSubTags.length = 0;
+    subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+    subTagInput.value = "";
+    hideSubSuggestions();
+    selectedAuthors = [];
+    renderAuthorChips();
+    // storage.local に保存
+    browser.storage.local.set({
+      retainTag:       false,
+      retainSubTag:    false,
+      retainAuthor:    false,
+      retainedTags:    [],
+      retainedSubTags: [],
+      retainedAuthors: [],
+    });
   });
 
   // ================================================================

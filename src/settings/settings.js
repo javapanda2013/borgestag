@@ -53,6 +53,7 @@ let _extManualSubTags = [];     // 手動追加サブタグ
 let _extManualAuthors = [];     // 手動追加権利者
 let _extTempExcludes  = [];     // 実行時のみ除外ワード
 let _extImporting     = false;  // インポート中フラグ（beforeunload用）
+let _extDragData      = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
 
 // ----------------------------------------------------------------
 // 初期化
@@ -3489,15 +3490,56 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
       el.innerHTML = "";
       arr.forEach((tag, i) => {
         const chip = document.createElement("span");
-        chip.style.cssText = `${chipStyle[type]}border-radius:10px;padding:1px 8px;font-size:11px;display:inline-flex;align-items:center;gap:3px;cursor:default;`;
+        chip.draggable = true;
+        chip.style.cssText = `${chipStyle[type]}border-radius:10px;padding:1px 8px;font-size:11px;display:inline-flex;align-items:center;gap:3px;cursor:grab;`;
         chip.innerHTML = `${escHtml(tag)}<span data-idx="${i}" style="cursor:pointer;color:#999;font-size:10px;line-height:1;padding-left:2px;">✕</span>`;
         chip.querySelector("span").addEventListener("click", (ev) => {
           _extFolderTagMap[folder][type + "Tags"].splice(Number(ev.target.dataset.idx), 1);
           renderChips(type);
         });
+        // ドラッグ開始: 移動元情報を記録
+        chip.addEventListener("dragstart", (e) => {
+          _extDragData = { folder, type, idx: i, tag };
+          e.dataTransfer.effectAllowed = "move";
+          chip.style.opacity = "0.4";
+        });
+        chip.addEventListener("dragend", () => {
+          chip.style.opacity = "";
+          _extDragData = null;
+        });
         el.appendChild(chip);
       });
     };
+
+    // ドロップゾーン設定（同フォルダ内の別種別チップコンテナへの移動）
+    ["main", "sub", "auth"].forEach(targetType => {
+      const dropEl = chipsEls[targetType];
+      dropEl.addEventListener("dragover", (e) => {
+        if (!_extDragData || _extDragData.folder !== folder) return;
+        if (_extDragData.type === targetType) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        dropEl.style.outline = "2px dashed #4a90e2";
+        dropEl.style.borderRadius = "3px";
+      });
+      dropEl.addEventListener("dragleave", () => {
+        dropEl.style.outline = "";
+      });
+      dropEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropEl.style.outline = "";
+        if (!_extDragData || _extDragData.folder !== folder) return;
+        const { type: srcType, idx: srcIdx, tag } = _extDragData;
+        if (srcType === targetType) return;
+        // ソースから削除、ターゲットに追加（重複なし）
+        _extFolderTagMap[folder][srcType + "Tags"].splice(srcIdx, 1);
+        const targetArr = _extFolderTagMap[folder][targetType + "Tags"];
+        if (!targetArr.includes(tag)) targetArr.push(tag);
+        renderChips(srcType);
+        renderChips(targetType);
+        _extDragData = null;
+      });
+    });
 
     const addTag = (input, type) => {
       const v = input.value.trim();

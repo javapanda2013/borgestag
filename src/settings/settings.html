@@ -375,6 +375,9 @@
       font-size: 11px; font-weight: 700; color: #fff;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+    .hist-source-badge {
+      font-size: 10px; margin-right: 3px; vertical-align: middle; opacity: 0.9;
+    }
     .hist-card-path {
       font-size: 10px; color: rgba(255,255,255,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
@@ -979,6 +982,7 @@
           <button id="hist-select-all" class="hist-btn" disabled title="絞り込み中の全件を選択">全選択</button>
           <button id="hist-deselect-all" class="hist-btn" disabled>選択解除</button>
           <button id="hist-add-tag-selected" class="hist-btn" disabled>🏷 タグ追加</button>
+          <button id="hist-sync-global-tags" class="hist-btn" disabled title="選択中のエントリのタグ・サブタグのうちグローバルタグ未登録のものを追加します">🔄 タグ反映</button>
           <button id="hist-group-selected" class="hist-btn" disabled title="選択した履歴を連続保存したグループとしてまとめます">🔴 グループ化</button>
           <button id="hist-ungroup-selected" class="hist-btn" disabled title="選択したグループを解除します（グループ内の全アイテムのセッションIDを削除）">🔵 グループ解除</button>
           <button id="hist-delete-selected" class="hist-btn danger delete-guarded" disabled>選択削除</button>
@@ -995,6 +999,11 @@
           <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
           <input type="text" id="hist-author-filter" placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
           <button id="hist-author-filter-clear" class="hist-btn-sm" title="権利者フィルタークリア" style="display:none">✕</button>
+          <select id="hist-source-filter" title="取り込み元で絞り込み" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+            <option value="">取り込み元: すべて</option>
+            <option value="external_import">📥 外部取り込みのみ</option>
+            <option value="normal">🖱 通常保存のみ</option>
+          </select>
         </div>
       </div>
     </div>

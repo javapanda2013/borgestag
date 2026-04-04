@@ -1093,18 +1093,17 @@
       <div class="section-title">タグ設定</div>
       <div class="backup-section">
         <div style="font-size:12px;color:#555;margin-bottom:8px;">
-          フォルダパスから抽出されたトークンの分類を設定します。<br>
-          既存タグと部分一致するものは「メイン」を初期候補として表示しています。変更可能です。
+          スキャンされたフォルダごとに付与するタグを設定します。<br>
+          子フォルダには親フォルダのタグも引き継がれます。
         </div>
-        <table id="ext-token-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+        <table id="ext-folder-table" style="width:100%;border-collapse:collapse;font-size:12px;">
           <thead>
             <tr style="background:#f5f5f5;">
-              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">トークン</th>
-              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:100px;">分類</th>
-              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">候補・備考</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;white-space:nowrap;width:160px;">フォルダ</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">メインタグ / サブタグ / 権利者</th>
             </tr>
           </thead>
-          <tbody id="ext-token-tbody"></tbody>
+          <tbody id="ext-folder-tbody"></tbody>
         </table>
 
         <div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
@@ -1116,6 +1115,18 @@
             <input type="text" id="ext-manual-tag-input" placeholder="メインタグを追加（Enter）"
               style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
             <button id="ext-manual-tag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+        </div>
+
+        <div style="margin-top:8px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            サブタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
+          </div>
+          <div id="ext-manual-subtag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;">
+            <input type="text" id="ext-manual-subtag-input" placeholder="サブタグを追加（Enter）"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-manual-subtag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
           </div>
         </div>
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.8.1
+version: 1.8.3
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -453,11 +453,15 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
     def normalize(s):
         return unicodedata.normalize("NFKC", s).lower()
 
+    # スキャンルートを事前に確定（relFolder 計算に使用）
+    # ファイル指定時はその親ディレクトリをルートとする
+    _scan_root = os.path.dirname(path) if os.path.isfile(path) else path
+
     def extract_tokens(file_path):
-        """フォルダパス（ファイル名を除く）をセパレータで分割し、除外後のトークンを返す"""
+        """絶対パスのフォルダ成分を除外ワードでフィルタしてトークンとして返す。"""
         folder = os.path.dirname(file_path)
         parts  = re.split(r'[/\\]', folder)
-        result = []
+        result    = []
         seen_norm = set()
         for p in parts:
             p = p.strip()
@@ -500,12 +504,18 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
         except Exception:
             saved_at = ""
         tokens = extract_tokens(file_path)
+        # スキャンルートからの相対フォルダパス（"." = ルート直下）
+        try:
+            rel_folder = os.path.relpath(os.path.dirname(file_path), _scan_root)
+        except ValueError:
+            rel_folder = "."
         entries.append({
-            "filePath": file_path,
-            "savedAt":  saved_at,
-            "fileName": os.path.basename(file_path),
-            "savePath": os.path.dirname(file_path),
-            "tokens":   tokens,
+            "filePath":  file_path,
+            "savedAt":   saved_at,
+            "fileName":  os.path.basename(file_path),
+            "savePath":  os.path.dirname(file_path),
+            "tokens":    tokens,
+            "relFolder": rel_folder,  # JS がフォルダ別タグ設定に使用
         })
 
     def scan_dir(dir_path, visited):
@@ -543,7 +553,7 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-    # allTokens: 全エントリのトークンのユニーク集合（出現順・元の大文字小文字保持）
+    # allTokens: 全エントリのトークンのユニーク集合（後方互換のため維持）
     seen_norm  = set()
     all_tokens = []
     for e in entries:
@@ -553,12 +563,32 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
                 seen_norm.add(n)
                 all_tokens.append(t)
 
+    # allFolders: ユニークな relFolder 一覧（"." を先頭に、以降はソート済み）
+    seen_folders = set()
+    all_folders  = []
+    for e in entries:
+        rf = e["relFolder"]
+        if rf not in seen_folders:
+            seen_folders.add(rf)
+            all_folders.append(rf)
+    all_folders.sort(key=lambda x: ("" if x == "." else x))
+
+    # folderTokens: フォルダ別トークン { relFolder: [token, ...] }
+    # 同一フォルダ内のファイルは同じトークンを持つため先頭エントリを使用
+    folder_tokens_map = {}
+    for e in entries:
+        rf = e["relFolder"]
+        if rf not in folder_tokens_map:
+            folder_tokens_map[rf] = e["tokens"]
+
     return {
-        "ok":        True,
-        "entries":   entries,
-        "allTokens": all_tokens,
-        "scanned":   scanned[0],
-        "matched":   len(entries),
+        "ok":           True,
+        "entries":      entries,
+        "allTokens":    all_tokens,
+        "allFolders":   all_folders,
+        "folderTokens": folder_tokens_map,
+        "scanned":      scanned[0],
+        "matched":      len(entries),
     }
 
 

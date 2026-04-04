@@ -47,8 +47,9 @@ const openTags = new Set();
 
 // ---- 外部取り込み状態 ----
 let _extScanResult    = null;   // SCAN_EXTERNAL_IMAGES のレスポンス
-let _extTokenMap      = {};     // { token: "main" | "sub" | "exclude" }
+let _extFolderTagMap  = {};     // { relFolder: { mainTags: string[], subTags: string[], authTags: string[] } }
 let _extManualTags    = [];     // 手動追加メインタグ
+let _extManualSubTags = [];     // 手動追加サブタグ
 let _extManualAuthors = [];     // 手動追加権利者
 let _extTempExcludes  = [];     // 実行時のみ除外ワード
 let _extImporting     = false;  // インポート中フラグ（beforeunload用）
@@ -3291,6 +3292,22 @@ async function setupExternalImportTab() {
   document.getElementById("ext-manual-tag-add").addEventListener("click", addManualTag);
   manualTagInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addManualTag(); } });
 
+  // 手動サブタグ
+  const manualSubTagInput = document.getElementById("ext-manual-subtag-input");
+  const manualSubTagChips = document.getElementById("ext-manual-subtag-chips");
+  const renderManualSubTagChips = () => {
+    _extRenderChips(_extManualSubTags, manualSubTagChips, renderManualSubTagChips);
+  };
+  const addManualSubTag = () => {
+    const v = manualSubTagInput.value.trim();
+    if (!v || _extManualSubTags.includes(v)) { manualSubTagInput.value = ""; return; }
+    _extManualSubTags.push(v);
+    manualSubTagInput.value = "";
+    renderManualSubTagChips();
+  };
+  document.getElementById("ext-manual-subtag-add").addEventListener("click", addManualSubTag);
+  manualSubTagInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addManualSubTag(); } });
+
   // 離脱警告
   window.addEventListener("beforeunload", (e) => {
     if (_extImporting) {
@@ -3361,10 +3378,11 @@ async function scanExternal(savedExcludes) {
   resultEl.innerHTML = "";
   log(`✅ スキャン完了: ${res.scanned} 件スキャン`);
   log(`📋 対象: ${deduped.length} 件（重複スキップ: ${skipped} 件）`);
-  if (!res.allTokens.length) log("ℹ️ 抽出されたトークンがありません（除外ワードを確認してください）");
+  if (!res.allFolders?.length) log("ℹ️ 対象フォルダが見つかりませんでした");
   resultEl.className = "import-result success";
 
-  await renderTokenTable(res.allTokens);
+  const scanPath = document.getElementById("ext-scan-path").value.trim();
+  await renderFolderTable(res.allFolders || [], res.folderTokens || {}, scanPath);
   document.getElementById("ext-tag-section").style.display    = "";
   document.getElementById("ext-import-section").style.display = "";
   const countEl = document.getElementById("ext-entry-count");
@@ -3373,50 +3391,113 @@ async function scanExternal(savedExcludes) {
   if (warnEl) warnEl.style.display = document.getElementById("ext-gen-thumb").checked ? "" : "none";
 }
 
-/** トークン分類テーブル描画 */
-async function renderTokenTable(tokens) {
-  const { globalTags: storedTags } = await browser.storage.local.get("globalTags");
-  const tags  = storedTags || [];
-  const tbody = document.getElementById("ext-token-tbody");
+/** フォルダ別タグ設定テーブル描画
+ *  folders:      Python の allFolders（"." = ルート直下、"sub" や "sub\\child" = サブフォルダ）
+ *  folderTokens: Python の folderTokens（{ relFolder: [token, ...] }）
+ *  scanPath:     スキャン対象パス（ルートフォルダ名の表示に使用）
+ */
+async function renderFolderTable(folders, folderTokens, scanPath) {
+  const tbody = document.getElementById("ext-folder-tbody");
   tbody.innerHTML = "";
-  _extTokenMap    = {};
+  _extFolderTagMap = {};
 
-  if (!tokens.length) {
+  if (!folders.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="3" style="padding:8px;color:#aaa;font-size:12px;border:1px solid #e0e0e0;">
-      抽出されたトークンがありません</td>`;
+    tr.innerHTML = `<td colspan="2" style="padding:8px;color:#aaa;font-size:12px;border:1px solid #e0e0e0;">
+      フォルダが見つかりませんでした</td>`;
     tbody.appendChild(tr);
     return;
   }
 
-  for (const token of tokens) {
-    const tokenNorm = token.normalize("NFKC").toLowerCase();
-    const matched   = tags.filter(t => {
-      const tn = t.normalize("NFKC").toLowerCase();
-      return tn.includes(tokenNorm) || tokenNorm.includes(tn);
-    });
-    const isCandidate = matched.length > 0;
-    _extTokenMap[token] = isCandidate ? "main" : "sub";
+  // スキャンルートの最後のフォルダ名を取得（表示用）
+  const rootName = scanPath.replace(/[/\\]+$/, "").split(/[/\\]/).filter(Boolean).pop() || scanPath;
+
+  // チップの背景色・ボーダー色をタイプ別に定義
+  const chipStyle = {
+    main: "background:#e8f5e9;border:1px solid #a5d6a7;",
+    sub:  "background:#e3f2fd;border:1px solid #90caf9;",
+    auth: "background:#fff3e0;border:1px solid #ffcc80;",
+  };
+
+  for (const folder of folders) {
+    // 初期メインタグ: Python から受け取った絶対パストークン（除外ワード適用済み）
+    const initialMainTags = folderTokens[folder] || [];
+    _extFolderTagMap[folder] = { mainTags: [...initialMainTags], subTags: [], authTags: [] };
+
+    const displayName = folder === "."
+      ? `${escHtml(rootName)} <span style="font-size:10px;color:#888;">（ルート）</span>`
+      : escHtml(folder);
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td style="padding:4px 8px;border:1px solid #e0e0e0;">${escHtml(token)}</td>
+      <td style="padding:4px 8px;border:1px solid #e0e0e0;white-space:nowrap;font-size:11px;
+        font-weight:600;color:#2c3e50;vertical-align:top;">${displayName}</td>
       <td style="padding:4px 8px;border:1px solid #e0e0e0;">
-        <select class="ext-token-select" data-token="${escHtml(token)}"
-          style="font-size:12px;padding:2px 4px;border:1px solid #d0d0d0;border-radius:3px;font-family:inherit;">
-          <option value="main"    ${isCandidate  ? "selected" : ""}>メイン</option>
-          <option value="sub"     ${!isCandidate ? "selected" : ""}>サブ</option>
-          <option value="exclude">除外</option>
-        </select>
-      </td>
-      <td style="padding:4px 8px;border:1px solid #e0e0e0;font-size:11px;color:#888;">
-        ${isCandidate ? `<span style="color:#1abc9c;">候補: ${matched.map(escHtml).join(", ")}</span>` : ""}
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;">
+          <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">メイン:</span>
+          <div class="ext-ftag-main-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <input type="text" class="ext-ftag-main-input" placeholder="Enter で追加"
+            style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+        </div>
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
+          <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">サブ:</span>
+          <div class="ext-ftag-sub-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <input type="text" class="ext-ftag-sub-input" placeholder="Enter で追加"
+            style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+        </div>
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
+          <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">権利者:</span>
+          <div class="ext-ftag-auth-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <input type="text" class="ext-ftag-auth-input" placeholder="Enter で追加"
+            style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+        </div>
       </td>
     `;
     tbody.appendChild(tr);
-    tr.querySelector(".ext-token-select").addEventListener("change", (e) => {
-      _extTokenMap[token] = e.target.value;
+
+    const chipsEls = {
+      main: tr.querySelector(".ext-ftag-main-chips"),
+      sub:  tr.querySelector(".ext-ftag-sub-chips"),
+      auth: tr.querySelector(".ext-ftag-auth-chips"),
+    };
+    const inputs = {
+      main: tr.querySelector(".ext-ftag-main-input"),
+      sub:  tr.querySelector(".ext-ftag-sub-input"),
+      auth: tr.querySelector(".ext-ftag-auth-input"),
+    };
+
+    const renderChips = (type) => {
+      const arr = _extFolderTagMap[folder][type + "Tags"];
+      const el  = chipsEls[type];
+      el.innerHTML = "";
+      arr.forEach((tag, i) => {
+        const chip = document.createElement("span");
+        chip.style.cssText = `${chipStyle[type]}border-radius:10px;padding:1px 8px;font-size:11px;display:inline-flex;align-items:center;gap:3px;cursor:default;`;
+        chip.innerHTML = `${escHtml(tag)}<span data-idx="${i}" style="cursor:pointer;color:#999;font-size:10px;line-height:1;padding-left:2px;">✕</span>`;
+        chip.querySelector("span").addEventListener("click", (ev) => {
+          _extFolderTagMap[folder][type + "Tags"].splice(Number(ev.target.dataset.idx), 1);
+          renderChips(type);
+        });
+        el.appendChild(chip);
+      });
+    };
+
+    const addTag = (input, type) => {
+      const v = input.value.trim();
+      if (!v) return;
+      const arr = _extFolderTagMap[folder][type + "Tags"];
+      if (!arr.includes(v)) { arr.push(v); renderChips(type); }
+      input.value = "";
+    };
+
+    ["main", "sub", "auth"].forEach(type => {
+      inputs[type].addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addTag(inputs[type], type); }
+      });
     });
+
+    // 初期チップ描画（メインタグのみ初期値あり）
+    renderChips("main");
   }
 }
 
@@ -3438,16 +3519,9 @@ async function executeExternalImport() {
   const entries  = _extScanResult.entries;
   log(`⏳ インポート準備中... (${entries.length} 件)`);
 
-  // エントリごとに tags/subTags を決定
+  // エントリごとに tags/subTags/authors をフォルダ別設定から決定
   const pendingEntries = entries.map(e => {
-    const entryNorms = new Set(e.tokens.map(t => t.normalize("NFKC").toLowerCase()));
-    const tags    = [];
-    const subTags = [];
-    for (const [token, cls] of Object.entries(_extTokenMap)) {
-      if (!entryNorms.has(token.normalize("NFKC").toLowerCase())) continue;
-      if (cls === "main")     tags.push(token);
-      else if (cls === "sub") subTags.push(token);
-    }
+    const fm = _extFolderTagMap[e.relFolder] || { mainTags: [], subTags: [], authTags: [] };
     return {
       id:       crypto.randomUUID(),
       savedAt:  e.savedAt,
@@ -3455,9 +3529,9 @@ async function executeExternalImport() {
       pageUrl:  "",
       savePath: e.savePath,
       filename: e.fileName,
-      tags:     [...tags, ..._extManualTags],
-      subTags,
-      authors:  [..._extManualAuthors],
+      tags:     [...fm.mainTags,  ..._extManualTags],
+      subTags:  [...fm.subTags,   ..._extManualSubTags],
+      authors:  [...fm.authTags,  ..._extManualAuthors],
       thumbId:  null,
       source:   "external_import",
     };

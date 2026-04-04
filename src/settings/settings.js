@@ -80,6 +80,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       btn.classList.add("active");
       document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      // 選択タブがタブバーからはみ出している場合にスクロールして全体を表示
+      btn.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
       // 保存履歴タブに切り替えたら描画
       if (btn.dataset.tab === "history") renderHistoryTab();
       if (btn.dataset.tab === "authors") renderAuthorsTab();

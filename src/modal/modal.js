@@ -131,7 +131,7 @@ async function initModal() {
   const defaultFilename = guessFilename(imageUrl);
 
   // HTMLを #modal-root に書き込む
-  document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename);
+  document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename, modalSize?.previewHeight);
 
   setupModalEvents(
     document, null, imageUrl, pageUrl, defaultFilename,
@@ -150,7 +150,7 @@ async function initModal() {
 // ----------------------------------------------------------------
 // HTML / CSS
 // ----------------------------------------------------------------
-function buildModalHTML(defaultFilename) {
+function buildModalHTML(defaultFilename, previewHeight) {
   return `
   <style>
     *, *::before, *::after {
@@ -1258,7 +1258,8 @@ function buildModalHTML(defaultFilename) {
         <div class="col-left" id="col-left">
           <div class="col-left-scroll">
 
-            <img class="preview" id="preview" src="" alt="プレビュー" />
+            <img class="preview" id="preview" src="" alt="プレビュー"
+              ${previewHeight ? `style="height:${previewHeight}px"` : ""} />
             <div class="preview-resizer" id="preview-resizer"></div>
 
             <!-- 直近タグ（左カラム下部・スクロール可能） -->
@@ -4338,11 +4339,18 @@ function setupModalEvents(
     if (!previewDragging) return;
     previewDragging = false;
     previewResizer.classList.remove("dragging");
-    const h   = Math.round(previewEl.getBoundingClientRect().height);
-    const cur = await browser.storage.local.get("modalSize");
-    const ms  = cur.modalSize || {};
-    ms.previewHeight = h;
-    await browser.storage.local.set({ modalSize: ms });
+    const imgH      = Math.round(previewEl.getBoundingClientRect().height);
+    const wrapperEl = previewEl.closest(".left-panel");
+    const wrapperH  = wrapperEl ? Math.round(wrapperEl.getBoundingClientRect().height) : null;
+    const [curModal, curPanel] = await Promise.all([
+      browser.storage.local.get("modalSize"),
+      browser.storage.local.get("leftPanelHeights"),
+    ]);
+    const ms  = curModal.modalSize        || {};
+    const lph = curPanel.leftPanelHeights || {};
+    ms.previewHeight = imgH;
+    if (wrapperH) lph["preview"] = wrapperH;
+    await browser.storage.local.set({ modalSize: ms, leftPanelHeights: lph });
   });
 
   // ================================================================
@@ -4386,7 +4394,13 @@ function setupModalEvents(
 
       if (heights[id]) {
         const maxH = Math.floor(window.innerHeight * 0.7);
-        wrapper.style.height = Math.min(heights[id], maxH) + "px";
+        let h = Math.min(heights[id], maxH);
+        // preview パネルは img 高さを下回るクリップを禁止
+        if (id === "preview") {
+          const imgH = parseFloat(previewEl.style.height) || 120;
+          h = Math.max(h, imgH + 5); // +5 は preview-resizer の高さ分
+        }
+        wrapper.style.height   = h + "px";
         wrapper.style.overflow = "hidden";
       }
       wrappers[id] = wrapper;

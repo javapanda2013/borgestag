@@ -5,6 +5,16 @@
 
 ---
 
+## [1.17.1] - 2026-04-05
+
+### Fixed
+- **保存ウィンドウ > 起動時にプレビューが縮小して見えるバグを修正（原因 A・B）**：
+  - 原因 A（タイミング）：HTML 挿入直後の初回描画で CSS デフォルト `height: 120px` が一瞬表示される問題を修正。`buildModalHTML()` に `previewHeight` を渡し、`<img>` 要素に inline style として埋め込むことで HTML 挿入時点から正しい高さを反映するよう変更。
+  - 原因 B（高さ不一致）：`#preview-resizer` ドラッグで img を拡大しても `leftPanelHeights["preview"]`（ラッパー高さ）が更新されないため、次回起動時にラッパーが img をクリップしていた問題を修正。`#preview-resizer` mouseup 時に `modalSize.previewHeight` と `leftPanelHeights["preview"]` を同時保存するよう変更。
+  - 起動時ガード追加：IIFE でラッパー高さを適用する際、preview パネルは img 高さを下回らないようガード処理を追加。
+
+---
+
 ## [1.17.0] - 2026-04-05
 
 ### Changed

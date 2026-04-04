@@ -2437,8 +2437,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
             <input type="text" class="hist-path-input" placeholder="保存先パス" />
           </div>
           <div class="hist-info-editor-actions">
-            <button class="hist-info-editor-cancel">✕ キャンセル</button>
-            <button class="hist-info-editor-save">✔ 保存</button>
+            <button class="hist-info-editor-cancel">✕ 閉じる</button>
+            <button class="hist-info-editor-undo" disabled>↩ アンドゥ</button>
           </div>
         </div>
       </div>
@@ -2483,11 +2483,13 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   const authorInput     = card.querySelector(".hist-author-input");
   const authorSugEl     = card.querySelector(".hist-author-suggestions");
   const pathInput       = card.querySelector(".hist-path-input");
-  const infoSaveBtn     = card.querySelector(".hist-info-editor-save");
+  const undoBtn         = card.querySelector(".hist-info-editor-undo");
   const infoCancelBtn   = card.querySelector(".hist-info-editor-cancel");
 
   let pendingTags    = new Set(entry.tags    || []);
   let pendingAuthors = [...getEntryAuthors(entry)];
+  let _undoStack     = [];  // { type, tag/author/oldPath/newPath }
+  let _prevPath      = "";
 
   // ---- タグチップ描画（メインタグ + サブタグを同一エリアに混在表示）----
   function renderEditorChips() {
@@ -2500,7 +2502,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       chip.textContent = t;
       const del = document.createElement("button");
       del.textContent = "×";
-      del.addEventListener("click", (e) => { e.stopPropagation(); pendingTags.delete(t); renderEditorChips(); });
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        _undoStack.push({ type: "deleteTag", tag: t });
+        pendingTags.delete(t);
+        renderEditorChips();
+        saveEntryNow();
+        updateUndoBtn();
+      });
       chip.appendChild(del);
       editorChips.appendChild(chip);
     });
@@ -2518,10 +2527,13 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       item.textContent = t;
       item.addEventListener("mousedown", (e) => {
         e.preventDefault();
+        _undoStack.push({ type: "addTag", tag: t });
         pendingTags.add(t);
         editorInput.value = "";
         editorSuggestions.style.display = "none";
         renderEditorChips();
+        saveEntryNow();
+        updateUndoBtn();
       });
       editorSuggestions.appendChild(item);
     });
@@ -2539,8 +2551,11 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       del.textContent = "×";
       del.addEventListener("click", (e) => {
         e.stopPropagation();
+        _undoStack.push({ type: "deleteAuthor", author: a });
         pendingAuthors = pendingAuthors.filter(x => x !== a);
         renderAuthorEditorChips();
+        saveEntryNow();
+        updateUndoBtn();
       });
       chip.appendChild(del);
       authorChipsEl.appendChild(chip);
@@ -2560,7 +2575,13 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       item.textContent = a;
       item.addEventListener("mousedown", (ev) => {
         ev.preventDefault();
-        if (!pendingAuthors.includes(a)) { pendingAuthors.push(a); renderAuthorEditorChips(); }
+        if (!pendingAuthors.includes(a)) {
+          _undoStack.push({ type: "addAuthor", author: a });
+          pendingAuthors.push(a);
+          renderAuthorEditorChips();
+          saveEntryNow();
+          updateUndoBtn();
+        }
         authorInput.value = "";
         authorSugEl.style.display = "none";
       });
@@ -2569,17 +2590,48 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     authorSugEl.style.display = "";
   }
 
+  // ---- リアルタイム保存 ----
+  async function saveEntryNow() {
+    const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
+    const history = stored.saveHistory || [];
+    const target  = history.find(h => h.id === entry.id);
+    if (!target) return;
+    target.tags    = [...pendingTags];
+    target.authors = [...pendingAuthors];
+    delete target.author;
+    const newPath = pathInput.value.trim();
+    if (newPath) target.savePaths = [newPath];
+    const gTagSet    = new Set([...(stored.globalTags    || []), ...pendingTags]);
+    const gAuthorSet = new Set([...(stored.globalAuthors || []), ...pendingAuthors]);
+    await browser.storage.local.set({
+      saveHistory:   history,
+      globalTags:    [...gTagSet],
+      globalAuthors: [...gAuthorSet],
+    });
+    _historyData  = history;
+    globalTags    = [...gTagSet];
+    globalAuthors = [...gAuthorSet];
+    showStatus("自動保存しました ✔");
+  }
+
+  function updateUndoBtn() {
+    if (undoBtn) undoBtn.disabled = _undoStack.length === 0;
+  }
+
   // ---- パネル開閉 ----
   infoEditBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const isOpen = infoEditor.classList.contains("open");
-    if (isOpen) { infoEditor.classList.remove("open"); return; }
+    if (isOpen) { infoEditor.classList.remove("open"); renderHistoryGrid(); return; }
     // 現在値でリセット
     pendingTags    = new Set(entry.tags    || []);
     pendingAuthors = [...getEntryAuthors(entry)];
     pathInput.value = primary || "";
+    _prevPath      = pathInput.value;
+    _undoStack     = [];
     renderEditorChips();
     renderAuthorEditorChips();
+    updateUndoBtn();
     editorInput.value = "";
     editorSuggestions.style.display = "none";
     authorInput.value = "";
@@ -2601,11 +2653,15 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   infoCancelBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     infoEditor.classList.remove("open");
+    renderHistoryGrid();
   });
 
   // オーバーレイ背景クリックで閉じる
   infoEditor.addEventListener("click", (e) => {
-    if (e.target === infoEditor) infoEditor.classList.remove("open");
+    if (e.target === infoEditor) {
+      infoEditor.classList.remove("open");
+      renderHistoryGrid();
+    }
   });
 
   // ---- タグ入力配線 ----
@@ -2615,7 +2671,15 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     if (e.key === "Enter") {
       e.preventDefault();
       const val = editorInput.value.trim();
-      if (val) { pendingTags.add(val); editorInput.value = ""; editorSuggestions.style.display = "none"; renderEditorChips(); }
+      if (val) {
+        _undoStack.push({ type: "addTag", tag: val });
+        pendingTags.add(val);
+        editorInput.value = "";
+        editorSuggestions.style.display = "none";
+        renderEditorChips();
+        saveEntryNow();
+        updateUndoBtn();
+      }
     } else if (e.key === "Escape") {
       infoEditor.classList.remove("open");
     }
@@ -2628,47 +2692,46 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     if (e.key === "Enter") {
       e.preventDefault();
       const val = authorInput.value.trim();
-      if (val && !pendingAuthors.includes(val)) { pendingAuthors.push(val); renderAuthorEditorChips(); }
+      if (val && !pendingAuthors.includes(val)) {
+        _undoStack.push({ type: "addAuthor", author: val });
+        pendingAuthors.push(val);
+        renderAuthorEditorChips();
+        saveEntryNow();
+        updateUndoBtn();
+      }
       authorInput.value = "";
       authorSugEl.style.display = "none";
     }
   });
 
-  // ---- 保存 ----
-  infoSaveBtn.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    const tagVal = editorInput.value.trim();
-    if (tagVal) pendingTags.add(tagVal);
-    const authorVal = authorInput.value.trim();
-    if (authorVal && !pendingAuthors.includes(authorVal)) pendingAuthors.push(authorVal);
-    const newTags    = [...pendingTags];
-    const newAuthors = [...pendingAuthors];
-    const newPath    = pathInput.value.trim();
-
-    const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
-    const history = stored.saveHistory || [];
-    const target = history.find(h => h.id === entry.id);
-    if (target) {
-      target.tags    = newTags;
-      target.authors = newAuthors;
-      delete target.author; // 旧フォーマット削除
-      if (newPath) target.savePaths = [newPath];
-      // グローバルタグ（メイン・サブ両方）・作者を更新
-      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags]);
-      const gAuthorSet = new Set([...(stored.globalAuthors || []), ...newAuthors]);
-      await browser.storage.local.set({
-        saveHistory:   history,
-        globalTags:    [...gTagSet],
-        globalAuthors: [...gAuthorSet],
-      });
-      _historyData  = history;
-      globalTags    = [...gTagSet];
-      globalAuthors = [...gAuthorSet];
-      infoEditor.classList.remove("open");
-      renderHistoryGrid();
-      showStatus("情報を保存しました ✔");
+  // ---- パス入力 blur で自動保存 ----
+  pathInput.addEventListener("blur", async () => {
+    const newPath = pathInput.value.trim();
+    if (newPath !== _prevPath) {
+      _undoStack.push({ type: "changePath", oldPath: _prevPath, newPath });
+      _prevPath = newPath;
+      await saveEntryNow();
+      updateUndoBtn();
     }
   });
+
+  // ---- アンドゥ ----
+  if (undoBtn) {
+    undoBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!_undoStack.length) return;
+      const op = _undoStack.pop();
+      if      (op.type === "addTag")         pendingTags.delete(op.tag);
+      else if (op.type === "deleteTag")      pendingTags.add(op.tag);
+      else if (op.type === "addAuthor")      pendingAuthors = pendingAuthors.filter(a => a !== op.author);
+      else if (op.type === "deleteAuthor")   pendingAuthors.push(op.author);
+      else if (op.type === "changePath")     { pathInput.value = op.oldPath; _prevPath = op.oldPath; }
+      renderEditorChips();
+      renderAuthorEditorChips();
+      await saveEntryNow();
+      updateUndoBtn();
+    });
+  }
 
   // タグ削除ボタン（削除モード時のみ表示）
   card.querySelectorAll(".hist-tag-del-btn").forEach(btn => {

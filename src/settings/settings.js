@@ -622,8 +622,8 @@ async function exportData() {
       content: json,
     });
     if (res?.ok) {
-      // エクスポート成功時に lastExportedAt を更新
-      await browser.storage.local.set({ lastExportedAt: exportedAt });
+      // 差分エクスポート完了時のみ lastExportedAt を更新（全エクスポートでは更新しない）
+      if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
       log(`✅ エクスポート完了: ${savePath}（サムネイル ${exportThumbs.length} 件含む）`);
       showCenterToast(`✅ エクスポートしました\n${savePath}\n（サムネイル ${exportThumbs.length} 件含む）`);
     } else {
@@ -633,14 +633,14 @@ async function exportData() {
       logError(msg);
       showStatus(msg, true);
       _downloadJson(json, name, exportThumbs.length);
-      await browser.storage.local.set({ lastExportedAt: exportedAt });
+      if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
     }
     return;
   }
 
   _downloadJson(json, name, exportThumbs.length);
-  // ダウンロード開始後に lastExportedAt を更新
-  await browser.storage.local.set({ lastExportedAt: exportedAt });
+  // 差分エクスポート完了時のみ lastExportedAt を更新（全エクスポートでは更新しない）
+  if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
   log(`✅ ダウンロード開始（サムネイル ${exportThumbs.length} 件含む）`);
 }
 

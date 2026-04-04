@@ -686,6 +686,7 @@
     <button class="tab-btn"        data-tab="history">📋 保存履歴</button>
     <button class="tab-btn"        data-tab="authors">👤 権利者</button>
     <button class="tab-btn"        data-tab="sns">🔗 SNS連携</button>
+    <button class="tab-btn"        data-tab="external-import">📥 外部取り込み</button>
   </div>
 
   <!-- ① 全般タブ（バックアップ・初期フォルダ・ログ） -->
@@ -1020,6 +1021,140 @@
         <span style="font-size: 11px; color: #aaa;">Twitter / X・pixiv・Misskey 等との連携機能を予定しています。</span>
       </div>
     </div>
+  </div>
+
+  <!-- 外部取り込みタブ -->
+  <div class="tab-panel" id="tab-external-import">
+
+    <!-- ① スキャン設定 -->
+    <div>
+      <div class="section-title">スキャン設定</div>
+      <div class="backup-section">
+        <div class="export-path-row">
+          <label class="export-path-label">パス（フォルダまたはファイル）</label>
+          <div class="export-path-inputs">
+            <input type="text" id="ext-scan-path" placeholder="例: D:\Pictures\artwork" style="flex:1;" />
+          </div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">サブフォルダを含め再帰的にスキャンします。</div>
+        </div>
+        <div class="export-path-row" style="margin-top:4px;">
+          <label class="export-path-label">基準日時（これより古い更新日時のファイルを対象）</label>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="datetime-local" id="ext-cutoff-date"
+              style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <span id="ext-cutoff-hint" style="font-size:11px;color:#888;"></span>
+          </div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は全ファイルを対象とします。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ② 除外ワード設定 -->
+    <div>
+      <div class="section-title">除外ワード設定</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:6px;">
+          フォルダパスを区切り文字で分割した際、これらのワードと一致するトークンを除外します。<br>
+          全角半角・大文字小文字を無視して照合します。
+        </div>
+        <div id="ext-exclude-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;min-height:26px;"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <input type="text" id="ext-exclude-input" placeholder="除外ワードを追加（Enter）"
+            style="flex:1;min-width:160px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+          <button id="ext-exclude-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          <button id="ext-exclude-reset" class="backup-btn" style="padding:3px 10px;font-size:12px;">デフォルトに戻す</button>
+        </div>
+        <div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:11px;color:#888;margin-bottom:4px;">実行時のみ除外（storage に保存しない）:</div>
+          <div id="ext-temp-exclude-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <input type="text" id="ext-temp-exclude-input" placeholder="一時的な除外ワード（Enter）"
+              style="flex:1;min-width:160px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-temp-exclude-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+            <button id="ext-temp-exclude-clear" class="backup-btn" style="padding:3px 10px;font-size:12px;">クリア</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ スキャン実行 -->
+    <div>
+      <div class="section-title">スキャン実行</div>
+      <div class="backup-section">
+        <div class="backup-actions">
+          <button class="backup-btn export" id="btn-ext-scan">🔍 スキャン開始</button>
+        </div>
+        <div class="import-result" id="ext-scan-result" style="display:none;white-space:pre-wrap;"></div>
+      </div>
+    </div>
+
+    <!-- ④ タグ設定（スキャン後に表示） -->
+    <div id="ext-tag-section" style="display:none">
+      <div class="section-title">タグ設定</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:8px;">
+          フォルダパスから抽出されたトークンの分類を設定します。<br>
+          既存タグと部分一致するものは「メイン」を初期候補として表示しています。変更可能です。
+        </div>
+        <table id="ext-token-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">トークン</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:100px;">分類</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">候補・備考</th>
+            </tr>
+          </thead>
+          <tbody id="ext-token-tbody"></tbody>
+        </table>
+
+        <div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            メインタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
+          </div>
+          <div id="ext-manual-tag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;">
+            <input type="text" id="ext-manual-tag-input" placeholder="メインタグを追加（Enter）"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-manual-tag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+        </div>
+
+        <div style="margin-top:8px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            権利者を指定（任意・全エントリに付与）:
+          </div>
+          <div id="ext-author-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;position:relative;">
+            <input type="text" id="ext-author-input" placeholder="権利者を追加（Enter）" autocomplete="off"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-author-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+          <div id="ext-author-suggestions"
+            style="display:none;position:absolute;background:#fff;border:1px solid #d0d8f0;
+            border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
+            z-index:100;min-width:160px;font-size:12px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑤ インポート実行（スキャン後に表示） -->
+    <div id="ext-import-section" style="display:none">
+      <div class="section-title">インポート実行</div>
+      <div class="backup-section">
+        <label class="export-auto-label">
+          <input type="checkbox" id="ext-gen-thumb" checked />
+          サムネイルを生成する
+        </label>
+        <div id="ext-thumb-warning" style="font-size:11px;color:#e67e22;margin:4px 0 0 18px;display:none;">
+          ⚠ 対象 <span id="ext-entry-count">0</span> 件。件数が多い場合、生成に時間がかかる恐れがあります。完了前にタブを閉じないでください。
+        </div>
+        <div class="backup-actions" style="margin-top:8px;">
+          <button class="backup-btn export" id="btn-ext-import">⬇ インポート実行</button>
+        </div>
+        <div class="import-result" id="ext-import-result" style="display:none;white-space:pre-wrap;"></div>
+      </div>
+    </div>
+
   </div>
 
   <script src="settings.js"></script>

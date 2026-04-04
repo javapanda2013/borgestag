@@ -45,6 +45,14 @@ let _histAuthorFilter  = "";
 // 開いているタグ行のセット（折りたたみ状態の管理）
 const openTags = new Set();
 
+// ---- 外部取り込み状態 ----
+let _extScanResult    = null;   // SCAN_EXTERNAL_IMAGES のレスポンス
+let _extTokenMap      = {};     // { token: "main" | "sub" | "exclude" }
+let _extManualTags    = [];     // 手動追加メインタグ
+let _extManualAuthors = [];     // 手動追加権利者
+let _extTempExcludes  = [];     // 実行時のみ除外ワード
+let _extImporting     = false;  // インポート中フラグ（beforeunload用）
+
 // ----------------------------------------------------------------
 // 初期化
 // ----------------------------------------------------------------
@@ -70,6 +78,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupMinimizeAfterSave();
   setupFilenameSettings();
   setupDiffExport();
+  setupExternalImportTab();
   setupBookmarks();
   setupLogs();
   setupHistoryTab();
@@ -3086,4 +3095,421 @@ function _buildAuthorRow(author) {
   row.appendChild(header);
   row.appendChild(destList);
   return row;
+}
+
+// ================================================================
+// 外部取り込みタブ
+// ================================================================
+
+const EXT_IMPORT_DEFAULT_EXCLUDES = [
+  "C:", "D:", "E:", "F:", "G:", "H:",
+  "Users", "Desktop", "Downloads", "Pictures", "Documents", "OneDrive",
+  "ダウンロード", "ピクチャ", "デスクトップ", "ドキュメント", "画像",
+];
+
+/** チップ要素を生成する */
+function _extMakeChip(label, onRemove) {
+  const chip = document.createElement("span");
+  chip.style.cssText =
+    "display:inline-flex;align-items:center;gap:3px;background:#e8f0fe;" +
+    "border:1px solid #b0c8f0;border-radius:10px;padding:1px 7px;" +
+    "font-size:11px;color:#1a4db0;";
+  chip.textContent = label;
+  const del = document.createElement("button");
+  del.textContent = "✕";
+  del.title = "削除";
+  del.style.cssText =
+    "background:none;border:none;cursor:pointer;color:#aaa;font-size:10px;" +
+    "padding:0 0 0 3px;line-height:1;";
+  del.addEventListener("click", () => { chip.remove(); onRemove(); });
+  chip.appendChild(del);
+  return chip;
+}
+
+/** 除外ワードチップを再描画 */
+function _extRenderExcludeChips(excludes, container, onUpdate) {
+  container.innerHTML = "";
+  // インデックスのスナップショットを使ってクロージャを正しく生成
+  [...excludes].forEach((w, i) => {
+    const chip = _extMakeChip(w, () => {
+      excludes.splice(excludes.indexOf(w), 1);
+      _extRenderExcludeChips(excludes, container, onUpdate);
+      onUpdate();
+    });
+    container.appendChild(chip);
+  });
+}
+
+/** 汎用チップ配列を再描画 */
+function _extRenderChips(arr, container, onUpdate) {
+  container.innerHTML = "";
+  [...arr].forEach(item => {
+    const chip = _extMakeChip(item, () => {
+      const idx = arr.indexOf(item);
+      if (idx !== -1) arr.splice(idx, 1);
+      _extRenderChips(arr, container, onUpdate);
+      onUpdate();
+    });
+    container.appendChild(chip);
+  });
+}
+
+/** 外部取り込みタブの初期化 */
+async function setupExternalImportTab() {
+  const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "saveHistory"]);
+  let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
+
+  // BorgesTag 最古保存日ヒント
+  const hintEl = document.getElementById("ext-cutoff-hint");
+  if (hintEl && stored.saveHistory?.length) {
+    const oldest = stored.saveHistory.reduce((a, b) =>
+      new Date(a.savedAt) < new Date(b.savedAt) ? a : b
+    );
+    hintEl.textContent = `（BorgesTag 最古保存日: ${oldest.savedAt.slice(0, 10)}）`;
+  }
+
+  // 基準日時を復元
+  if (stored.extImportCutoffDate) {
+    const cdEl = document.getElementById("ext-cutoff-date");
+    if (cdEl) cdEl.value = stored.extImportCutoffDate;
+  }
+
+  // 保存済み除外ワードチップ
+  const excludeChipsEl = document.getElementById("ext-exclude-chips");
+  const saveExcludes   = async () => {
+    await browser.storage.local.set({ extImportExcludes: savedExcludes });
+  };
+  _extRenderExcludeChips(savedExcludes, excludeChipsEl, saveExcludes);
+
+  const excludeInput = document.getElementById("ext-exclude-input");
+  const addExclude   = async () => {
+    const w = excludeInput.value.trim();
+    if (!w || savedExcludes.some(e => e.normalize("NFKC").toLowerCase() === w.normalize("NFKC").toLowerCase())) {
+      excludeInput.value = "";
+      return;
+    }
+    savedExcludes.push(w);
+    excludeInput.value = "";
+    _extRenderExcludeChips(savedExcludes, excludeChipsEl, saveExcludes);
+    await saveExcludes();
+  };
+  document.getElementById("ext-exclude-add").addEventListener("click", addExclude);
+  excludeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addExclude(); } });
+
+  document.getElementById("ext-exclude-reset").addEventListener("click", async () => {
+    savedExcludes.length = 0;
+    EXT_IMPORT_DEFAULT_EXCLUDES.forEach(w => savedExcludes.push(w));
+    _extRenderExcludeChips(savedExcludes, excludeChipsEl, saveExcludes);
+    await saveExcludes();
+  });
+
+  // 実行時のみ除外ワード
+  const tempChipsEl = document.getElementById("ext-temp-exclude-chips");
+  const tempInput   = document.getElementById("ext-temp-exclude-input");
+  const renderTempChips = () => {
+    _extRenderExcludeChips(_extTempExcludes, tempChipsEl, renderTempChips);
+  };
+  const addTemp = () => {
+    const w = tempInput.value.trim();
+    if (!w) return;
+    _extTempExcludes.push(w);
+    tempInput.value = "";
+    renderTempChips();
+  };
+  document.getElementById("ext-temp-exclude-add").addEventListener("click", addTemp);
+  tempInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTemp(); } });
+  document.getElementById("ext-temp-exclude-clear").addEventListener("click", () => {
+    _extTempExcludes.length = 0;
+    renderTempChips();
+  });
+
+  // スキャン実行
+  document.getElementById("btn-ext-scan").addEventListener("click", () => scanExternal(savedExcludes));
+
+  // インポート実行
+  document.getElementById("btn-ext-import").addEventListener("click", executeExternalImport);
+
+  // サムネイル生成チェック → 警告表示切り替え
+  document.getElementById("ext-gen-thumb").addEventListener("change", (e) => {
+    const warn = document.getElementById("ext-thumb-warning");
+    if (warn) warn.style.display = e.target.checked ? "" : "none";
+  });
+
+  // 権利者入力 + サジェスト
+  const authorInput = document.getElementById("ext-author-input");
+  const authorSugg  = document.getElementById("ext-author-suggestions");
+  const authorChips = document.getElementById("ext-author-chips");
+
+  const renderAuthorChips = () => {
+    _extRenderChips(_extManualAuthors, authorChips, renderAuthorChips);
+  };
+  const addAuthor = (val) => {
+    const v = val !== undefined ? val : authorInput.value.trim();
+    if (!v || _extManualAuthors.includes(v)) { authorInput.value = ""; if (authorSugg) authorSugg.style.display = "none"; return; }
+    _extManualAuthors.push(v);
+    authorInput.value = "";
+    if (authorSugg) authorSugg.style.display = "none";
+    renderAuthorChips();
+  };
+  document.getElementById("ext-author-add").addEventListener("click", () => addAuthor());
+  authorInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addAuthor(); } });
+  authorInput.addEventListener("input", () => {
+    if (!authorSugg) return;
+    const q = authorInput.value.trim().toLowerCase();
+    if (!q) { authorSugg.style.display = "none"; return; }
+    const matches = globalAuthors.filter(a => a.toLowerCase().includes(q));
+    if (!matches.length) { authorSugg.style.display = "none"; return; }
+    authorSugg.innerHTML = "";
+    matches.slice(0, 8).forEach(a => {
+      const item = document.createElement("div");
+      item.textContent = a;
+      item.style.cssText = "padding:5px 10px;cursor:pointer;";
+      item.addEventListener("mousedown", (e) => { e.preventDefault(); addAuthor(a); });
+      item.addEventListener("mouseover", () => { item.style.background = "#f0f5ff"; });
+      item.addEventListener("mouseout",  () => { item.style.background = ""; });
+      authorSugg.appendChild(item);
+    });
+    authorSugg.style.display = "";
+  });
+  authorInput.addEventListener("blur", () => {
+    setTimeout(() => { if (authorSugg) authorSugg.style.display = "none"; }, 150);
+  });
+
+  // 手動メインタグ
+  const manualTagInput = document.getElementById("ext-manual-tag-input");
+  const manualTagChips = document.getElementById("ext-manual-tag-chips");
+  const renderManualTagChips = () => {
+    _extRenderChips(_extManualTags, manualTagChips, renderManualTagChips);
+  };
+  const addManualTag = () => {
+    const v = manualTagInput.value.trim();
+    if (!v || _extManualTags.includes(v)) { manualTagInput.value = ""; return; }
+    _extManualTags.push(v);
+    manualTagInput.value = "";
+    renderManualTagChips();
+  };
+  document.getElementById("ext-manual-tag-add").addEventListener("click", addManualTag);
+  manualTagInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addManualTag(); } });
+
+  // 離脱警告
+  window.addEventListener("beforeunload", (e) => {
+    if (_extImporting) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+}
+
+/** スキャン実行 */
+async function scanExternal(savedExcludes) {
+  const path     = document.getElementById("ext-scan-path").value.trim();
+  const resultEl = document.getElementById("ext-scan-result");
+  resultEl.innerHTML = "";
+  resultEl.className = "import-result";
+  resultEl.style.display = "block";
+
+  if (!path) {
+    resultEl.innerHTML = "❌ パスを入力してください";
+    resultEl.className = "import-result error";
+    return;
+  }
+
+  const log = (msg) => { resultEl.innerHTML += escHtml(msg) + "\n"; };
+  log("⏳ スキャン中...");
+
+  const allExcludes  = [...savedExcludes, ..._extTempExcludes];
+  const excludesNorm = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
+  const cutoffVal    = document.getElementById("ext-cutoff-date").value;
+  const cutoffIso    = cutoffVal ? new Date(cutoffVal).toISOString() : "";
+
+  if (cutoffVal) {
+    await browser.storage.local.set({ extImportCutoffDate: cutoffVal });
+  }
+
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({
+      type:       "SCAN_EXTERNAL_IMAGES",
+      path,
+      cutoffDate: cutoffIso,
+      excludes:   excludesNorm,
+    });
+  } catch (e) {
+    resultEl.innerHTML = "";
+    log(`❌ ${e.message}`);
+    resultEl.className = "import-result error";
+    return;
+  }
+
+  if (!res?.ok) {
+    resultEl.innerHTML = "";
+    log(`❌ ${res?.error || "不明なエラー"}`);
+    resultEl.className = "import-result error";
+    return;
+  }
+
+  // 重複チェック
+  const { saveHistory } = await browser.storage.local.get("saveHistory");
+  const existingKeys = new Set(
+    (saveHistory || []).map(e => `${e.savePath}\0${e.filename || e.fileName || ""}`)
+  );
+  const deduped = res.entries.filter(e => !existingKeys.has(`${e.savePath}\0${e.fileName}`));
+  const skipped = res.entries.length - deduped.length;
+
+  _extScanResult = { ...res, entries: deduped };
+
+  resultEl.innerHTML = "";
+  log(`✅ スキャン完了: ${res.scanned} 件スキャン`);
+  log(`📋 対象: ${deduped.length} 件（重複スキップ: ${skipped} 件）`);
+  if (!res.allTokens.length) log("ℹ️ 抽出されたトークンがありません（除外ワードを確認してください）");
+  resultEl.className = "import-result success";
+
+  await renderTokenTable(res.allTokens);
+  document.getElementById("ext-tag-section").style.display    = "";
+  document.getElementById("ext-import-section").style.display = "";
+  const countEl = document.getElementById("ext-entry-count");
+  if (countEl) countEl.textContent = deduped.length;
+  const warnEl  = document.getElementById("ext-thumb-warning");
+  if (warnEl) warnEl.style.display = document.getElementById("ext-gen-thumb").checked ? "" : "none";
+}
+
+/** トークン分類テーブル描画 */
+async function renderTokenTable(tokens) {
+  const { globalTags: storedTags } = await browser.storage.local.get("globalTags");
+  const tags  = storedTags || [];
+  const tbody = document.getElementById("ext-token-tbody");
+  tbody.innerHTML = "";
+  _extTokenMap    = {};
+
+  if (!tokens.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="3" style="padding:8px;color:#aaa;font-size:12px;border:1px solid #e0e0e0;">
+      抽出されたトークンがありません</td>`;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  for (const token of tokens) {
+    const tokenNorm = token.normalize("NFKC").toLowerCase();
+    const matched   = tags.filter(t => {
+      const tn = t.normalize("NFKC").toLowerCase();
+      return tn.includes(tokenNorm) || tokenNorm.includes(tn);
+    });
+    const isCandidate = matched.length > 0;
+    _extTokenMap[token] = isCandidate ? "main" : "sub";
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td style="padding:4px 8px;border:1px solid #e0e0e0;">${escHtml(token)}</td>
+      <td style="padding:4px 8px;border:1px solid #e0e0e0;">
+        <select class="ext-token-select" data-token="${escHtml(token)}"
+          style="font-size:12px;padding:2px 4px;border:1px solid #d0d0d0;border-radius:3px;font-family:inherit;">
+          <option value="main"    ${isCandidate  ? "selected" : ""}>メイン</option>
+          <option value="sub"     ${!isCandidate ? "selected" : ""}>サブ</option>
+          <option value="exclude">除外</option>
+        </select>
+      </td>
+      <td style="padding:4px 8px;border:1px solid #e0e0e0;font-size:11px;color:#888;">
+        ${isCandidate ? `<span style="color:#1abc9c;">候補: ${matched.map(escHtml).join(", ")}</span>` : ""}
+      </td>
+    `;
+    tbody.appendChild(tr);
+    tr.querySelector(".ext-token-select").addEventListener("change", (e) => {
+      _extTokenMap[token] = e.target.value;
+    });
+  }
+}
+
+/** インポート実行 */
+async function executeExternalImport() {
+  if (!_extScanResult?.entries?.length) {
+    showStatus("⚠️ スキャン結果がありません", true);
+    return;
+  }
+  _extImporting = true;
+
+  const resultEl = document.getElementById("ext-import-result");
+  resultEl.innerHTML = "";
+  resultEl.className = "import-result";
+  resultEl.style.display = "block";
+  const log = (msg) => { resultEl.innerHTML += escHtml(msg) + "\n"; };
+
+  const genThumb = document.getElementById("ext-gen-thumb").checked;
+  const entries  = _extScanResult.entries;
+  log(`⏳ インポート準備中... (${entries.length} 件)`);
+
+  // エントリごとに tags/subTags を決定
+  const pendingEntries = entries.map(e => {
+    const entryNorms = new Set(e.tokens.map(t => t.normalize("NFKC").toLowerCase()));
+    const tags    = [];
+    const subTags = [];
+    for (const [token, cls] of Object.entries(_extTokenMap)) {
+      if (!entryNorms.has(token.normalize("NFKC").toLowerCase())) continue;
+      if (cls === "main")     tags.push(token);
+      else if (cls === "sub") subTags.push(token);
+    }
+    return {
+      id:       crypto.randomUUID(),
+      savedAt:  e.savedAt,
+      imageUrl: "",
+      pageUrl:  "",
+      savePath: e.savePath,
+      filename: e.fileName,
+      tags:     [...tags, ..._extManualTags],
+      subTags,
+      authors:  [..._extManualAuthors],
+      thumbId:  null,
+      source:   "external_import",
+    };
+  });
+
+  // サムネイル生成（10件ずつバッチ）
+  if (genThumb) {
+    const BATCH = 10;
+    let done    = 0;
+    log(`🖼 サムネイル生成中... (0 / ${entries.length} 件)`);
+    for (let i = 0; i < entries.length; i += BATCH) {
+      const batch = entries.slice(i, i + BATCH);
+      let thumbRes;
+      try {
+        thumbRes = await browser.runtime.sendMessage({
+          type:  "GENERATE_THUMBS_BATCH",
+          paths: batch.map(e => e.filePath),
+        });
+      } catch (_) { /* バッチ失敗スキップ */ }
+
+      if (thumbRes?.ok) {
+        const thumbsPayload = [];
+        for (let j = 0; j < batch.length; j++) {
+          const b64 = thumbRes.thumbs?.[batch[j].filePath];
+          if (!b64) continue;
+          const pending   = pendingEntries[i + j];
+          pending.thumbId = pending.id;
+          thumbsPayload.push({ id: pending.id, dataUrl: `data:image/jpeg;base64,${b64}` });
+        }
+        if (thumbsPayload.length) {
+          await browser.runtime.sendMessage({ type: "IMPORT_IDB_THUMBS", thumbs: thumbsPayload });
+        }
+      }
+
+      done = Math.min(i + BATCH, entries.length);
+      resultEl.innerHTML = "";
+      log(`🖼 サムネイル生成中... (${done} / ${entries.length} 件)`);
+    }
+    resultEl.innerHTML = "";
+    log(`🖼 サムネイル生成完了`);
+  }
+
+  // saveHistory にマージ（新規エントリを先頭に追加）
+  const { saveHistory } = await browser.storage.local.get("saveHistory");
+  const existing = saveHistory || [];
+  const merged   = [...pendingEntries, ...existing];
+  await browser.storage.local.set({ saveHistory: merged });
+  _historyData = merged;
+
+  _extImporting = false;
+  resultEl.className = "import-result success";
+  resultEl.innerHTML = "";
+  log(`✅ ${pendingEntries.length} 件をインポートしました`);
+  showStatus(`✅ ${pendingEntries.length} 件のインポートが完了しました`);
 }

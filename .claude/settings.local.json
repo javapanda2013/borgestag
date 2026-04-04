@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\image saver\\\\repo\\\\image_saver_with_tags\\\\src\\\\background\\\\background.js\")",
+      "Bash(node --check \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\image saver\\\\repo\\\\image_saver_with_tags\\\\src\\\\settings\\\\settings.js\")",
+      "Bash(python make_zip.py)",
+      "Bash(python make_zip.py v1.10.0)",
+      "Bash(python make_zip.py v1.11.0)",
+      "Bash(node --check \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\image saver\\\\repo\\\\image_saver_with_tags\\\\src\\\\modal\\\\modal.js\")",
+      "Bash(python make_zip.py v1.12.0)",
+      "Bash(python make_zip.py v1.12.1)",
+      "Bash(grep -l -i \"borgestag\\\\|BorgesTag\\\\|image.saver\\\\|image_saver\" \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\ポートフォリオサイト\\\\portfolio-site\\\\main\"/*.html)",
+      "Bash(head -20 grep -n \"BorgesTag\\\\|borgestag\\\\|image.saver\\\\|image_saver\\\\|1\\\\.[0-9]\\\\+\\\\.[0-9]\\\\+\\\\|最終更新\" \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\ポートフォリオサイト\\\\portfolio-site\\\\docs\\\\image-saver-setup.html\")",
+      "Bash(python make_zip.py v1.12.2)",
+      "Bash(python make_zip.py v1.12.3)",
+      "Bash(node --check \"E:\\\\OneDrive\\\\成果物\\\\★AIの成果物\\\\image saver\\\\repo\\\\image_saver_with_tags\\\\src\\\\content\\\\content.js\")",
+      "Bash(python make_zip.py v1.14.0)",
+      "Bash(node --check src/background/background.js)",
+      "Bash(node --check src/settings/settings.js)",
+      "Bash(python -m py_compile native/image_saver.py)",
+      "Bash(python make_zip.py v1.15.0)"
+    ]
+  }
+}

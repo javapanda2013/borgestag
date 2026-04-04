@@ -206,6 +206,19 @@ browser.runtime.onMessage.addListener(async (message) => {
       return exportIdbThumbs();
     case "IMPORT_IDB_THUMBS":
       return importIdbThumbs(message.thumbs);
+    case "SCAN_EXTERNAL_IMAGES":
+      return sendNative({
+        cmd:        "SCAN_EXTERNAL_IMAGES",
+        path:       message.path       || "",
+        cutoffDate: message.cutoffDate || "",
+        excludes:   message.excludes   || [],
+        extensions: message.extensions || [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
+      });
+    case "GENERATE_THUMBS_BATCH":
+      return sendNative({
+        cmd:   "GENERATE_THUMBS_BATCH",
+        paths: message.paths || [],
+      });
     case "GET_STORAGE_SIZE":
       return getStorageSize();
     // ---- エクスプローラーで開く ----

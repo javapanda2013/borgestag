@@ -20,6 +20,9 @@ import urllib.error
 import string
 import base64
 import ctypes
+import re
+import unicodedata
+from datetime import datetime
 
 # ---------------------------------------------------------------
 # Windows エクスプローラー互換ソート（StrCmpLogicalW）
@@ -435,6 +438,161 @@ def handle_read_file_base64(path):
 
 
 # ---------------------------------------------------------------
+# 外部取り込み
+# ---------------------------------------------------------------
+
+def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
+    """
+    BorgesTag 使用前に手動保存した画像のメタデータをスキャンして返す。
+    path: フォルダまたは単一ファイルのパス
+    cutoff_date_str: ISO8601 文字列（これより古い mtime のファイルのみ対象）
+    excludes: 除外トークン文字列のリスト（NFKC正規化・小文字化済み）
+    extensions: 対象拡張子リスト（例: [".jpg", ".png"]）
+    """
+
+    def normalize(s):
+        return unicodedata.normalize("NFKC", s).lower()
+
+    def extract_tokens(file_path):
+        """フォルダパス（ファイル名を除く）をセパレータで分割し、除外後のトークンを返す"""
+        folder = os.path.dirname(file_path)
+        parts  = re.split(r'[/\\]', folder)
+        result = []
+        seen_norm = set()
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            norm = normalize(p)
+            if norm in excludes_set:
+                continue
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                result.append(p)  # 元の大文字小文字を保持
+        return result
+
+    # 基準日時
+    cutoff = None
+    if cutoff_date_str:
+        try:
+            cutoff = datetime.fromisoformat(cutoff_date_str)
+        except Exception:
+            pass
+
+    # 除外ワードセット（渡された文字列は NFKC小文字化済みを前提とする）
+    excludes_set = set(excludes)
+
+    # 対象拡張子セット
+    exts_set = set(e.lower() for e in extensions) if extensions else None
+
+    entries      = []
+    scanned      = [0]  # ミュータブル参照のためリストで包む
+
+    def process_file(file_path):
+        _, ext = os.path.splitext(file_path)
+        if exts_set and ext.lower() not in exts_set:
+            return
+        try:
+            mtime_ts = os.path.getmtime(file_path)
+            if cutoff and datetime.fromtimestamp(mtime_ts) >= cutoff:
+                return
+            saved_at = datetime.fromtimestamp(mtime_ts).strftime("%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            saved_at = ""
+        tokens = extract_tokens(file_path)
+        entries.append({
+            "filePath": file_path,
+            "savedAt":  saved_at,
+            "fileName": os.path.basename(file_path),
+            "savePath": os.path.dirname(file_path),
+            "tokens":   tokens,
+        })
+
+    def scan_dir(dir_path, visited):
+        try:
+            real = os.path.realpath(dir_path)
+        except Exception:
+            return
+        if real in visited:
+            return  # シンボリックリンクループを検出しスキップ
+        visited.add(real)
+        try:
+            with os.scandir(dir_path) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            scan_dir(entry.path, visited)
+                        elif entry.is_file(follow_symlinks=False):
+                            scanned[0] += 1
+                            process_file(entry.path)
+                    except Exception:
+                        continue
+        except PermissionError:
+            pass
+        except Exception:
+            pass
+
+    try:
+        if os.path.isfile(path):
+            scanned[0] += 1
+            process_file(path)
+        elif os.path.isdir(path):
+            scan_dir(path, set())
+        else:
+            return {"ok": False, "error": f"パスが存在しません: {path}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    # allTokens: 全エントリのトークンのユニーク集合（出現順・元の大文字小文字保持）
+    seen_norm  = set()
+    all_tokens = []
+    for e in entries:
+        for t in e["tokens"]:
+            n = normalize(t)
+            if n not in seen_norm:
+                seen_norm.add(n)
+                all_tokens.append(t)
+
+    return {
+        "ok":        True,
+        "entries":   entries,
+        "allTokens": all_tokens,
+        "scanned":   scanned[0],
+        "matched":   len(entries),
+    }
+
+
+def handle_generate_thumbs_batch(paths):
+    """
+    ローカルファイルパスのリストからサムネイルをバッチ生成して Base64 で返す。
+    handle_save_image と同一のリサイズロジック（MAX=600, JPEG, quality=85）を使用。
+    """
+    import io as _io
+    thumbs = {}
+    errors = {}
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            from PIL import Image
+            img = Image.open(_io.BytesIO(data))
+            img = img.convert("RGB")
+            MAX = 600
+            w, h = img.size
+            scale = min(MAX / w, MAX / h, 1.0)
+            if scale < 1.0:
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            thumbs[p] = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            errors[p] = str(e)
+    return {"ok": True, "thumbs": thumbs, "errors": errors}
+
+
+# ---------------------------------------------------------------
 # ユーティリティ
 # ---------------------------------------------------------------
 
@@ -489,6 +647,17 @@ def main():
                 message.get("dataUrl", ""),
                 message.get("savePath", "")
             )
+
+        elif cmd == "SCAN_EXTERNAL_IMAGES":
+            result = handle_scan_external_images(
+                message.get("path", ""),
+                message.get("cutoffDate", ""),
+                message.get("excludes", []),
+                message.get("extensions", [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]),
+            )
+
+        elif cmd == "GENERATE_THUMBS_BATCH":
+            result = handle_generate_thumbs_batch(message.get("paths", []))
 
         elif cmd == "OPEN_EXPLORER":
             result = handle_open_explorer(message.get("path", ""))

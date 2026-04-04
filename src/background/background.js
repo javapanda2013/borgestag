@@ -567,16 +567,15 @@ async function handleInstantSave(imageUrl, pageUrl) {
     const basename = urlObj.pathname.split("/").pop() || "image.jpg";
     const filename = basename.split("?")[0] || "image.jpg";
 
-    // 連続保存セッション中はタグ・サブタグを引き継ぎ
+    // 連続保存セッション中はタグを引き継ぎ（v1.12.0以降 csSession に subTags は存在しない）
     const session = stored.continuousSession;
-    const tags    = session?.tags    || [];
-    const subTags = session?.subTags || [];
-    const allTags = [...new Set([...tags, ...subTags])];
+    const tags    = session?.tags || [];
+    const allTags = [...new Set([...tags])];
 
-    // ファイル名設定に基づいてタグ・サブタグをファイル名に付加（即保存は権利者なし）
+    // ファイル名設定に基づいてタグをファイル名に付加（即保存は権利者なし）
     const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
       await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
-    const effectiveFilenameInstant = buildFilenameWithMeta(filename, tags, subTags, [], {
+    const effectiveFilenameInstant = buildFilenameWithMeta(filename, tags, [], [], {
       filenameIncludeTag:    !!filenameIncludeTag,
       filenameIncludeSubtag: !!filenameIncludeSubtag,
       filenameIncludeAuthor: !!filenameIncludeAuthor,

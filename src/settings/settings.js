@@ -55,7 +55,6 @@ let _extManualSubTags = [];     // 手動追加サブタグ
 let _extManualAuthors = [];     // 手動追加権利者
 let _extTempExcludes  = [];     // 実行時のみ除外ワード
 let _extImporting        = false;  // インポート中フラグ（beforeunload用）
-let _migrating           = false;  // データ補正中フラグ（beforeunload用）
 let _extImportCancelled  = false;  // 中断フラグ
 let _lastImportIds       = null;   // 直前インポートのエントリID配列（取り消し用）
 let _extDragData         = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
@@ -102,7 +101,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupMinimizeAfterSave();
   setupFilenameSettings();
   setupDiffExport();
-  setupMigrationSubTags();
   setupExternalImportTab();
   setupBookmarks();
   setupLogs();
@@ -940,6 +938,13 @@ async function importData(e) {
       const existing = current.saveHistory || [];
       const existingIds = new Set(existing.map((h) => h.id));
       const newItems = parsed.saveHistory.filter((h) => h.id && !existingIds.has(h.id));
+      // 旧バックアップに subTags フィールドが残存する場合は tags に統合
+      newItems.forEach(h => {
+        if (h.subTags?.length) {
+          h.tags = [...new Set([...(h.tags || []), ...h.subTags])];
+          delete h.subTags;
+        }
+      });
       const merged = [...newItems, ...existing]; // 上限なし
       await browser.storage.local.set({ saveHistory: merged });
       log(`🗂 saveHistory: ${newItems.length} 件追加（合計 ${merged.length} 件）`);
@@ -1097,58 +1102,6 @@ async function setupDiffExport() {
   chk.checked = !!diffExportEnabled; // デフォルトOFF
   chk.addEventListener("change", async () => {
     await browser.storage.local.set({ diffExportEnabled: chk.checked });
-  });
-}
-
-// ----------------------------------------------------------------
-// subTags データ補正
-// ----------------------------------------------------------------
-async function setupMigrationSubTags() {
-  const btn      = document.getElementById("btn-migrate-subtags");
-  const resultEl = document.getElementById("migrate-result");
-  if (!btn || !resultEl) return;
-
-  const log = (msg) => {
-    resultEl.style.display = "block";
-    resultEl.innerHTML += msg + "\n";
-  };
-
-  btn.addEventListener("click", async () => {
-    if (!confirm("実行前にエクスポートを行ってください。\n\nsubTags フィールドを tags に統合する補正を開始しますか？")) return;
-
-    btn.disabled = true;
-    resultEl.innerHTML = "";
-    resultEl.className = "import-result";
-    _migrating = true;
-    log("⏳ 補正中...");
-
-    try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
-
-      let count = 0;
-      for (const entry of history) {
-        if (entry.source !== "external_import") continue;
-        if (!entry.subTags || !entry.subTags.length) continue;
-        entry.tags = [...new Set([...(entry.tags || []), ...entry.subTags])];
-        delete entry.subTags;
-        count++;
-      }
-
-      if (count === 0) {
-        log("ℹ️ 補正対象のエントリはありませんでした。");
-      } else {
-        await browser.storage.local.set({ saveHistory: history });
-        _historyData = history;
-        renderAll();
-        log(`✅ ${count} 件のエントリを補正しました。`);
-      }
-    } catch (e) {
-      log(`❌ エラー: ${e.message}`);
-    } finally {
-      _migrating = false;
-      btn.disabled = false;
-    }
   });
 }
 
@@ -3462,7 +3415,7 @@ async function setupExternalImportTab() {
 
   // 離脱警告
   window.addEventListener("beforeunload", (e) => {
-    if (_extImporting || _migrating) {
+    if (_extImporting) {
       e.preventDefault();
       e.returnValue = "";
     }

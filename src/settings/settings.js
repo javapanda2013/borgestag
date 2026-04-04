@@ -3453,19 +3453,19 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
       <td style="padding:4px 8px;border:1px solid #e0e0e0;">
         <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">メイン:</span>
-          <div class="ext-ftag-main-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <div class="ext-ftag-main-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
           <input type="text" class="ext-ftag-main-input" placeholder="Enter で追加"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
         </div>
         <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">サブ:</span>
-          <div class="ext-ftag-sub-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <div class="ext-ftag-sub-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
           <input type="text" class="ext-ftag-sub-input" placeholder="Enter で追加"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
         </div>
         <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">権利者:</span>
-          <div class="ext-ftag-auth-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;"></div>
+          <div class="ext-ftag-auth-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
           <input type="text" class="ext-ftag-auth-input" placeholder="Enter で追加"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
         </div>
@@ -3497,15 +3497,23 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
           _extFolderTagMap[folder][type + "Tags"].splice(Number(ev.target.dataset.idx), 1);
           renderChips(type);
         });
-        // ドラッグ開始: 移動元情報を記録
+        // ドラッグ開始: 移動元情報を記録・同行チップの pointer-events を無効化
         chip.addEventListener("dragstart", (e) => {
           _extDragData = { folder, type, idx: i, tag };
           e.dataTransfer.effectAllowed = "move";
           chip.style.opacity = "0.4";
+          // ドラッグ中は全チップの pointer-events を無効化（ドロップゾーンの邪魔をしないよう）
+          tr.querySelectorAll("span[draggable='true']").forEach(c => {
+            c.style.pointerEvents = "none";
+          });
         });
         chip.addEventListener("dragend", () => {
           chip.style.opacity = "";
           _extDragData = null;
+          // pointer-events を元に戻す
+          tr.querySelectorAll("span[draggable='true']").forEach(c => {
+            c.style.pointerEvents = "";
+          });
         });
         el.appendChild(chip);
       });

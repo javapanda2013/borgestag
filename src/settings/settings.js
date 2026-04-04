@@ -3463,47 +3463,43 @@ async function executeExternalImport() {
     };
   });
 
-  // サムネイル生成（10件ずつバッチ）
+  // サムネイル生成（1件ずつ処理 — Native Messaging 1MB 上限対策）
   if (genThumb) {
-    const BATCH = 10;
-    let done    = 0;
     log(`🖼 サムネイル生成中... (0 / ${entries.length} 件)`);
-    for (let i = 0; i < entries.length; i += BATCH) {
-      const batch = entries.slice(i, i + BATCH);
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
       let thumbRes;
       try {
         thumbRes = await browser.runtime.sendMessage({
           type:  "GENERATE_THUMBS_BATCH",
-          paths: batch.map(e => e.filePath),
+          paths: [entry.filePath],
         });
-      } catch (_) { /* バッチ失敗スキップ */ }
+      } catch (_) { /* 失敗スキップ */ }
 
       if (thumbRes?.ok) {
-        const thumbsPayload = [];
-        for (let j = 0; j < batch.length; j++) {
-          const b64 = thumbRes.thumbs?.[batch[j].filePath];
-          if (!b64) continue;
-          const pending   = pendingEntries[i + j];
+        const b64 = thumbRes.thumbs?.[entry.filePath];
+        if (b64) {
+          const pending   = pendingEntries[i];
           pending.thumbId = pending.id;
-          thumbsPayload.push({ id: pending.id, dataUrl: `data:image/jpeg;base64,${b64}` });
-        }
-        if (thumbsPayload.length) {
-          await browser.runtime.sendMessage({ type: "IMPORT_IDB_THUMBS", thumbs: thumbsPayload });
+          await browser.runtime.sendMessage({
+            type:   "IMPORT_IDB_THUMBS",
+            thumbs: [{ id: pending.id, dataUrl: `data:image/jpeg;base64,${b64}` }],
+          });
         }
       }
 
-      done = Math.min(i + BATCH, entries.length);
       resultEl.innerHTML = "";
-      log(`🖼 サムネイル生成中... (${done} / ${entries.length} 件)`);
+      log(`🖼 サムネイル生成中... (${i + 1} / ${entries.length} 件)`);
     }
     resultEl.innerHTML = "";
     log(`🖼 サムネイル生成完了`);
   }
 
-  // saveHistory にマージ（新規エントリを先頭に追加）
+  // saveHistory にマージ（savedAt 降順でソートして時系列の正しい位置に挿入）
   const { saveHistory } = await browser.storage.local.get("saveHistory");
   const existing = saveHistory || [];
-  const merged   = [...pendingEntries, ...existing];
+  const merged   = [...pendingEntries, ...existing]
+    .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
   await browser.storage.local.set({ saveHistory: merged });
   _historyData = merged;
 

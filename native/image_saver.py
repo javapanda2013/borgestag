@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.6.9
+version: 1.15.0
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}

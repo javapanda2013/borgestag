@@ -41,6 +41,8 @@ let globalAuthors      = [];
 let authorDestinations = {};
 // 保存履歴の作者フィルター
 let _histAuthorFilter  = "";
+// 保存履歴の取り込み元フィルター ("" | "external_import" | "normal")
+let _histSourceFilter  = "";
 
 // 開いているタグ行のセット（折りたたみ状態の管理）
 const openTags = new Set();
@@ -1442,8 +1444,8 @@ function setupHistoryTab() {
   const selectAllBtn = document.getElementById("hist-select-all");
 
   function updateSelectAllBtn() {
-    // 絞り込み中のみ活性化
-    selectAllBtn.disabled = !_histFilterTag;
+    // 何らかの絞り込みが有効な場合のみ活性化
+    selectAllBtn.disabled = !_histFilterTag && !_histAuthorFilter && !_histSourceFilter;
   }
   _updateSelectAllBtn = updateSelectAllBtn; // グローバル参照を更新
 
@@ -1490,16 +1492,21 @@ function setupHistoryTab() {
 
   // 全選択（絞り込み中の全件）
   selectAllBtn.addEventListener("click", () => {
-    const filterQ = _histFilterTag;
-    if (!filterQ) return;
-    const filterTokens = filterQ.split(/\s+/).filter(Boolean);
+    if (!_histFilterTag && !_histAuthorFilter && !_histSourceFilter) return;
+    const filterTokens = _histFilterTag ? _histFilterTag.split(/\s+/).filter(Boolean) : [];
+    const authorQ      = _histAuthorFilter.trim().toLowerCase();
     const filtered = _historyData.filter(e => {
       const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
-      if (_histFilterMode === "and") {
-        return filterTokens.every(token => entryTags.some(t => t.includes(token)));
-      } else {
-        return filterTokens.some(token => entryTags.some(t => t.includes(token)));
-      }
+      const tagMatch = !filterTokens.length || (_histFilterMode === "and"
+        ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
+        : filterTokens.some(token => entryTags.some(t => t.includes(token))));
+      const eAuthors = getEntryAuthors(e).map(a => a.toLowerCase());
+      const authorMatch = !authorQ || eAuthors.some(a => a.includes(authorQ));
+      const sourceMatch = !_histSourceFilter || (
+        _histSourceFilter === "external_import" ? e.source === "external_import"
+        : e.source !== "external_import"
+      );
+      return tagMatch && authorMatch && sourceMatch;
     });
     filtered.forEach(e => _histSelected.add(e.id));
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
@@ -1507,6 +1514,7 @@ function setupHistoryTab() {
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     renderHistoryGrid();
   });
 
@@ -1515,6 +1523,7 @@ function setupHistoryTab() {
     _histSelected.clear();
     document.getElementById("hist-deselect-all").disabled = true;
     document.getElementById("hist-add-tag-selected").disabled = true;
+    document.getElementById("hist-sync-global-tags").disabled = true;
     document.getElementById("hist-group-selected").disabled = true;
     document.getElementById("hist-ungroup-selected").disabled = true;
     document.getElementById("hist-delete-selected").disabled = true;
@@ -1927,6 +1936,35 @@ function setupHistoryTab() {
       renderHistoryGrid();
     });
   }
+
+  // 取り込み元フィルター
+  const sourceFilterSelect = document.getElementById("hist-source-filter");
+  if (sourceFilterSelect) {
+    sourceFilterSelect.addEventListener("change", () => {
+      _histSourceFilter = sourceFilterSelect.value;
+      _histPage = 0;
+      updateSelectAllBtn();
+      renderHistoryGrid();
+    });
+  }
+
+  // タグ反映ボタン（選択エントリのタグ・サブタグのうち globalTags 未登録のものを追加）
+  document.getElementById("hist-sync-global-tags").addEventListener("click", async () => {
+    if (!_histSelected.size) return;
+    const selectedEntries = _historyData.filter(e => _histSelected.has(e.id));
+    const allTags = selectedEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
+    const currentSet = new Set(globalTags);
+    const newTags = [...new Set(allTags)].filter(t => !currentSet.has(t));
+    if (newTags.length === 0) {
+      showStatus("すべて反映済みです（新規追加なし）");
+      return;
+    }
+    const newGlobalTags = [...globalTags, ...newTags];
+    await browser.storage.local.set({ globalTags: newGlobalTags });
+    globalTags = newGlobalTags;
+    showStatus(`✅ ${newTags.length} 件のタグをグローバルタグに追加しました`);
+    renderAll(); // タグ・保存先タブも更新
+  });
 }
 
 async function renderHistoryTab() {
@@ -1958,8 +1996,9 @@ function renderHistoryGrid() {
   const authorQ = _histAuthorFilter.trim().toLowerCase();
   const hasTagFilter    = filterTokens.length > 0;
   const hasAuthorFilter = !!authorQ;
+  const hasSourceFilter = !!_histSourceFilter;
 
-  const filtered = (hasTagFilter || hasAuthorFilter)
+  const filtered = (hasTagFilter || hasAuthorFilter || hasSourceFilter)
     ? _historyData.filter(e => {
         const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
         const tagMatch = !hasTagFilter || (
@@ -1969,18 +2008,25 @@ function renderHistoryGrid() {
         );
         const eAuthors = getEntryAuthors(e).map(a => a.toLowerCase());
         const authorMatch = !hasAuthorFilter || eAuthors.some(a => a.includes(authorQ));
-        // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
+        const sourceMatch = !hasSourceFilter || (
+          _histSourceFilter === "external_import" ? e.source === "external_import"
+          : e.source !== "external_import"
+        );
+        // タグ・権利者の両フィルター有効時のみモードを適用。ソースフィルタは常に AND
+        let tagAuthorMatch;
         if (hasTagFilter && hasAuthorFilter) {
-          return _histFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+          tagAuthorMatch = _histFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+        } else {
+          tagAuthorMatch = tagMatch && authorMatch;
         }
-        return tagMatch && authorMatch;
+        return tagAuthorMatch && sourceMatch;
       })
     : _historyData;
 
   // 絞り込み結果をライトボックスのグローバルナビ用に保持
-  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter) ? filtered : null;
+  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter || hasSourceFilter) ? filtered : null;
 
-  const isFiltering = hasTagFilter || hasAuthorFilter;
+  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter;
   const totalFiltered = filtered.length;
 
   // ページ範囲補正
@@ -2017,6 +2063,7 @@ function renderHistoryGrid() {
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
     return;
@@ -2032,6 +2079,7 @@ function renderHistoryGrid() {
   document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
   document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
   document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+  document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
   document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
   document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
 }
@@ -2314,7 +2362,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     ${thumbHtml}
     <div class="hist-card-overlay">
       <div class="hist-card-body">
-        <div class="hist-card-filename" title="${escHtml(entry.filename)}">${escHtml(entry.filename)}</div>
+        <div class="hist-card-filename" title="${escHtml(entry.filename)}">${entry.source === "external_import" ? '<span class="hist-source-badge" title="外部取り込み">📥</span>' : ""}${escHtml(entry.filename)}</div>
         <div class="hist-card-path" title="${escHtml(primary)}">${escHtml(primary || "（パスなし）")}</div>
         ${authorHtml ? `<div class="hist-card-author-row">${authorHtml}</div>` : ""}
         <div class="hist-card-tags">${tagHtml}</div>
@@ -2370,6 +2418,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
   });

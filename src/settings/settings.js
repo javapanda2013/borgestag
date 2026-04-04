@@ -54,8 +54,10 @@ let _extManualTags    = [];     // 手動追加メインタグ
 let _extManualSubTags = [];     // 手動追加サブタグ
 let _extManualAuthors = [];     // 手動追加権利者
 let _extTempExcludes  = [];     // 実行時のみ除外ワード
-let _extImporting     = false;  // インポート中フラグ（beforeunload用）
-let _extDragData      = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
+let _extImporting        = false;  // インポート中フラグ（beforeunload用）
+let _extImportCancelled  = false;  // 中断フラグ
+let _lastImportIds       = null;   // 直前インポートのエントリID配列（取り消し用）
+let _extDragData         = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
 
 // ----------------------------------------------------------------
 // 初期化
@@ -1948,22 +1950,46 @@ function setupHistoryTab() {
     });
   }
 
-  // タグ反映ボタン（選択エントリのタグ・サブタグのうち globalTags 未登録のものを追加）
+  // タグ・保存先反映ボタン
+  // - タグ・サブタグを globalTags に追加
+  // - メインタグの保存先を tagDestinations に追記（サブタグは除外）
   document.getElementById("hist-sync-global-tags").addEventListener("click", async () => {
     if (!_histSelected.size) return;
     const selectedEntries = _historyData.filter(e => _histSelected.has(e.id));
-    const allTags = selectedEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
-    const currentSet = new Set(globalTags);
-    const newTags = [...new Set(allTags)].filter(t => !currentSet.has(t));
-    if (newTags.length === 0) {
+
+    // globalTags 更新（メイン + サブ）
+    const allTagsFlat = selectedEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
+    const currentGlobalSet = new Set(globalTags);
+    const newGlobalTagsList = [...new Set(allTagsFlat)].filter(t => !currentGlobalSet.has(t));
+    const newGlobalTags = [...globalTags, ...newGlobalTagsList];
+
+    // tagDestinations 更新（メインタグのみ・サブタグは除外）
+    let destAddCount = 0;
+    for (const entry of selectedEntries) {
+      const path = Array.isArray(entry.savePaths) ? (entry.savePaths[0] || "") : (entry.savePath || "");
+      if (!path) continue;
+      for (const tag of (entry.tags || [])) {
+        if (!tagDestinations[tag]) tagDestinations[tag] = [];
+        if (!tagDestinations[tag].some(d => d.path === path)) {
+          tagDestinations[tag].push({ id: crypto.randomUUID(), path, label: "" });
+          destAddCount++;
+        }
+      }
+    }
+
+    if (newGlobalTagsList.length === 0 && destAddCount === 0) {
       showStatus("すべて反映済みです（新規追加なし）");
       return;
     }
-    const newGlobalTags = [...globalTags, ...newTags];
-    await browser.storage.local.set({ globalTags: newGlobalTags });
+
+    await browser.storage.local.set({ globalTags: newGlobalTags, tagDestinations });
     globalTags = newGlobalTags;
-    showStatus(`✅ ${newTags.length} 件のタグをグローバルタグに追加しました`);
-    renderAll(); // タグ・保存先タブも更新
+
+    const parts = [];
+    if (newGlobalTagsList.length > 0) parts.push(`新規タグ: ${newGlobalTagsList.length} 件`);
+    if (destAddCount > 0) parts.push(`保存先: ${destAddCount} 件`);
+    showStatus(`✅ 反映しました（${parts.join("、")}）`);
+    renderAll();
   });
 }
 
@@ -2453,19 +2479,34 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   const infoSaveBtn     = card.querySelector(".hist-info-editor-save");
   const infoCancelBtn   = card.querySelector(".hist-info-editor-cancel");
 
-  let pendingTags    = new Set(entry.tags || []);
+  let pendingTags    = new Set(entry.tags    || []);
+  let pendingSubTags = new Set(entry.subTags || []); // サブタグ（data-type="sub" で追跡、視覚表示は同一）
   let pendingAuthors = [...getEntryAuthors(entry)];
 
-  // ---- タグチップ描画 ----
+  // ---- タグチップ描画（メインタグ + サブタグを同一エリアに混在表示）----
   function renderEditorChips() {
     editorChips.innerHTML = "";
+    // メインタグ（新規入力で追加されるのもこちら）
     pendingTags.forEach(t => {
       const chip = document.createElement("span");
       chip.className = "hist-tag-editor-chip";
+      chip.dataset.type = "main";
       chip.textContent = t;
       const del = document.createElement("button");
       del.textContent = "×";
       del.addEventListener("click", (e) => { e.stopPropagation(); pendingTags.delete(t); renderEditorChips(); });
+      chip.appendChild(del);
+      editorChips.appendChild(chip);
+    });
+    // サブタグ（視覚的に同一・data-type="sub" で区別して保存時に分離）
+    pendingSubTags.forEach(t => {
+      const chip = document.createElement("span");
+      chip.className = "hist-tag-editor-chip";
+      chip.dataset.type = "sub";
+      chip.textContent = t;
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.addEventListener("click", (e) => { e.stopPropagation(); pendingSubTags.delete(t); renderEditorChips(); });
       chip.appendChild(del);
       editorChips.appendChild(chip);
     });
@@ -2475,7 +2516,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     editorSuggestions.innerHTML = "";
     if (!query) { editorSuggestions.style.display = "none"; return; }
     const q = query.toLowerCase();
-    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t)).slice(0, 8);
+    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t) && !pendingSubTags.has(t)).slice(0, 8);
     if (!matches.length) { editorSuggestions.style.display = "none"; return; }
     matches.forEach(t => {
       const item = document.createElement("div");
@@ -2540,7 +2581,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     const isOpen = infoEditor.classList.contains("open");
     if (isOpen) { infoEditor.classList.remove("open"); return; }
     // 現在値でリセット
-    pendingTags    = new Set(entry.tags || []);
+    pendingTags    = new Set(entry.tags    || []);
+    pendingSubTags = new Set(entry.subTags || []);
     pendingAuthors = [...getEntryAuthors(entry)];
     pathInput.value = primary || "";
     renderEditorChips();
@@ -2607,6 +2649,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     const authorVal = authorInput.value.trim();
     if (authorVal && !pendingAuthors.includes(authorVal)) pendingAuthors.push(authorVal);
     const newTags    = [...pendingTags];
+    const newSubTags = [...pendingSubTags];
     const newAuthors = [...pendingAuthors];
     const newPath    = pathInput.value.trim();
 
@@ -2615,11 +2658,12 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     const target = history.find(h => h.id === entry.id);
     if (target) {
       target.tags    = newTags;
+      target.subTags = newSubTags;
       target.authors = newAuthors;
       delete target.author; // 旧フォーマット削除
       if (newPath) target.savePaths = [newPath];
-      // グローバルタグ・作者を更新
-      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags]);
+      // グローバルタグ（メイン・サブ両方）・作者を更新
+      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags, ...newSubTags]);
       const gAuthorSet = new Set([...(stored.globalAuthors || []), ...newAuthors]);
       await browser.storage.local.set({
         saveHistory:   history,
@@ -3432,10 +3476,13 @@ async function scanExternal(savedExcludes) {
     return;
   }
 
-  // 重複チェック
+  // 重複チェック（savePaths 配列・savePath 単数の両形式に対応）
   const { saveHistory } = await browser.storage.local.get("saveHistory");
   const existingKeys = new Set(
-    (saveHistory || []).map(e => `${e.savePath}\0${e.filename || e.fileName || ""}`)
+    (saveHistory || []).map(e => {
+      const p = Array.isArray(e.savePaths) ? (e.savePaths[0] || "") : (e.savePath || "");
+      return `${p}\0${e.filename || e.fileName || ""}`;
+    })
   );
   const deduped = res.entries.filter(e => !existingKeys.has(`${e.savePath}\0${e.fileName}`));
   const skipped = res.entries.length - deduped.length;
@@ -3623,12 +3670,17 @@ async function executeExternalImport() {
     showStatus("⚠️ スキャン結果がありません", true);
     return;
   }
-  _extImporting = true;
+  _extImporting        = true;
+  _extImportCancelled  = false;
+  _lastImportIds       = null;
 
-  const resultEl = document.getElementById("ext-import-result");
+  const resultEl  = document.getElementById("ext-import-result");
+  const actionsEl = document.getElementById("ext-import-actions");
   resultEl.innerHTML = "";
   resultEl.className = "import-result";
   resultEl.style.display = "block";
+  actionsEl.innerHTML = "";
+  actionsEl.style.display = "none";
   const log = (msg) => { resultEl.innerHTML += escHtml(msg) + "\n"; };
 
   const genThumb = document.getElementById("ext-gen-thumb").checked;
@@ -3643,7 +3695,7 @@ async function executeExternalImport() {
       savedAt:  e.savedAt,
       imageUrl: "",
       pageUrl:  "",
-      savePath: e.savePath,
+      savePaths: [e.savePath],
       filename: e.fileName,
       tags:     [...fm.mainTags,  ..._extManualTags],
       subTags:  [...fm.subTags,   ..._extManualSubTags],
@@ -3655,8 +3707,22 @@ async function executeExternalImport() {
 
   // サムネイル生成（1件ずつ処理 — Native Messaging 1MB 上限対策）
   if (genThumb) {
+    // 中断ボタンを表示
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "backup-btn";
+    cancelBtn.textContent = "🛑 中断";
+    cancelBtn.style.cssText = "padding:3px 10px;font-size:12px;";
+    cancelBtn.addEventListener("click", () => {
+      _extImportCancelled = true;
+      cancelBtn.disabled  = true;
+      cancelBtn.textContent = "⛔ 中断中...";
+    });
+    actionsEl.appendChild(cancelBtn);
+    actionsEl.style.display = "";
+
     log(`🖼 サムネイル生成中... (0 / ${entries.length} 件)`);
     for (let i = 0; i < entries.length; i++) {
+      if (_extImportCancelled) break;
       const entry = entries[i];
       let thumbRes;
       try {
@@ -3681,6 +3747,18 @@ async function executeExternalImport() {
       resultEl.innerHTML = "";
       log(`🖼 サムネイル生成中... (${i + 1} / ${entries.length} 件)`);
     }
+
+    // 中断ボタンを除去
+    actionsEl.innerHTML  = "";
+    actionsEl.style.display = "none";
+
+    if (_extImportCancelled) {
+      resultEl.innerHTML = "";
+      log("⛔ 中断しました（インポートはキャンセルされました）");
+      _extImporting = false;
+      return;
+    }
+
     resultEl.innerHTML = "";
     log(`🖼 サムネイル生成完了`);
   }
@@ -3697,18 +3775,69 @@ async function executeExternalImport() {
   const gTagSet    = new Set([...(stored.globalTags    || []), ...importedTags]);
   const gAuthorSet = new Set([...(stored.globalAuthors || []), ...importedAuthors]);
 
+  // tagDestinations 更新（メインタグのみ・サブタグは保存先に関連付けない）
+  for (const pe of pendingEntries) {
+    const path = Array.isArray(pe.savePaths) ? (pe.savePaths[0] || "") : (pe.savePath || "");
+    if (!path) continue;
+    for (const tag of (pe.tags || [])) {
+      if (!tagDestinations[tag]) tagDestinations[tag] = [];
+      if (!tagDestinations[tag].some(d => d.path === path)) {
+        tagDestinations[tag].push({ id: crypto.randomUUID(), path, label: "" });
+      }
+    }
+  }
+
   await browser.storage.local.set({
     saveHistory:   merged,
     globalTags:    [...gTagSet],
     globalAuthors: [...gAuthorSet],
+    tagDestinations,
   });
   _historyData  = merged;
   globalTags    = [...gTagSet];
   globalAuthors = [...gAuthorSet];
 
-  _extImporting = false;
+  _extImporting  = false;
+  _lastImportIds = pendingEntries.map(e => e.id);
+
   resultEl.className = "import-result success";
   resultEl.innerHTML = "";
   log(`✅ ${pendingEntries.length} 件をインポートしました`);
   showStatus(`✅ ${pendingEntries.length} 件のインポートが完了しました`);
+
+  // 取り消しボタンを表示
+  const undoBtn = document.createElement("button");
+  undoBtn.className   = "backup-btn";
+  undoBtn.textContent = "↩ 取り消し";
+  undoBtn.style.cssText = "padding:3px 10px;font-size:12px;";
+  undoBtn.addEventListener("click", async () => {
+    if (!_lastImportIds?.length) return;
+    undoBtn.disabled    = true;
+    undoBtn.textContent = "⏳ 取り消し中...";
+
+    // サムネイル削除（thumbId を持つエントリのみ）
+    for (const id of _lastImportIds) {
+      const e = _historyData.find(h => h.id === id);
+      if (e?.thumbId) {
+        try { await browser.runtime.sendMessage({ type: "DELETE_THUMB", id: e.thumbId }); } catch (_) {}
+      }
+    }
+
+    // saveHistory から取り消し対象を除去
+    const idSet = new Set(_lastImportIds);
+    const { saveHistory: sh } = await browser.storage.local.get("saveHistory");
+    const filtered = (sh || []).filter(e => !idSet.has(e.id));
+    await browser.storage.local.set({ saveHistory: filtered });
+    _historyData   = filtered;
+    _lastImportIds = null;
+
+    actionsEl.innerHTML  = "";
+    actionsEl.style.display = "none";
+    resultEl.className   = "import-result";
+    resultEl.innerHTML   = escHtml("↩ インポートを取り消しました") + "\n";
+    showStatus("↩ インポートを取り消しました");
+    renderAll();
+  });
+  actionsEl.appendChild(undoBtn);
+  actionsEl.style.display = "";
 }

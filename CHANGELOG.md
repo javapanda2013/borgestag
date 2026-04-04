@@ -5,6 +5,13 @@
 
 ---
 
+## [1.15.1] - 2026-04-04
+
+### Fixed
+- **外部取り込み > サムネイル生成バッチが Native 切断エラーになる問題を修正**：`GENERATE_THUMBS_BATCH` のレスポンスが Firefox Native Messaging の 1MB 上限を超えてネイティブアプリが切断されていた。`handle_generate_thumbs_batch` のサムネイルサイズを MAX=600/quality=85 から MAX=200/quality=75 に変更し、10件バッチでも上限内に収まるよう修正
+
+---
+
 ## [1.15.0] - 2026-04-04
 
 ### Added

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.15.0
+version: 1.8.1
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -565,7 +565,8 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
 def handle_generate_thumbs_batch(paths):
     """
     ローカルファイルパスのリストからサムネイルをバッチ生成して Base64 で返す。
-    handle_save_image と同一のリサイズロジック（MAX=600, JPEG, quality=85）を使用。
+    Native Messaging の 1MB レスポンス上限に収めるため、
+    MAX=200、quality=75（通常保存の MAX=600/quality=85 より小さめ）を使用。
     """
     import io as _io
     thumbs = {}
@@ -577,7 +578,7 @@ def handle_generate_thumbs_batch(paths):
             from PIL import Image
             img = Image.open(_io.BytesIO(data))
             img = img.convert("RGB")
-            MAX = 600
+            MAX = 200
             w, h = img.size
             scale = min(MAX / w, MAX / h, 1.0)
             if scale < 1.0:
@@ -585,7 +586,7 @@ def handle_generate_thumbs_batch(paths):
                 new_h = max(1, int(h * scale))
                 img = img.resize((new_w, new_h), Image.LANCZOS)
             buf = _io.BytesIO()
-            img.save(buf, format="JPEG", quality=85, optimize=True)
+            img.save(buf, format="JPEG", quality=75, optimize=True)
             thumbs[p] = base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception as e:
             errors[p] = str(e)

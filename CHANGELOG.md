@@ -5,6 +5,13 @@
 
 ---
 
+## [1.15.8] - 2026-04-04
+
+### Fixed
+- **外部取り込み > インポートしたタグ・サブタグ・権利者が「タグ・保存先」タブに反映されないバグを修正**：`executeExternalImport` が `saveHistory` のみ更新し `globalTags` / `globalAuthors` を更新していなかった問題を修正。インポート完了時に全エントリのタグ・サブタグ・権利者を `globalTags` / `globalAuthors` へ追記するよう変更。
+
+---
+
 ## [1.15.7] - 2026-04-04
 
 ### Fixed

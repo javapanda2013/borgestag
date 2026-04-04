@@ -3637,12 +3637,25 @@ async function executeExternalImport() {
   }
 
   // saveHistory にマージ（savedAt 降順でソートして時系列の正しい位置に挿入）
-  const { saveHistory } = await browser.storage.local.get("saveHistory");
-  const existing = saveHistory || [];
+  const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
+  const existing = stored.saveHistory || [];
   const merged   = [...pendingEntries, ...existing]
     .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
-  await browser.storage.local.set({ saveHistory: merged });
-  _historyData = merged;
+
+  // インポートしたタグ・サブタグ・権利者を globalTags / globalAuthors に追加
+  const importedTags    = pendingEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
+  const importedAuthors = pendingEntries.flatMap(e => e.authors || []);
+  const gTagSet    = new Set([...(stored.globalTags    || []), ...importedTags]);
+  const gAuthorSet = new Set([...(stored.globalAuthors || []), ...importedAuthors]);
+
+  await browser.storage.local.set({
+    saveHistory:   merged,
+    globalTags:    [...gTagSet],
+    globalAuthors: [...gAuthorSet],
+  });
+  _historyData  = merged;
+  globalTags    = [...gTagSet];
+  globalAuthors = [...gAuthorSet];
 
   _extImporting = false;
   resultEl.className = "import-result success";

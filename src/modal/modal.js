@@ -4311,11 +4311,9 @@ function setupModalEvents(
   // ================================================================
   const previewResizer = document.getElementById("preview-resizer");
   const PREVIEW_MIN_H  = 40;
-  const PREVIEW_MAX_H  = 400;
 
   if (modalSize?.previewHeight) {
-    const maxH = Math.floor(window.innerHeight * 0.6);
-    previewEl.style.height = Math.min(modalSize.previewHeight, maxH) + "px";
+    previewEl.style.height = modalSize.previewHeight + "px";
   }
 
   let previewDragging = false;
@@ -4332,10 +4330,7 @@ function setupModalEvents(
 
   document.addEventListener("mousemove", (e) => {
     if (!previewDragging) return;
-    const newH = Math.min(
-      Math.max(PREVIEW_MIN_H, previewStartH + (e.clientY - previewStartY)),
-      PREVIEW_MAX_H
-    );
+    const newH = Math.max(PREVIEW_MIN_H, previewStartH + (e.clientY - previewStartY));
     previewEl.style.height = newH + "px";
   });
 

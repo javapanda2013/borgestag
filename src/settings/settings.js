@@ -3271,13 +3271,16 @@ async function setupExternalImportTab() {
   const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "saveHistory"]);
   let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
 
-  // BorgesTag 最古保存日ヒント
+  // BorgesTag 最古保存日ヒント（外部取り込みエントリを除外して算出）
   const hintEl = document.getElementById("ext-cutoff-hint");
   if (hintEl && stored.saveHistory?.length) {
-    const oldest = stored.saveHistory.reduce((a, b) =>
-      new Date(a.savedAt) < new Date(b.savedAt) ? a : b
-    );
-    hintEl.textContent = `（BorgesTag 最古保存日: ${oldest.savedAt.slice(0, 10)}）`;
+    const normalEntries = stored.saveHistory.filter(e => e.source !== "external_import");
+    if (normalEntries.length) {
+      const oldest = normalEntries.reduce((a, b) =>
+        new Date(a.savedAt) < new Date(b.savedAt) ? a : b
+      );
+      hintEl.textContent = `（BorgesTag 最古保存日: ${oldest.savedAt.slice(0, 10)}）`;
+    }
   }
 
   // 基準日時を復元

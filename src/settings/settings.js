@@ -55,6 +55,7 @@ let _extManualSubTags = [];     // 手動追加サブタグ
 let _extManualAuthors = [];     // 手動追加権利者
 let _extTempExcludes  = [];     // 実行時のみ除外ワード
 let _extImporting        = false;  // インポート中フラグ（beforeunload用）
+let _migrating           = false;  // データ補正中フラグ（beforeunload用）
 let _extImportCancelled  = false;  // 中断フラグ
 let _lastImportIds       = null;   // 直前インポートのエントリID配列（取り消し用）
 let _extDragData         = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
@@ -101,6 +102,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupMinimizeAfterSave();
   setupFilenameSettings();
   setupDiffExport();
+  setupMigrationSubTags();
   setupExternalImportTab();
   setupBookmarks();
   setupLogs();
@@ -1099,6 +1101,57 @@ async function setupDiffExport() {
 }
 
 // ----------------------------------------------------------------
+// subTags データ補正
+// ----------------------------------------------------------------
+async function setupMigrationSubTags() {
+  const btn      = document.getElementById("btn-migrate-subtags");
+  const resultEl = document.getElementById("migrate-result");
+  if (!btn || !resultEl) return;
+
+  const log = (msg) => {
+    resultEl.style.display = "block";
+    resultEl.innerHTML += msg + "\n";
+  };
+
+  btn.addEventListener("click", async () => {
+    if (!confirm("実行前にエクスポートを行ってください。\n\nsubTags フィールドを tags に統合する補正を開始しますか？")) return;
+
+    btn.disabled = true;
+    resultEl.innerHTML = "";
+    resultEl.className = "import-result";
+    _migrating = true;
+    log("⏳ 補正中...");
+
+    try {
+      const stored = await browser.storage.local.get("saveHistory");
+      const history = stored.saveHistory || [];
+
+      let count = 0;
+      for (const entry of history) {
+        if (!entry.subTags || !entry.subTags.length) continue;
+        entry.tags = [...new Set([...(entry.tags || []), ...entry.subTags])];
+        delete entry.subTags;
+        count++;
+      }
+
+      if (count === 0) {
+        log("ℹ️ 補正対象のエントリはありませんでした。");
+      } else {
+        await browser.storage.local.set({ saveHistory: history });
+        _historyData = history;
+        renderAll();
+        log(`✅ ${count} 件のエントリを補正しました。`);
+      }
+    } catch (e) {
+      log(`❌ エラー: ${e.message}`);
+    } finally {
+      _migrating = false;
+      btn.disabled = false;
+    }
+  });
+}
+
+// ----------------------------------------------------------------
 // ファイル名設定
 // ----------------------------------------------------------------
 async function setupFilenameSettings() {
@@ -1498,7 +1551,7 @@ function setupHistoryTab() {
     const filterTokens = _histFilterTag ? _histFilterTag.split(/\s+/).filter(Boolean) : [];
     const authorQ      = _histAuthorFilter.trim().toLowerCase();
     const filtered = _historyData.filter(e => {
-      const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
+      const entryTags = (e.tags || []).map(t => t.toLowerCase());
       const tagMatch = !filterTokens.length || (_histFilterMode === "and"
         ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
         : filterTokens.some(token => entryTags.some(t => t.includes(token))));
@@ -1958,7 +2011,7 @@ function setupHistoryTab() {
     const selectedEntries = _historyData.filter(e => _histSelected.has(e.id));
 
     // globalTags 更新（メイン + サブ）
-    const allTagsFlat = selectedEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
+    const allTagsFlat = selectedEntries.flatMap(e => e.tags || []);
     const currentGlobalSet = new Set(globalTags);
     const newGlobalTagsList = [...new Set(allTagsFlat)].filter(t => !currentGlobalSet.has(t));
     const newGlobalTags = [...globalTags, ...newGlobalTagsList];
@@ -2026,7 +2079,7 @@ function renderHistoryGrid() {
 
   const filtered = (hasTagFilter || hasAuthorFilter || hasSourceFilter)
     ? _historyData.filter(e => {
-        const entryTags = [...(e.tags || []), ...(e.subTags || [])].map(t => t.toLowerCase());
+        const entryTags = (e.tags || []).map(t => t.toLowerCase());
         const tagMatch = !hasTagFilter || (
           _histFilterMode === "and"
             ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
@@ -2480,7 +2533,6 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   const infoCancelBtn   = card.querySelector(".hist-info-editor-cancel");
 
   let pendingTags    = new Set(entry.tags    || []);
-  let pendingSubTags = new Set(entry.subTags || []); // サブタグ（data-type="sub" で追跡、視覚表示は同一）
   let pendingAuthors = [...getEntryAuthors(entry)];
 
   // ---- タグチップ描画（メインタグ + サブタグを同一エリアに混在表示）----
@@ -2498,25 +2550,13 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       chip.appendChild(del);
       editorChips.appendChild(chip);
     });
-    // サブタグ（視覚的に同一・data-type="sub" で区別して保存時に分離）
-    pendingSubTags.forEach(t => {
-      const chip = document.createElement("span");
-      chip.className = "hist-tag-editor-chip";
-      chip.dataset.type = "sub";
-      chip.textContent = t;
-      const del = document.createElement("button");
-      del.textContent = "×";
-      del.addEventListener("click", (e) => { e.stopPropagation(); pendingSubTags.delete(t); renderEditorChips(); });
-      chip.appendChild(del);
-      editorChips.appendChild(chip);
-    });
   }
 
   function showTagSuggestions(query) {
     editorSuggestions.innerHTML = "";
     if (!query) { editorSuggestions.style.display = "none"; return; }
     const q = query.toLowerCase();
-    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t) && !pendingSubTags.has(t)).slice(0, 8);
+    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t)).slice(0, 8);
     if (!matches.length) { editorSuggestions.style.display = "none"; return; }
     matches.forEach(t => {
       const item = document.createElement("div");
@@ -2582,7 +2622,6 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     if (isOpen) { infoEditor.classList.remove("open"); return; }
     // 現在値でリセット
     pendingTags    = new Set(entry.tags    || []);
-    pendingSubTags = new Set(entry.subTags || []);
     pendingAuthors = [...getEntryAuthors(entry)];
     pathInput.value = primary || "";
     renderEditorChips();
@@ -2649,7 +2688,6 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     const authorVal = authorInput.value.trim();
     if (authorVal && !pendingAuthors.includes(authorVal)) pendingAuthors.push(authorVal);
     const newTags    = [...pendingTags];
-    const newSubTags = [...pendingSubTags];
     const newAuthors = [...pendingAuthors];
     const newPath    = pathInput.value.trim();
 
@@ -2658,12 +2696,11 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     const target = history.find(h => h.id === entry.id);
     if (target) {
       target.tags    = newTags;
-      target.subTags = newSubTags;
       target.authors = newAuthors;
       delete target.author; // 旧フォーマット削除
       if (newPath) target.savePaths = [newPath];
       // グローバルタグ（メイン・サブ両方）・作者を更新
-      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags, ...newSubTags]);
+      const gTagSet    = new Set([...(stored.globalTags    || []), ...newTags]);
       const gAuthorSet = new Set([...(stored.globalAuthors || []), ...newAuthors]);
       await browser.storage.local.set({
         saveHistory:   history,
@@ -3424,7 +3461,7 @@ async function setupExternalImportTab() {
 
   // 離脱警告
   window.addEventListener("beforeunload", (e) => {
-    if (_extImporting) {
+    if (_extImporting || _migrating) {
       e.preventDefault();
       e.returnValue = "";
     }
@@ -3700,8 +3737,7 @@ async function executeExternalImport() {
       pageUrl:  "",
       savePaths: [e.savePath],
       filename: e.fileName,
-      tags:     [...fm.mainTags,  ..._extManualTags],
-      subTags:  [...fm.subTags,   ..._extManualSubTags],
+      tags:     [...new Set([...fm.mainTags, ...fm.subTags, ..._extManualTags, ..._extManualSubTags])],
       authors:  [...fm.authTags,  ..._extManualAuthors],
       thumbId:  null,
       source:   "external_import",
@@ -3773,7 +3809,7 @@ async function executeExternalImport() {
     .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
 
   // インポートしたタグ・サブタグ・権利者を globalTags / globalAuthors に追加
-  const importedTags    = pendingEntries.flatMap(e => [...(e.tags || []), ...(e.subTags || [])]);
+  const importedTags    = pendingEntries.flatMap(e => e.tags || []);
   const importedAuthors = pendingEntries.flatMap(e => e.authors || []);
   const gTagSet    = new Set([...(stored.globalTags    || []), ...importedTags]);
   const gAuthorSet = new Set([...(stored.globalAuthors || []), ...importedAuthors]);

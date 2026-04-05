@@ -5,6 +5,14 @@
 
 ---
 
+## [1.17.3] - 2026-04-05
+
+### Fixed
+- **保存ウィンドウ > 起動時プレビュー縮小バグの根本修正**：`setupModalEvents()` 内の IIFE が `await browser.storage.local.get(["leftPanelOrder","leftPanelHeights"])` を実行することで非同期ギャップが発生し、ブラウザがラッパー生成前の状態を初回描画していた問題を修正。`leftPanelOrder`/`leftPanelHeights` を `initModal()` の `Promise.all` に移動し、`setupModalEvents()` の引数として渡すことで IIFE を完全同期化した。あわせて `_panelInitReady` フラグを追加し、初期化完了前のリサイザー mouseup 操作を無効化した。
+- **v1.17.1 Fix1・Fix2 をリバート**：根本修正に伴い、暫定対処だった「`<img>` inline style 埋め込み（Fix1）」および「`#preview-resizer` mouseup での `leftPanelHeights["preview"]` 同時保存（Fix2）」を削除した。Fix3（ラッパー高さが img を下回らないガード）は存続。
+
+---
+
 ## [1.17.2] - 2026-04-05
 
 ### Fixed

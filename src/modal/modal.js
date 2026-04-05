@@ -108,6 +108,7 @@ async function initModal() {
     { recentTagDisplayCount, bookmarkDisplayCount },
     { retainTag, retainSubTag, retainAuthor },
     { retainedTags, retainedSubTags, retainedAuthors },
+    { leftPanelOrder, leftPanelHeights },
   ] = await Promise.all([
     browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
     browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
@@ -125,13 +126,14 @@ async function initModal() {
     browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]),
     browser.storage.local.get(["retainTag", "retainSubTag", "retainAuthor"]),
     browser.storage.local.get(["retainedTags", "retainedSubTags", "retainedAuthors"]),
+    browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]),
   ]);
 
 
   const defaultFilename = guessFilename(imageUrl);
 
   // HTMLを #modal-root に書き込む
-  document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename, modalSize?.previewHeight);
+  document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename);
 
   setupModalEvents(
     document, null, imageUrl, pageUrl, defaultFilename,
@@ -143,14 +145,15 @@ async function initModal() {
     globalAuthors || [], recentAuthors || [], authorDestinations || {},
     recentTagDisplayCount || 20, bookmarkDisplayCount || 20,
     !!retainTag, !!retainSubTag, !!retainAuthor,
-    retainedTags || [], retainedSubTags || [], retainedAuthors || []
+    retainedTags || [], retainedSubTags || [], retainedAuthors || [],
+    leftPanelOrder || ["preview", "recent-tags", "bookmarks"], leftPanelHeights || {}
   );
 }
 
 // ----------------------------------------------------------------
 // HTML / CSS
 // ----------------------------------------------------------------
-function buildModalHTML(defaultFilename, previewHeight) {
+function buildModalHTML(defaultFilename) {
   return `
   <style>
     *, *::before, *::after {
@@ -1258,8 +1261,7 @@ function buildModalHTML(defaultFilename, previewHeight) {
         <div class="col-left" id="col-left">
           <div class="col-left-scroll">
 
-            <img class="preview" id="preview" src="" alt="プレビュー"
-              ${previewHeight ? `style="height:${previewHeight}px"` : ""} />
+            <img class="preview" id="preview" src="" alt="プレビュー" />
             <div class="preview-resizer" id="preview-resizer"></div>
 
             <!-- 直近タグ（左カラム下部・スクロール可能） -->
@@ -1431,7 +1433,8 @@ function setupModalEvents(
   globalAuthors, recentAuthors, authorDestinations,
   recentTagDisplayCount = 20, bookmarkDisplayCount = 20,
   initialRetainTag = false, initialRetainSubTag = false, initialRetainAuthor = false,
-  initialRetainedTags = [], initialRetainedSubTags = [], initialRetainedAuthors = []
+  initialRetainedTags = [], initialRetainedSubTags = [], initialRetainedAuthors = [],
+  leftPanelOrder = ["preview", "recent-tags", "bookmarks"], leftPanelHeights = {}
 ) {
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
@@ -4310,6 +4313,7 @@ function setupModalEvents(
   // ================================================================
   // プレビューリサイザー（縦方向）
   // ================================================================
+  let _panelInitReady = false;
   const previewResizer = document.getElementById("preview-resizer");
   const PREVIEW_MIN_H  = 40;
 
@@ -4336,27 +4340,21 @@ function setupModalEvents(
   });
 
   document.addEventListener("mouseup", async () => {
+    if (!_panelInitReady) return;
     if (!previewDragging) return;
     previewDragging = false;
     previewResizer.classList.remove("dragging");
-    const imgH      = Math.round(previewEl.getBoundingClientRect().height);
-    const wrapperEl = previewEl.closest(".left-panel");
-    const wrapperH  = wrapperEl ? Math.round(wrapperEl.getBoundingClientRect().height) : null;
-    const [curModal, curPanel] = await Promise.all([
-      browser.storage.local.get("modalSize"),
-      browser.storage.local.get("leftPanelHeights"),
-    ]);
-    const ms  = curModal.modalSize        || {};
-    const lph = curPanel.leftPanelHeights || {};
-    ms.previewHeight = imgH;
-    if (wrapperH) lph["preview"] = wrapperH;
-    await browser.storage.local.set({ modalSize: ms, leftPanelHeights: lph });
+    const imgH = Math.round(previewEl.getBoundingClientRect().height);
+    const { modalSize: ms } = await browser.storage.local.get("modalSize");
+    const s = ms || {};
+    s.previewHeight = imgH;
+    await browser.storage.local.set({ modalSize: s });
   });
 
   // ================================================================
   // 左カラム パネル並び替え (a) ・パネル間リサイズ (b)
   // ================================================================
-  (async () => {
+  (() => {
     const scroll = document.querySelector(".col-left-scroll");
     if (!scroll) return;
 
@@ -4367,9 +4365,8 @@ function setupModalEvents(
       "bookmarks":   [document.getElementById("bookmark-section")],
     };
 
-    const { leftPanelOrder, leftPanelHeights } = await browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]);
-    const order   = leftPanelOrder  || ["preview", "recent-tags", "bookmarks"];
-    const heights = leftPanelHeights || {};
+    const order   = [...leftPanelOrder];
+    const heights = { ...leftPanelHeights };
 
     // ラッパーを生成（既存要素を包む）
     const wrappers = {};
@@ -4449,6 +4446,7 @@ function setupModalEvents(
         wrappers[aboveId].style.overflow = "hidden";
       });
       document.addEventListener("mouseup", () => {
+        if (!_panelInitReady) return;
         if (!dragging) return;
         dragging = false;
         rz.classList.remove("dragging");
@@ -4477,6 +4475,7 @@ function setupModalEvents(
     });
 
     applyOrder();
+    _panelInitReady = true;
   })();
 
   // ================================================================

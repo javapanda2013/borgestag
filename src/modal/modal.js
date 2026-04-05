@@ -128,10 +128,6 @@ async function initModal() {
     browser.storage.local.get(["retainedTags", "retainedSubTags", "retainedAuthors"]),
     browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]),
   ]);
-  // [BT-LOG L1] ストレージ取得値
-  console.log("[BT-L1] modalSize:", JSON.stringify(modalSize));
-  console.log("[BT-L1] leftPanelOrder:", JSON.stringify(leftPanelOrder));
-  console.log("[BT-L1] leftPanelHeights:", JSON.stringify(leftPanelHeights));
 
   const defaultFilename = guessFilename(imageUrl);
 
@@ -4325,8 +4321,6 @@ function setupModalEvents(
   } else if (leftPanelHeights?.["preview"]) {
     previewEl.style.height = (leftPanelHeights["preview"] - 5) + "px";
   }
-  // [BT-LOG L2] previewEl height セット後
-  console.log("[BT-L2] previewEl.style.height:", previewEl.style.height, "| modalSize.previewHeight:", modalSize?.previewHeight);
 
   let previewDragging = false;
   let previewStartY   = 0;
@@ -4403,8 +4397,6 @@ function setupModalEvents(
         if (id === "preview") {
           const imgH = parseFloat(previewEl.style.height) || 360;
           h = Math.max(h, imgH + 5); // +5 は preview-resizer の高さ分
-          // [BT-LOG L3]
-          console.log("[BT-L3] preview wrapper計算: heights[preview]=", heights[id], "imgH=", imgH, "maxH=", maxH, "→ h=", h);
         }
         wrapper.style.height   = h + "px";
         wrapper.style.overflow = "hidden";
@@ -4485,19 +4477,6 @@ function setupModalEvents(
 
     applyOrder();
     _panelInitReady = true;
-    // [BT-LOG L4] applyOrder後・初期化完了直後
-    console.log("[BT-L4] applyOrder完了 / _panelInitReady=true");
-    console.log("[BT-L4] previewEl.style.height=", previewEl.style.height, "| computed=", previewEl.getBoundingClientRect().height);
-    const previewWrapper = wrappers["preview"];
-    if (previewWrapper) console.log("[BT-L4] preview wrapper style.height=", previewWrapper.style.height, "| computed=", previewWrapper.getBoundingClientRect().height);
-    // [BT-LOG L5] 画像ロード後の最終状態
-    setTimeout(() => {
-      console.log("[BT-L5 500ms] previewEl.style.height=", previewEl.style.height, "| computed=", previewEl.getBoundingClientRect().height);
-      if (previewWrapper) console.log("[BT-L5 500ms] preview wrapper style.height=", previewWrapper.style.height, "| computed=", previewWrapper.getBoundingClientRect().height);
-      document.querySelectorAll(".left-panel").forEach(p => {
-        console.log("[BT-L5 500ms] panel", p.dataset.panelId, "style.height=", p.style.height, "| computed=", p.getBoundingClientRect().height);
-      });
-    }, 500);
   })();
 
   // ================================================================

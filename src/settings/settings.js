@@ -548,6 +548,9 @@ async function exportData() {
     "groupReadDirection",
     "instantSaveEnabled",
     "minimizeAfterSave",
+    "tagSortOrder",
+    "globalAuthors",
+    "authorDestinations",
     "filenameIncludeTag",
     "filenameIncludeSubtag",
     "filenameIncludeAuthor",
@@ -718,6 +721,7 @@ async function importData(e) {
       "tagDestinations", "globalTags", "lastSaveDir", "tagRecords",
       "folderBookmarks", "explorerRootPath", "explorerViewMode",
       "explorerStartPriority", "recentTags", "modalSize", "saveHistory",
+      "globalAuthors", "authorDestinations",
     ]);
     log(`✅ 現在の storage.local 取得成功`);
   } catch (err) {
@@ -757,6 +761,35 @@ async function importData(e) {
     log(`⚠️ tagDestinations なし（スキップ）`);
   }
 
+  // ---- authorDestinations ----
+  if (parsed.authorDestinations && typeof parsed.authorDestinations === "object") {
+    const authorDestCount = Object.keys(parsed.authorDestinations).length;
+    log(`👤 authorDestinations: ${authorDestCount} 権利者を処理中…`);
+    try {
+      const merged = current.authorDestinations || {};
+      let addedAuthorDests = 0;
+      for (const [author, dests] of Object.entries(parsed.authorDestinations)) {
+        if (!Array.isArray(dests)) continue;
+        if (!merged[author]) merged[author] = [];
+        for (const d of dests) {
+          if (!d.path) continue;
+          const exists = merged[author].some((x) => x.path === d.path);
+          if (!exists) {
+            merged[author].push({ ...d, id: crypto.randomUUID() });
+            addedAuthorDests++;
+          }
+        }
+      }
+      await browser.storage.local.set({ authorDestinations: merged });
+      log(`  → ${addedAuthorDests} 件の権利者保存先を追加`);
+    } catch (err) {
+      logError(`authorDestinations の保存に失敗: ${err.message}`);
+      return;
+    }
+  } else {
+    log(`⚠️ authorDestinations なし（スキップ）`);
+  }
+
   // ---- globalTags ----
   if (Array.isArray(parsed.globalTags)) {
     try {
@@ -768,6 +801,22 @@ async function importData(e) {
       log(`🏷 globalTags: ${addedTags} 件追加（合計 ${existing.size} 件）`);
     } catch (err) {
       logError(`globalTags の保存に失敗: ${err.message}`);
+      return;
+    }
+  }
+
+  // ---- globalAuthors ----
+  if (Array.isArray(parsed.globalAuthors)) {
+    try {
+      const existing = new Set(current.globalAuthors || []);
+      let addedAuthors = 0;
+      for (const a of parsed.globalAuthors) {
+        if (!existing.has(a)) { existing.add(a); addedAuthors++; }
+      }
+      await browser.storage.local.set({ globalAuthors: Array.from(existing) });
+      log(`👤 globalAuthors: ${addedAuthors} 件追加（合計 ${existing.size} 件）`);
+    } catch (err) {
+      logError(`globalAuthors の保存に失敗: ${err.message}`);
       return;
     }
   }
@@ -810,6 +859,14 @@ async function importData(e) {
       await browser.storage.local.set({ explorerFolderSort: parsed.explorerFolderSort });
       log(`🔤 explorerFolderSort: ${parsed.explorerFolderSort}`);
     } catch (err) { logError(`explorerFolderSort の保存に失敗: ${err.message}`); return; }
+  }
+
+  // ---- tagSortOrder ----
+  if (parsed.tagSortOrder) {
+    try {
+      await browser.storage.local.set({ tagSortOrder: parsed.tagSortOrder });
+      log(`🔤 tagSortOrder: ${parsed.tagSortOrder}`);
+    } catch (err) { logError(`tagSortOrder の保存に失敗: ${err.message}`); return; }
   }
 
   // ---- exportPath / exportAutoSave ----

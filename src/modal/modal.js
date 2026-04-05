@@ -241,7 +241,7 @@ function buildModalHTML(defaultFilename) {
       flex: 1; overflow-y: auto; padding: 14px 12px;
       display: flex; flex-direction: column; min-height: 0;
     }
-    .left-panel { display: flex; flex-direction: column; position: relative; }
+    .left-panel { display: flex; flex-direction: column; position: relative; flex-shrink: 0; }
     .left-panel-hdr {
       display: flex; align-items: center; justify-content: space-between; min-height: 0;
     }
@@ -301,7 +301,7 @@ function buildModalHTML(defaultFilename) {
 
     /* プレビュー */
     .preview {
-      width: 100%; height: 120px; min-height: 40px; object-fit: contain;
+      width: 100%; height: 360px; min-height: 40px; object-fit: contain;
       border-radius: 6px; border: 1px solid #e8e8e8; background: #f6f6f6;
       flex-shrink: 0;
     }
@@ -4322,6 +4322,8 @@ function setupModalEvents(
 
   if (modalSize?.previewHeight) {
     previewEl.style.height = modalSize.previewHeight + "px";
+  } else if (leftPanelHeights?.["preview"]) {
+    previewEl.style.height = (leftPanelHeights["preview"] - 5) + "px";
   }
   // [BT-LOG L2] previewEl height セット後
   console.log("[BT-L2] previewEl.style.height:", previewEl.style.height, "| modalSize.previewHeight:", modalSize?.previewHeight);
@@ -4399,7 +4401,7 @@ function setupModalEvents(
         let h = Math.min(heights[id], maxH);
         // preview パネルは img 高さを下回るクリップを禁止
         if (id === "preview") {
-          const imgH = parseFloat(previewEl.style.height) || 120;
+          const imgH = parseFloat(previewEl.style.height) || 360;
           h = Math.max(h, imgH + 5); // +5 は preview-resizer の高さ分
           // [BT-LOG L3]
           console.log("[BT-L3] preview wrapper計算: heights[preview]=", heights[id], "imgH=", imgH, "maxH=", maxH, "→ h=", h);

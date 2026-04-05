@@ -4408,9 +4408,6 @@ function setupModalEvents(
         }
         wrapper.style.height   = h + "px";
         wrapper.style.overflow = "hidden";
-      } else if (id === "preview") {
-        // heights["preview"] が未保存の場合
-        console.log("[BT-L3] preview wrapper: heights未設定 | previewEl.style.height=", previewEl.style.height);
       }
       wrappers[id] = wrapper;
     }

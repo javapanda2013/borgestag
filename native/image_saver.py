@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.8.3
+version: 1.8.4
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -274,11 +274,49 @@ def handle_save_image_base64(data_url, save_path):
         }
 
 
-def handle_mkdir(path):
+def _norm_for_compare(p):
     """
-    フォルダを新規作成する
+    パス比較用の正規化:
+      - abspath で絶対化
+      - normpath で .. や // を解決
+      - 末尾セパレータ除去
+      - Windows 前提で大文字小文字を無視するため小文字化
+    """
+    if not p:
+        return ""
+    n = os.path.normpath(os.path.abspath(p))
+    n = n.rstrip("\\/")
+    return n.lower()
+
+
+def handle_mkdir(path, allowed_roots=None):
+    """
+    フォルダを新規作成する。
+    background.js 側で一次検証済みだが、Native Messaging を直接叩く悪意ある呼出に
+    備えて二次検証を行う:
+      - path に .. が含まれるなら拒否
+      - allowed_roots が与えられた場合、その配下でなければ拒否
+    allowed_roots が None / 空 の場合は後方互換のため従来動作（検証なし）。
     """
     try:
+        if not isinstance(path, str) or not path:
+            return {"ok": False, "error": "パスが指定されていません"}
+        if ".." in path:
+            return {"ok": False, "error": "許可されていないパスです（相対成分を含む）"}
+
+        if allowed_roots:
+            target = _norm_for_compare(path)
+            allowed_norm = [_norm_for_compare(r) for r in allowed_roots if r]
+            ok = False
+            for r in allowed_norm:
+                if not r:
+                    continue
+                if target == r or target.startswith(r + os.sep.lower()) or target.startswith(r + "\\"):
+                    ok = True
+                    break
+            if not ok:
+                return {"ok": False, "error": "許可されていないパスです（許可ルート外）"}
+
         os.makedirs(path, exist_ok=True)
         return {"ok": True}
     except PermissionError:
@@ -665,7 +703,7 @@ def main():
             )
 
         elif cmd == "MKDIR":
-            result = handle_mkdir(message.get("path", ""))
+            result = handle_mkdir(message.get("path", ""), message.get("allowedRoots"))
 
         elif cmd == "WRITE_FILE":
             result = handle_write_file(

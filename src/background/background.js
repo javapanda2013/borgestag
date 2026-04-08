@@ -137,7 +137,7 @@ browser.runtime.onMessage.addListener(async (message) => {
     case "GET_LAST_SAVE_DIR":
       return getLastSaveDir();
     case "MKDIR":
-      return makeDir(message.path);
+      return makeDir(message.path, message.contextPath);
     case "WRITE_FILE":
       return writeFile(message.path, message.content);
     // ---- タグ別保存先 ----
@@ -251,8 +251,37 @@ browser.runtime.onMessage.addListener(async (message) => {
  * ネイティブアプリに1回だけメッセージを送り、応答を返す。
  * Native Messaging は常時接続ではなく、リクエスト毎に接続・切断する。
  */
+// Native Messaging のペイロード上限（Firefox 仕様 4MB）に対する安全マージン
+const NATIVE_PAYLOAD_MAX_BYTES = 3 * 1024 * 1024;
+
 function sendNative(payload) {
   return new Promise((resolve, reject) => {
+    // ① 入力検証: 型・必須フィールド・JSONシリアライズ可否・サイズ上限
+    if (!payload || typeof payload !== "object") {
+      addLog("ERROR", "sendNative: payload が object ではありません");
+      reject(new Error("payload が不正です（object ではない）"));
+      return;
+    }
+    if (typeof payload.cmd !== "string" || !payload.cmd) {
+      addLog("ERROR", "sendNative: cmd が文字列ではありません");
+      reject(new Error("payload.cmd が不正です"));
+      return;
+    }
+    let payloadJson;
+    try {
+      payloadJson = JSON.stringify(payload);
+    } catch (e) {
+      addLog("ERROR", `sendNative: JSON化失敗 ${payload.cmd}`, e.message);
+      reject(new Error(`payload を JSON 化できません: ${e.message}`));
+      return;
+    }
+    if (payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
+      const kb = (payloadJson.length / 1024).toFixed(0);
+      addLog("ERROR", `sendNative: payload 過大 ${payload.cmd}`, `${kb} KB`);
+      reject(new Error(`payload が大きすぎます: ${kb} KB（上限 ${NATIVE_PAYLOAD_MAX_BYTES / 1024 / 1024} MB）`));
+      return;
+    }
+
     let port;
     try {
       port = browser.runtime.connectNative(NATIVE_APP_ID);
@@ -262,7 +291,7 @@ function sendNative(payload) {
       return;
     }
 
-    addLog("INFO", `Native送信: ${payload.cmd}`, JSON.stringify(payload).slice(0, 200));
+    addLog("INFO", `Native送信: ${payload.cmd}`, payloadJson.slice(0, 200));
 
     const timer = setTimeout(() => {
       port.disconnect();
@@ -466,9 +495,82 @@ async function getLastSaveDir() {
 // ----------------------------------------------------------------
 // フォルダ作成
 // ----------------------------------------------------------------
-async function makeDir(path) {
+
+/**
+ * 既存ストレージから「フォルダ作成を許可するルート」一覧を集約して返す。
+ * 集約元:
+ *   - folderBookmarks[].path
+ *   - tagDestinations[*][].path（全タグの全保存先）
+ *   - explorerRootPath
+ *   - lastSaveDir
+ *   - 引数 contextPath（modal が現在表示中のフォルダ — 案 Z）
+ * 重複・空文字は除去し、normalizePath で正規化済みの配列を返す。
+ */
+async function getAllowedRoots(contextPath) {
+  const stored = await browser.storage.local.get([
+    "folderBookmarks",
+    "tagDestinations",
+    "explorerRootPath",
+    "lastSaveDir",
+  ]);
+  const roots = [];
+  if (Array.isArray(stored.folderBookmarks)) {
+    for (const b of stored.folderBookmarks) if (b?.path) roots.push(b.path);
+  }
+  if (stored.tagDestinations && typeof stored.tagDestinations === "object") {
+    for (const tag of Object.keys(stored.tagDestinations)) {
+      const list = stored.tagDestinations[tag];
+      if (Array.isArray(list)) {
+        for (const d of list) if (d?.path) roots.push(d.path);
+      }
+    }
+  }
+  if (stored.explorerRootPath) roots.push(stored.explorerRootPath);
+  if (stored.lastSaveDir)      roots.push(stored.lastSaveDir);
+  if (contextPath)             roots.push(contextPath);
+
+  const normalized = roots
+    .map((r) => normalizePath(r))
+    .filter((r) => typeof r === "string" && r.length > 0);
+  return Array.from(new Set(normalized));
+}
+
+/**
+ * path が allowedRoots のいずれかと一致、または配下にあるか判定する。
+ * Windows パス前提で大文字小文字を無視して比較する。
+ */
+function isPathUnderAllowedRoot(path, allowedRoots) {
+  const norm = normalizePath(path);
+  if (!norm) return false;
+  const lower = norm.toLowerCase();
+  for (const root of allowedRoots) {
+    const r = root.toLowerCase();
+    if (lower === r) return true;
+    if (lower.startsWith(r + "\\")) return true;
+  }
+  return false;
+}
+
+async function makeDir(path, contextPath) {
   try {
-    const res = await sendNative({ cmd: "MKDIR", path });
+    // ① プリチェック: 相対成分（..）を含むパスは即拒否
+    if (typeof path !== "string" || !path) {
+      return { ok: false, error: "パスが指定されていません" };
+    }
+    if (path.includes("..")) {
+      addLog("WARN", `makeDir: 相対パス成分を含むパスを拒否: ${path}`);
+      return { ok: false, error: "許可されていないパスです（相対成分を含む）" };
+    }
+
+    // ② ホワイトリスト検証
+    const allowedRoots = await getAllowedRoots(contextPath);
+    if (!isPathUnderAllowedRoot(path, allowedRoots)) {
+      addLog("WARN", `makeDir: 許可ルート外のパスを拒否: ${path}`);
+      return { ok: false, error: "許可されていないパスです（許可ルート外）" };
+    }
+
+    // ③ Native へ。Python 側で二次検証するため allowedRoots も同送する
+    const res = await sendNative({ cmd: "MKDIR", path, allowedRoots });
     return res;
   } catch (err) {
     console.error("[ImageSaver] makeDir error:", err);
@@ -713,39 +815,6 @@ async function getBookmarks() {
 async function setBookmarks(data) {
   await browser.storage.local.set({ folderBookmarks: data });
   return { ok: true };
-}
-
-// ----------------------------------------------------------------
-// モーダルサイズの保存・復元
-// ----------------------------------------------------------------
-
-/** 前回のモーダルサイズを返す */
-async function getModalSize() {
-  const stored = await browser.storage.local.get("modalSize");
-  return { modalSize: stored.modalSize || null };
-}
-
-/** モーダルサイズを保存する（リサイズ操作の終端から呼ばれる） */
-async function setModalSize(size) {
-  // 既存フィールド（previewHeight など）を保持するため読み書きで更新する
-  const cur = await browser.storage.local.get("modalSize");
-  const ms  = cur.modalSize || {};
-  await browser.storage.local.set({ modalSize: { ...ms, ...size } });
-  return { ok: true };
-}
-
-// ----------------------------------------------------------------
-// ユーティリティ
-// ----------------------------------------------------------------
-
-/**
- * Windowsパスの正規化
- * - \\ の連続を \ 1個に統一
- * - 末尾の \ を除去
- */
-function normalizePath(p) {
-  if (!p) return p;
-  return p.replace(/\\{2,}/g, "\\").replace(/\\+$/, "");
 }
 
 // ----------------------------------------------------------------
@@ -1433,12 +1502,20 @@ function getRefererForUrl(url) {
 // モーダルサイズの保存・復元
 // ----------------------------------------------------------------
 
+/** 前回のモーダルサイズを返す */
 async function getModalSize() {
   const stored = await browser.storage.local.get("modalSize");
   return { modalSize: stored.modalSize || null };
 }
 
+/**
+ * モーダルサイズを保存する（リサイズ操作の終端から呼ばれる）
+ * 既存フィールド（previewHeight など）を保持するため読み書きでマージする。
+ * 単純上書きにすると v1.17.3 で修正した previewHeight 消失バグが再発するため注意。
+ */
 async function setModalSize(size) {
-  await browser.storage.local.set({ modalSize: size });
+  const cur = await browser.storage.local.get("modalSize");
+  const ms  = cur.modalSize || {};
+  await browser.storage.local.set({ modalSize: { ...ms, ...size } });
   return { ok: true };
 }

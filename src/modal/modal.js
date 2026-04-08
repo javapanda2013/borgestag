@@ -2954,6 +2954,7 @@ function setupModalEvents(
     const res = await browser.runtime.sendMessage({
       type: "MKDIR",
       path: newPath,
+      contextPath: currentPath,
     });
 
     // 作成後に現在ディレクトリを再読み込み
@@ -3009,7 +3010,7 @@ function setupModalEvents(
         showToast(shadow, `「${tagName}」は既に存在します。絞込表示に切り替えました`);
       } else {
         // 存在しない → 作成
-        await browser.runtime.sendMessage({ type: "MKDIR", path: newPath });
+        await browser.runtime.sendMessage({ type: "MKDIR", path: newPath, contextPath: currentPath });
         showToast(shadow, `✅ フォルダ「${tagName}」を作成しました`);
       }
     }

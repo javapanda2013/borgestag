@@ -5,6 +5,20 @@
 
 ---
 
+## [1.18.0] - 2026-04-08
+
+### Security
+- **Path Traversal 対策（MKDIR）**：フォルダ作成パスを許可ルート（folderBookmarks / tagDestinations / explorerRootPath / lastSaveDir / 現在表示中のエクスプローラーパス）配下に限定。`..` を含むパスは即拒否。background.js / image_saver.py の二重検証で、Native Messaging を直接叩く悪意ある呼出にも対応。
+- **Native Messaging ペイロード検証**：`sendNative()` で型・`cmd`・JSON化可能性・サイズ上限（3MB）を送信前に検証。Firefox の 4MB 上限超過による無言切断を防止。
+
+### Fixed
+- **保存ウィンドウ > プレビュー高さ消失バグの完全修正**：`background.js` 内で重複定義されていた `setModalSize()` の後定義が既存フィールドを単純上書きしていたため、v1.17.3 で修正したはずの `previewHeight` 消失バグが再発状態にあった。重複定義を解消し、スプレッド構文によるマージ版に統一。`getModalSize` / `normalizePath` の重複定義も併せて解消。
+
+### Changed
+- **native/image_saver.py**: version 1.8.3 → 1.8.4（`handle_mkdir` に二次検証追加）
+
+---
+
 ## [1.17.7] - 2026-04-08
 
 ### Fixed

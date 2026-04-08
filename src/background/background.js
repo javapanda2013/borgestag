@@ -342,7 +342,14 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
   const ext  = dotIdx > 0 ? filename.slice(dotIdx) : "";
 
   // ファイル名に使えない文字を除去するヘルパー
-  const sanitize = (s) => s.replace(/[\\/:*?"<>|]/g, "").trim();
+  // - Windows禁止文字（\ / : * ? " < > |）
+  // - 制御文字（\x00-\x1f）
+  // - 末尾の空白・ドット（Windowsで無効）
+  const sanitize = (s) => s
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/[\x00-\x1f]/g, "")
+    .replace(/[\s.]+$/, "")
+    .trim();
 
   const parts = [];
   if (filenameIncludeTag    && tags?.length)    parts.push(...tags.map(sanitize).filter(Boolean));
@@ -397,7 +404,6 @@ async function handleSave(payload) {
       await updateRecentTags(tags); // recentTagsはメインタグのみ
     }
     if (tags && tags.length > 0 && !skipTagRecord) {
-      addLog("DEBUG", `recordTagDestination: tags=${JSON.stringify(tags)} subTags=${JSON.stringify(subTags || [])} savePath=${savePath}`);
       await recordTagDestination(tags, savePath); // 保存先関連付けはサブタグ除く
     }
 
@@ -513,9 +519,11 @@ async function recordTagDestination(tags, savePath) {
   const stored = await browser.storage.local.get("tagDestinations");
   const dest = stored.tagDestinations || {};
 
+  const normalizedSavePath = normalizePath(savePath);
   for (const tag of tags) {
     if (!dest[tag]) dest[tag] = [];
-    const alreadyExists = dest[tag].some((d) => d.path === savePath);
+    // パス末尾の \ や \\ 連続の差で重複登録されないよう、正規化して比較する
+    const alreadyExists = dest[tag].some((d) => normalizePath(d.path) === normalizedSavePath);
     if (!alreadyExists) {
       dest[tag].push({
         id:    crypto.randomUUID(),
@@ -1162,7 +1170,6 @@ async function handleSaveMulti(payload) {
         await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
       }
       if (tags && tags.length > 0 && !skipTagRecord) {
-        addLog("DEBUG", `recordTagDestination(multi): tags=${JSON.stringify(tags)} subTags=${JSON.stringify(subTags || [])} savePath=${savePath}`);
         await recordTagDestination(tags, savePath);
       }
       if (!pyThumbData && res.thumbData) {

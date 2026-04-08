@@ -5,6 +5,20 @@
 
 ---
 
+## [1.17.7] - 2026-04-08
+
+### Fixed
+- **デバッグログ削除**：`recordTagDestination` 系の `addLog("DEBUG", ...)` 残存（background.js 2箇所）を削除。
+- **ファイル名サニタイズ強化**：`buildFilenameWithMeta` の `sanitize()` で制御文字（`\x00-\x1f`）と末尾の空白・ドット（Windowsで無効）を追加除去するよう変更。
+- **タグ→保存先関連付けの重複検出を強化**：`recordTagDestination` のパス比較を `normalizePath` 経由に変更し、末尾 `\` の有無や `\\` 連続の差で同一フォルダが重複登録される問題を修正。
+
+### Docs
+- **設計書 01_基本設計書.md の整合性修正**：
+  - IndexedDB 名を実装に合わせて `ImageSaverThumbsDB` → `ImageSaverThumbDB` に修正。
+  - `recentTags` の上限を実装に合わせて「最大20件」→「最大100件」に修正。
+
+---
+
 ## [1.17.6] - 2026-04-05
 
 ### Fixed

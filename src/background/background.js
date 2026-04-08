@@ -275,7 +275,10 @@ function sendNative(payload) {
       reject(new Error(`payload を JSON 化できません: ${e.message}`));
       return;
     }
-    if (payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
+    // WRITE_FILE はエクスポート用途で大容量 JSON（数百 MB 級）を渡すことがあり、
+    // Firefox の拡張→ネイティブ方向は実質的に大容量を許容するため上限チェックから除外する。
+    // それ以外のコマンドは想定外の巨大ペイロードを早期に弾いて Native 切断事故を防ぐ。
+    if (payload.cmd !== "WRITE_FILE" && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
       const kb = (payloadJson.length / 1024).toFixed(0);
       addLog("ERROR", `sendNative: payload 過大 ${payload.cmd}`, `${kb} KB`);
       reject(new Error(`payload が大きすぎます: ${kb} KB（上限 ${NATIVE_PAYLOAD_MAX_BYTES / 1024 / 1024} MB）`));

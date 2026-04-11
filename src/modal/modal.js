@@ -3817,14 +3817,31 @@ function setupModalEvents(
   chkRetainTag.addEventListener("change", () => {
     retainTag = chkRetainTag.checked;
     browser.storage.local.set({ retainTag });
+    // OFF にした瞬間に入力欄をクリア
+    if (!retainTag) {
+      selectedTags.length = 0;
+      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      tagInput.value = "";
+      hideSuggestions();
+    }
   });
   chkRetainSubtag.addEventListener("change", () => {
     retainSubTag = chkRetainSubtag.checked;
     browser.storage.local.set({ retainSubTag });
+    if (!retainSubTag) {
+      selectedSubTags.length = 0;
+      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      subTagInput.value = "";
+      hideSubSuggestions();
+    }
   });
   chkRetainAuthor.addEventListener("change", () => {
     retainAuthor = chkRetainAuthor.checked;
     browser.storage.local.set({ retainAuthor });
+    if (!retainAuthor) {
+      selectedAuthors = [];
+      renderAuthorChips();
+    }
   });
 
   // 引き継ぎリセットボタン：チェックを全OFF + 現在の入力・保存済み引き継ぎ値をクリア

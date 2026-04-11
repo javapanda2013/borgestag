@@ -2494,6 +2494,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
             <input type="text" class="hist-path-input" placeholder="保存先パス" />
           </div>
           <div class="hist-info-editor-actions">
+            <button class="hist-info-editor-save">💾 保存</button>
             <button class="hist-info-editor-cancel">✕ 閉じる</button>
             <button class="hist-info-editor-undo" disabled>↩ アンドゥ</button>
           </div>
@@ -2541,6 +2542,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   const authorSugEl     = card.querySelector(".hist-author-suggestions");
   const pathInput       = card.querySelector(".hist-path-input");
   const undoBtn         = card.querySelector(".hist-info-editor-undo");
+  const infoSaveBtn     = card.querySelector(".hist-info-editor-save");
   const infoCancelBtn   = card.querySelector(".hist-info-editor-cancel");
 
   let pendingTags    = new Set(entry.tags    || []);
@@ -2705,6 +2707,17 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     }
     infoEditor.classList.add("open");
     editorInput.focus();
+  });
+
+  // 明示的な保存ボタン（リアルタイム保存と併用）
+  infoSaveBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await saveEntryNow();
+    showStatus("保存しました ✔");
+    // ボタンに視覚フィードバック
+    infoSaveBtn.textContent = "✔ 保存済み";
+    infoSaveBtn.disabled = true;
+    setTimeout(() => { infoSaveBtn.textContent = "💾 保存"; infoSaveBtn.disabled = false; }, 1200);
   });
 
   infoCancelBtn.addEventListener("click", (e) => {

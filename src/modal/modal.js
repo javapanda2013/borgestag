@@ -1117,10 +1117,14 @@ function buildModalHTML(defaultFilename) {
       display: none; z-index: 200; min-width: 140px; font-size: 11px;
     }
     .history-info-author-suggestions.visible { display: block; }
-    .history-info-path-display {
-      font-size: 10px; color: rgba(255,255,255,0.6); word-break: break-all;
-      background: rgba(255,255,255,0.08); border-radius: 3px; padding: 2px 5px;
+    .history-info-path-input {
+      font-size: 10px; color: rgba(255,255,255,0.85); word-break: break-all;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 3px; padding: 2px 5px; width: 100%; box-sizing: border-box;
+      font-family: inherit; outline: none;
     }
+    .history-info-path-input::placeholder { color: rgba(255,255,255,0.4); }
+    .history-info-path-input:focus { border-color: rgba(255,255,255,0.5); }
     .history-info-editor-actions {
       display: flex; gap: 5px; justify-content: flex-end; align-items: center; margin-top: 2px;
     }
@@ -2071,7 +2075,7 @@ function setupModalEvents(
               </div>
               <div class="history-info-field-group">
                 <div class="history-info-field-label">📁 保存先情報</div>
-                <div class="history-info-path-display"></div>
+                <input type="text" class="history-info-path-input" placeholder="保存先パス" />
               </div>
               <div class="history-info-editor-actions">
                 <button class="history-info-editor-cancel">✕</button>
@@ -2170,7 +2174,7 @@ function setupModalEvents(
       const authChipsArea = item.querySelector(".history-info-author-chips");
       const authInput     = item.querySelector(".history-info-author-input");
       const authSugPanel  = item.querySelector(".history-info-author-suggestions");
-      const pathDisplay   = item.querySelector(".history-info-path-display");
+      const pathInput     = item.querySelector(".history-info-path-input");
       const infoThumb     = item.querySelector(".history-info-thumb");
       const cancelBtn     = item.querySelector(".history-info-editor-cancel");
       const saveBtn       = item.querySelector(".history-info-editor-save");
@@ -2261,7 +2265,7 @@ function setupModalEvents(
         tagSugPanel.classList.remove("visible");
         authInput.value = "";
         authSugPanel.classList.remove("visible");
-        pathDisplay.textContent = paths.length > 0 ? paths.join(" / ") : "（保存先なし）";
+        pathInput.value = paths.length > 0 ? paths[0] : "";
         // サムネイル取得→インライン表示
         const thumbImg = item.querySelector(".history-thumb");
         if (thumbImg?.src) {
@@ -2332,16 +2336,23 @@ function setupModalEvents(
         if (authVal && !pendingAuthors.includes(authVal)) pendingAuthors.push(authVal);
         const newTags    = [...pendingTags];
         const newAuthors = [...pendingAuthors];
+        const newPath    = pathInput.value.trim();
+        const newSavePaths = newPath ? [newPath] : undefined;
         const res = await browser.runtime.sendMessage({
-          type:    "UPDATE_HISTORY_ENTRY",
-          id:      entry.id,
-          tags:    newTags,
-          authors: newAuthors,
+          type:      "UPDATE_HISTORY_ENTRY",
+          id:        entry.id,
+          tags:      newTags,
+          authors:   newAuthors,
+          savePaths: newSavePaths,
         });
         if (res?.ok) {
           entry.tags = newTags; entry.authors = newAuthors; delete entry.author;
+          if (newSavePaths) entry.savePaths = newSavePaths;
           const idx = saveHistory.findIndex(h => h.id === entry.id);
-          if (idx !== -1) { saveHistory[idx].tags = newTags; saveHistory[idx].authors = newAuthors; delete saveHistory[idx].author; }
+          if (idx !== -1) {
+            saveHistory[idx].tags = newTags; saveHistory[idx].authors = newAuthors; delete saveHistory[idx].author;
+            if (newSavePaths) saveHistory[idx].savePaths = newSavePaths;
+          }
           // タイルのメタ表示を更新
           const metaEl = item.querySelector(".history-meta");
           if (metaEl) {
@@ -3192,7 +3203,10 @@ function setupModalEvents(
       const onlyPath = candidates[0].path;
       if (!selectedPaths.has(onlyPath)) {
         selectedPaths.add(onlyPath);
+        selectedPath = onlyPath; // 通常保存ボタン用にも反映
         updateMultiFooter();
+        updatePathDisplay(onlyPath);
+        updateSaveButton();
         // チェックボックスのUI反映
         const item = destCandidates.querySelector(".dest-candidate-item");
         if (item) {

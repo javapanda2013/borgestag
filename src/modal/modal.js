@@ -3945,11 +3945,13 @@ function setupModalEvents(
       const result = await showContinuousEndDialog();
       if (!result) return; // キャンセル
       if (result === "newSession") {
-        // 現在のセッションを完了し、新しいセッションで連続保存モードを再開始
+        // 現在グループ化に用いているセッションIDを完了し、新しいセッションIDで再開始
         csSession = {
           id:        crypto.randomUUID(),
           startedAt: new Date().toISOString(),
           count:     0,
+          savePaths:    [],
+          selectedPath: null,
         };
         await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
         chkContinuous.checked = true;

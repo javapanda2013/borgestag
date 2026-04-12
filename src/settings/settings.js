@@ -2511,7 +2511,35 @@ function renderHistoryGridGrouped(grid, entries) {
           <div class="hist-card-date">${escHtml(date)}</div>
         </div>`;
 
+      // グループ選択チェックボックス
+      const groupChk = document.createElement("input");
+      groupChk.type = "checkbox";
+      groupChk.className = "hist-select-box hist-group-select-box";
+      // 全アイテムが選択済みならチェック状態にする
+      const allSelected = group.items.every(it => _histSelected.has(it.id));
+      groupChk.checked = allSelected;
+      groupChk.title = "グループ内を一括選択";
+      groupChk.addEventListener("change", (e) => {
+        for (const it of group.items) {
+          if (e.target.checked) _histSelected.add(it.id);
+          else                  _histSelected.delete(it.id);
+        }
+        // 展開エリア内の個別チェックボックスも同期
+        expandArea.querySelectorAll(".hist-select-box").forEach(cb => {
+          cb.checked = e.target.checked;
+          cb.closest(".hist-card")?.classList.toggle("selected", e.target.checked);
+        });
+        document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
+        document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
+        document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+        document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
+        document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
+        document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
+        document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
+      });
+
       card.appendChild(badge);
+      card.appendChild(groupChk);
       card.appendChild(placeholder);
       card.appendChild(overlay);
 
@@ -2909,7 +2937,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   infoEditBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const isOpen = infoEditor.classList.contains("open");
-    if (isOpen) { infoEditor.classList.remove("open"); renderHistoryGrid(); return; }
+    if (isOpen) { infoEditor.classList.remove("open"); return; }
     // 現在値でリセット
     pendingTags    = new Set(entry.tags    || []);
     pendingAuthors = [...getEntryAuthors(entry)];
@@ -2951,14 +2979,12 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   infoCancelBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     infoEditor.classList.remove("open");
-    renderHistoryGrid();
   });
 
   // オーバーレイ背景クリックで閉じる
   infoEditor.addEventListener("click", (e) => {
     if (e.target === infoEditor) {
       infoEditor.classList.remove("open");
-      renderHistoryGrid();
     }
   });
 
@@ -3003,7 +3029,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   });
 
   // ---- パス入力 blur で自動保存 ----
-  pathInput.addEventListener("blur", async () => {
+  async function commitPathChange() {
     const newPath = pathInput.value.trim();
     if (newPath !== _prevPath) {
       _undoStack.push({ type: "changePath", oldPath: _prevPath, newPath });
@@ -3011,6 +3037,10 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       await saveEntryNow();
       updateUndoBtn();
     }
+  }
+  pathInput.addEventListener("blur", commitPathChange);
+  pathInput.addEventListener("keydown", async (e) => {
+    if (e.key === "Enter") { e.preventDefault(); await commitPathChange(); }
   });
 
   // ---- アンドゥ ----

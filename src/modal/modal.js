@@ -3908,24 +3908,7 @@ function setupModalEvents(
     const active = !!csSession;
     chkContinuous.checked = active;
     continuousBadge.classList.toggle("active", active);
-    if (!active) return;
-
-    // 候補モードの保存先を引き継ぎ（refreshCandidatePanel後に適用するため少し遅延）
-    if (csSession.savePaths?.length || csSession.selectedPath) {
-      setTimeout(() => {
-        if (csSession.savePaths?.length) {
-          for (const p of csSession.savePaths) selectedPaths.add(p);
-          selectedPath = [...selectedPaths][0] || null;
-          updatePathDisplay(selectedPath);
-          updateSaveButton();
-          refreshCandidatePanel();
-        } else if (csSession.selectedPath) {
-          selectedPath = csSession.selectedPath;
-          updatePathDisplay(selectedPath);
-          updateSaveButton();
-        }
-      }, 300);
-    }
+    // 連続保存モード中でも保存先は固定せず、候補パネルの通常操作を許可する
   }
   applyContinuousState();
 
@@ -3950,8 +3933,6 @@ function setupModalEvents(
           id:        crypto.randomUUID(),
           startedAt: new Date().toISOString(),
           count:     0,
-          savePaths:    [],
-          selectedPath: null,
         };
         await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
         // モジュールレベルの保存先変数と UI もリセット
@@ -3962,10 +3943,14 @@ function setupModalEvents(
         chkContinuous.checked = true;
         return;
       }
-      // 終了
+      // 終了：セッション破棄と保存先変数のリセット
       chkContinuous.checked = false;
       csSession = null;
       await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: null });
+      selectedPath = null;
+      selectedPaths.clear();
+      updatePathDisplay(null);
+      updateSaveButton();
       continuousBadge.classList.remove("active");
     }
   });
@@ -4037,12 +4022,10 @@ function setupModalEvents(
     });
   }
 
-  /** 保存成功後にセッション情報を更新（保存先を引き継ぎ用に保存） */
-  async function updateContinuousSession(usedSavePaths, usedSelectedPath) {
+  /** 保存成功後にセッション情報を更新（カウントのみ管理、保存先は固定しない） */
+  async function updateContinuousSession() {
     if (!csSession) return;
-    csSession.count        = (csSession.count || 0) + 1;
-    csSession.savePaths    = usedSavePaths    || [];
-    csSession.selectedPath = usedSelectedPath || null;
+    csSession.count = (csSession.count || 0) + 1;
     await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
   }
 
@@ -4089,7 +4072,7 @@ function setupModalEvents(
     });
 
     if (result && result.success && result.failCount === 0) {
-      await updateContinuousSession([...selectedPaths], null);
+      await updateContinuousSession();
       await browser.storage.local.set({
         retainedTags:    [...selectedTags],
         retainedSubTags: [...selectedSubTags],
@@ -4189,7 +4172,7 @@ function setupModalEvents(
     });
 
     if (result && result.success) {
-      await updateContinuousSession([...selectedPaths], selectedPath);
+      await updateContinuousSession();
       await browser.storage.local.set({
         retainedTags:    [...selectedTags],
         retainedSubTags: [...selectedSubTags],

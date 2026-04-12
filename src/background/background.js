@@ -696,7 +696,14 @@ async function handleInstantSave(imageUrl, pageUrl) {
 
     const fullPath = `${savePath}\\${effectiveFilenameInstant}`;
 
-    const res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+    let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+    if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
+      addLog("INFO", `即保存 SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
+      const fetched = await fetchImageAsDataUrl(imageUrl);
+      if (fetched.dataUrl) {
+        res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
+      }
+    }
     if (!res.ok) return { success: false, error: res.error };
 
     await browser.storage.local.set({ lastSaveDir: savePath });

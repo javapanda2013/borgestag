@@ -2190,8 +2190,8 @@ function renderHistoryGrid() {
         const entryTags = (e.tags || []).map(t => t.toLowerCase());
         const tagMatch = !hasTagFilter || (
           _histFilterMode === "and"
-            ? filterTokens.every(token => entryTags.some(t => t.includes(token)))
-            : filterTokens.some(token => entryTags.some(t => t.includes(token)))
+            ? filterTokens.every(token => entryTags.some(t => t === token))
+            : filterTokens.some(token => entryTags.some(t => t === token))
         );
         const eAuthors = getEntryAuthors(e).map(a => a.toLowerCase());
         const authorMatch = !hasAuthorFilter || eAuthors.some(a => a.includes(authorQ));
@@ -2476,7 +2476,7 @@ function _applyTagFilter(tag) {
   if (idx !== -1) {
     tokens.splice(idx, 1); // 既に含まれていれば除去
   } else {
-    tokens.push(tag);      // 含まれていなければ追加
+    tokens.push(tag.toLowerCase());      // 含まれていなければ追加
   }
   _histFilterTag = tokens.join(" ");
   document.getElementById("hist-filter").value = _histFilterTag;

@@ -3954,6 +3954,11 @@ function setupModalEvents(
           selectedPath: null,
         };
         await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
+        // モジュールレベルの保存先変数と UI もリセット
+        selectedPath = null;
+        selectedPaths.clear();
+        updatePathDisplay(null);
+        updateSaveButton();
         chkContinuous.checked = true;
         return;
       }

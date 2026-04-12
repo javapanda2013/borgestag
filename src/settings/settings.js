@@ -1675,6 +1675,7 @@ function setupHistoryTab() {
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
@@ -1686,6 +1687,7 @@ function setupHistoryTab() {
     _histSelected.clear();
     document.getElementById("hist-deselect-all").disabled = true;
     document.getElementById("hist-add-tag-selected").disabled = true;
+    document.getElementById("hist-add-author-selected").disabled = true;
     document.getElementById("hist-sync-global-tags").disabled = true;
     document.getElementById("hist-group-selected").disabled = true;
     document.getElementById("hist-ungroup-selected").disabled = true;
@@ -1759,6 +1761,12 @@ function setupHistoryTab() {
     // 選択エントリの共通タグをデフォルト表示（最初のエントリのタグを参考に）
     const firstEntry = _historyData.find(e => _histSelected.has(e.id));
     showAddTagDialog(ids, firstEntry?.tags || []);
+  });
+
+  // 一括権利者追加
+  document.getElementById("hist-add-author-selected").addEventListener("click", () => {
+    if (!_histSelected.size) return;
+    showAddAuthorDialog([..._histSelected]);
   });
 
   /**
@@ -1874,6 +1882,127 @@ function setupHistoryTab() {
         _historyData = history;
         renderHistoryGrid();
         showStatus(`タグを ${pendingTags.size} 件追加しました`);
+      }
+    });
+
+    overlay.querySelector(".pd-cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+    setTimeout(() => input.focus(), 50);
+  }
+
+  /**
+   * 権利者追加ダイアログ
+   * @param {string[]} targetIds 対象エントリのID配列
+   */
+  function showAddAuthorDialog(targetIds) {
+    const existing = document.querySelector(".add-author-dialog-overlay");
+    if (existing) existing.remove();
+
+    const isBulk = targetIds.length > 1;
+    const overlay = document.createElement("div");
+    overlay.className = "add-author-dialog-overlay period-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="period-dialog" style="max-width:380px">
+        <h3>✏️ 権利者を追加${isBulk ? `（${targetIds.length}件）` : ""}</h3>
+        ${isBulk ? `<div style="font-size:12px;color:#888;margin-bottom:10px">選択した全履歴に同じ権利者を追加します</div>` : ""}
+        <div style="margin-bottom:14px">
+          <div style="font-size:12px;color:#555;margin-bottom:6px">追加する権利者名（カンマ・Enterで区切り）</div>
+          <div style="border:1px solid #ccc;border-radius:6px;padding:6px 8px;min-height:36px;
+            display:flex;flex-wrap:wrap;gap:4px;align-items:center;cursor:text" id="aad-chip-area">
+            <input id="aad-input" type="text" autocomplete="off"
+              style="border:none;outline:none;font-size:13px;min-width:80px;flex:1;font-family:inherit"
+              placeholder="権利者名を入力…" />
+          </div>
+          <div id="aad-suggestions" style="border:1px solid #e0e0e0;border-radius:6px;background:#fff;
+            max-height:100px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none;margin-top:2px"></div>
+        </div>
+        <div class="pd-footer">
+          <button class="pd-cancel">キャンセル</button>
+          <button class="aad-ok pd-ok" style="background:#4a90e2" disabled>追加する</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const chipArea   = overlay.querySelector("#aad-chip-area");
+    const input      = overlay.querySelector("#aad-input");
+    const suggestBox = overlay.querySelector("#aad-suggestions");
+    const okBtn      = overlay.querySelector(".aad-ok");
+    const pendingAuthors = new Set();
+
+    // globalAuthorsを取得してサジェストに使用
+    browser.storage.local.get("globalAuthors").then(({ globalAuthors }) => {
+      const allAuthors = globalAuthors || [];
+
+      function updateSuggest(q) {
+        const matches = allAuthors.filter(a =>
+          a.toLowerCase().includes(q.toLowerCase()) && !pendingAuthors.has(a)
+        );
+        if (!matches.length || !q) { suggestBox.style.display = "none"; return; }
+        suggestBox.innerHTML = matches.slice(0, 8)
+          .map(a => `<div class="aad-sug" style="padding:6px 10px;cursor:pointer;font-size:13px"
+            data-author="${escHtml(a)}">${escHtml(a)}</div>`).join("");
+        suggestBox.style.display = "";
+        suggestBox.querySelectorAll(".aad-sug").forEach(el => {
+          el.addEventListener("mousedown", (e) => { e.preventDefault(); addChip(el.dataset.author); });
+          el.addEventListener("mouseover", () => el.style.background = "#f0f4ff");
+          el.addEventListener("mouseout",  () => el.style.background = "");
+        });
+      }
+
+      function addChip(author) {
+        author = author.trim();
+        if (!author || pendingAuthors.has(author)) return;
+        pendingAuthors.add(author);
+        const chip = document.createElement("span");
+        chip.style.cssText = "background:#e8f5e9;border:1px solid #4caf50;border-radius:12px;padding:2px 8px;font-size:12px;display:flex;align-items:center;gap:4px;";
+        chip.innerHTML = `${escHtml(author)}<button style="background:none;border:none;cursor:pointer;color:#4caf50;font-size:13px;padding:0;line-height:1">×</button>`;
+        chip.querySelector("button").addEventListener("click", () => { chip.remove(); pendingAuthors.delete(author); okBtn.disabled = pendingAuthors.size === 0; });
+        chipArea.insertBefore(chip, input);
+        input.value = "";
+        suggestBox.style.display = "none";
+        okBtn.disabled = false;
+      }
+
+      input.addEventListener("input", () => updateSuggest(input.value));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === ",") {
+          e.preventDefault();
+          if (input.value.trim()) addChip(input.value);
+        } else if (e.key === "Backspace" && !input.value) {
+          const chips = chipArea.querySelectorAll("span");
+          if (chips.length) chips[chips.length - 1].querySelector("button").click();
+        }
+      });
+      input.addEventListener("blur", () => setTimeout(() => { suggestBox.style.display = "none"; }, 150));
+      chipArea.addEventListener("click", () => input.focus());
+    });
+
+    okBtn.addEventListener("click", async () => {
+      if (!pendingAuthors.size) return;
+      overlay.remove();
+
+      const stored = await browser.storage.local.get("saveHistory");
+      const history = stored.saveHistory || [];
+      let changed = false;
+      for (const entry of history) {
+        if (!targetIds.includes(entry.id)) continue;
+        const current = new Set(getEntryAuthors(entry));
+        for (const a of pendingAuthors) {
+          if (!current.has(a)) { current.add(a); changed = true; }
+        }
+        entry.authors = [...current];
+        delete entry.author; // 旧形式フィールドを削除
+      }
+      if (changed) {
+        await browser.storage.local.set({ saveHistory: history });
+        // globalAuthorsにも追加
+        const { globalAuthors } = await browser.storage.local.get("globalAuthors");
+        const gSet = new Set(globalAuthors || []);
+        for (const a of pendingAuthors) gSet.add(a);
+        await browser.storage.local.set({ globalAuthors: [...gSet] });
+        _historyData = history;
+        renderHistoryGrid();
+        showStatus(`権利者を ${pendingAuthors.size} 件追加しました`);
       }
     });
 
@@ -2250,6 +2379,7 @@ function renderHistoryGrid() {
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
@@ -2606,6 +2736,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;

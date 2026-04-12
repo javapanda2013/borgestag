@@ -2328,6 +2328,10 @@ function setupModalEvents(
         }
       });
 
+      pathInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); }
+      });
+
       saveBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const tagVal = tagEditorIn.value.trim();
@@ -3938,8 +3942,20 @@ function setupModalEvents(
     } else {
       // OFF にする → 確認ダイアログ
       chkContinuous.checked = true; // いったん戻す
-      const confirmed = await showContinuousEndDialog();
-      if (!confirmed) return;
+      const result = await showContinuousEndDialog();
+      if (!result) return; // キャンセル
+      if (result === "newSession") {
+        // 現在のセッションを完了し、新しいセッションで連続保存モードを再開始
+        csSession = {
+          id:        crypto.randomUUID(),
+          startedAt: new Date().toISOString(),
+          count:     0,
+        };
+        await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
+        chkContinuous.checked = true;
+        return;
+      }
+      // 終了
       chkContinuous.checked = false;
       csSession = null;
       await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: null });
@@ -3964,15 +3980,18 @@ function setupModalEvents(
           <div style="font-size:13px;color:#666;line-height:1.6;margin-bottom:16px">
             OFFにするとセッションIDが途切れ、次回保存から新しいグループになります。
           </div>
-          <div style="display:flex;justify-content:flex-end;gap:8px">
+          <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
             <button id="cs-cancel" style="padding:6px 16px;border-radius:6px;border:1px solid #ddd;
               background:#f0f0f0;color:#555;cursor:pointer;font-size:13px">キャンセル</button>
+            <button id="cs-new" style="padding:6px 16px;border-radius:6px;border:none;
+              background:#2980b9;color:#fff;cursor:pointer;font-size:13px;font-weight:600">新セッションで継続</button>
             <button id="cs-ok" style="padding:6px 16px;border-radius:6px;border:none;
               background:#e67e22;color:#fff;cursor:pointer;font-size:13px;font-weight:600">終了する</button>
           </div>
         </div>`;
       document.body.appendChild(overlay);
       overlay.querySelector("#cs-ok").addEventListener("click", () => { overlay.remove(); resolve(true); });
+      overlay.querySelector("#cs-new").addEventListener("click", () => { overlay.remove(); resolve("newSession"); });
       overlay.querySelector("#cs-cancel").addEventListener("click", () => { overlay.remove(); resolve(false); });
       overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
     });

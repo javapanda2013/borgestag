@@ -218,6 +218,63 @@ function renderAll() {
     // "registered" はそのまま（Object.keys の挿入順）
   }
 
+  // ---- 新しいタグを追加ボタン ----
+  const addTagBtn = document.createElement("button");
+  addTagBtn.className = "tag-add-btn";
+  addTagBtn.textContent = "＋ 新しいタグを追加";
+  addTagBtn.addEventListener("click", () => {
+    if (list.querySelector(".tag-add-form")) return; // 既に表示中
+    const form = document.createElement("div");
+    form.className = "tag-add-form";
+    form.innerHTML = `
+      <input type="text" class="tag-add-name" placeholder="タグ名" />
+      <input type="text" class="tag-add-path" placeholder="保存先フォルダパス" />
+      <div class="tag-add-actions">
+        <button class="tag-add-confirm">追加</button>
+        <button class="tag-add-cancel">キャンセル</button>
+      </div>`;
+    list.insertBefore(form, list.firstChild);
+    const nameInput = form.querySelector(".tag-add-name");
+    const pathInput = form.querySelector(".tag-add-path");
+    nameInput.focus();
+    const doAdd = () => {
+      const tagName = nameInput.value.trim();
+      const path    = pathInput.value.trim();
+      if (!tagName) { showStatus("⚠️ タグ名を入力してください"); return; }
+      if (!path)    { showStatus("⚠️ 保存先パスを入力してください"); return; }
+      if (!tagDestinations[tagName]) tagDestinations[tagName] = [];
+      const normalized = path.replace(/\\+$/, "");
+      if (tagDestinations[tagName].some(d => d.path.replace(/\\+$/, "") === normalized)) {
+        showStatus("⚠️ この保存先は既に登録されています");
+        form.remove();
+        return;
+      }
+      tagDestinations[tagName].push({ id: crypto.randomUUID(), path, label: "" });
+      // globalTags にも追加
+      browser.storage.local.get("globalTags").then(stored => {
+        const gt = stored.globalTags || [];
+        if (!gt.includes(tagName)) {
+          gt.push(tagName);
+          browser.storage.local.set({ globalTags: gt });
+        }
+      });
+      openTags.add(tagName);
+      saveData();
+      renderAll();
+    };
+    form.querySelector(".tag-add-confirm").addEventListener("click", doAdd);
+    form.querySelector(".tag-add-cancel").addEventListener("click", () => form.remove());
+    pathInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doAdd(); }
+      if (e.key === "Escape") form.remove();
+    });
+    nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); pathInput.focus(); }
+      if (e.key === "Escape") form.remove();
+    });
+  });
+  list.appendChild(addTagBtn);
+
   for (const tag of tags) {
     list.appendChild(buildTagRow(tag));
   }
@@ -327,6 +384,46 @@ function buildTagRow(tag) {
   for (let i = 0; i < dests.length; i++) {
     destList.appendChild(buildDestItem(tag, dests[i], i));
   }
+
+  // ---- 保存先を追加ボタン ----
+  const addBtn = document.createElement("button");
+  addBtn.className = "dest-add-btn";
+  addBtn.textContent = "＋ 保存先を追加";
+  addBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (destList.querySelector(".dest-add-form")) return; // 既に表示中
+    const form = document.createElement("div");
+    form.className = "dest-add-form";
+    form.innerHTML = `
+      <input type="text" class="dest-add-input" placeholder="フォルダパスを入力" />
+      <button class="dest-add-confirm">追加</button>
+      <button class="dest-add-cancel">キャンセル</button>`;
+    destList.appendChild(form);
+    const input = form.querySelector(".dest-add-input");
+    input.focus();
+    const doAdd = () => {
+      const path = input.value.trim();
+      if (!path) { form.remove(); return; }
+      if (!tagDestinations[tag]) tagDestinations[tag] = [];
+      const normalized = path.replace(/\\+$/, "");
+      if (tagDestinations[tag].some(d => d.path.replace(/\\+$/, "") === normalized)) {
+        showStatus("⚠️ この保存先は既に登録されています");
+        form.remove();
+        return;
+      }
+      tagDestinations[tag].push({ id: crypto.randomUUID(), path, label: "" });
+      saveData();
+      openTags.add(tag);
+      renderAll();
+    };
+    form.querySelector(".dest-add-confirm").addEventListener("click", doAdd);
+    form.querySelector(".dest-add-cancel").addEventListener("click", () => form.remove());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doAdd(); }
+      if (e.key === "Escape") form.remove();
+    });
+  });
+  destList.appendChild(addBtn);
 
   row.appendChild(header);
   row.appendChild(destList);

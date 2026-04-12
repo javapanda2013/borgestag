@@ -125,6 +125,54 @@
     }
     .dest-item-btn:hover { background: #f0f0f0; color: #555; }
     .dest-item-btn.del:hover { background: #fde; color: #e74c3c; }
+
+    /* 保存先追加ボタン・フォーム */
+    .dest-add-btn {
+      display: block; width: 100%; padding: 6px 0; margin-top: 2px;
+      background: none; border: 1px dashed #ccc; border-radius: 5px;
+      color: #888; font-size: 12px; cursor: pointer; transition: all .15s;
+    }
+    .dest-add-btn:hover { background: #f5f8ff; border-color: #4a90e2; color: #4a90e2; }
+    .dest-add-form {
+      display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+      border-top: 1px solid #eee;
+    }
+    .dest-add-input {
+      flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid #ccc;
+      border-radius: 4px; font-family: inherit;
+    }
+    .dest-add-input:focus { border-color: #4a90e2; outline: none; }
+    .dest-add-confirm, .dest-add-cancel {
+      padding: 4px 10px; font-size: 12px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #ccc; background: #f8f8f8; color: #555;
+    }
+    .dest-add-confirm:hover { background: #4a90e2; color: #fff; border-color: #4a90e2; }
+    .dest-add-cancel:hover { background: #eee; }
+
+    /* 新規タグ追加ボタン・フォーム */
+    .tag-add-btn {
+      display: block; width: 100%; padding: 8px 0; margin-bottom: 6px;
+      background: none; border: 1px dashed #b0c8f0; border-radius: 6px;
+      color: #4a90e2; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s;
+    }
+    .tag-add-btn:hover { background: #eef3ff; border-color: #4a90e2; }
+    .tag-add-form {
+      display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; margin-bottom: 6px;
+      background: #f9fbff; border: 1px solid #d0ddf0; border-radius: 6px;
+    }
+    .tag-add-name, .tag-add-path {
+      flex: 1; min-width: 120px; padding: 5px 8px; font-size: 12px;
+      border: 1px solid #ccc; border-radius: 4px; font-family: inherit;
+    }
+    .tag-add-name:focus, .tag-add-path:focus { border-color: #4a90e2; outline: none; }
+    .tag-add-actions { display: flex; gap: 6px; }
+    .tag-add-confirm, .tag-add-cancel {
+      padding: 5px 12px; font-size: 12px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #ccc; background: #f8f8f8; color: #555;
+    }
+    .tag-add-confirm:hover { background: #4a90e2; color: #fff; border-color: #4a90e2; }
+    .tag-add-cancel:hover { background: #eee; }
+
     .empty-state { text-align: center; padding: 32px 16px; color: #aaa; font-size: 12px; line-height: 1.8; }
     .empty-state .emoji { font-size: 32px; display: block; margin-bottom: 8px; }
     .bm-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }

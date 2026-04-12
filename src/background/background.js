@@ -276,9 +276,11 @@ function sendNative(payload) {
       return;
     }
     // WRITE_FILE はエクスポート用途で大容量 JSON（数百 MB 級）を渡すことがあり、
-    // Firefox の拡張→ネイティブ方向は実質的に大容量を許容するため上限チェックから除外する。
+    // SAVE_IMAGE_BASE64 はブラウザ Cookie で取得した画像の Base64 データ（数 MB〜数十 MB）を渡すため、
+    // Firefox の拡張→ネイティブ方向は実質的に大容量を許容するので上限チェックから除外する。
     // それ以外のコマンドは想定外の巨大ペイロードを早期に弾いて Native 切断事故を防ぐ。
-    if (payload.cmd !== "WRITE_FILE" && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
+    const exemptCmds = ["WRITE_FILE", "SAVE_IMAGE_BASE64"];
+    if (!exemptCmds.includes(payload.cmd) && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
       const kb = (payloadJson.length / 1024).toFixed(0);
       addLog("ERROR", `sendNative: payload 過大 ${payload.cmd}`, `${kb} KB`);
       reject(new Error(`payload が大きすぎます: ${kb} KB（上限 ${NATIVE_PAYLOAD_MAX_BYTES / 1024 / 1024} MB）`));

@@ -33,6 +33,9 @@ web-ext-artifacts/
 Thumbs.db
 desktop.ini
 
+# Claude Code
+.claude/
+
 # エディタ
 .vscode/
 .idea/

@@ -661,7 +661,12 @@ async function handleInstantSave(imageUrl, pageUrl) {
     // 保存先を「開始フォルダの優先順位」に従って決定
     const [explorerSettings, stored] = await Promise.all([
       getExplorerSettings(),
-      browser.storage.local.get(["lastSaveDir", "continuousSession"]),
+      browser.storage.local.get([
+        "lastSaveDir", "continuousSession",
+        "retainTag", "retainSubTag", "retainAuthor",
+        "retainedTags", "retainedSubTags", "retainedAuthors",
+        "filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor",
+      ]),
     ]);
 
     let savePath = null;
@@ -677,23 +682,27 @@ async function handleInstantSave(imageUrl, pageUrl) {
       return { success: false, error: "保存先が設定されていません" };
     }
 
-    // ファイル名を生成
+    // ファイル名を生成（拡張子がなければ ?format= またはフォールバック .jpg で補完）
     const urlObj = new URL(imageUrl);
-    const basename = urlObj.pathname.split("/").pop() || "image.jpg";
-    const filename = basename.split("?")[0] || "image.jpg";
+    let filename = urlObj.pathname.split("/").pop() || "image.jpg";
+    if (!/\.\w{2,5}$/.test(filename)) {
+      const fmt = urlObj.searchParams.get("format");
+      const ext = fmt ? `.${fmt}` : ".jpg";
+      filename = `${filename}${ext}`;
+    }
 
-    // 連続保存セッション中はタグを引き継ぎ（v1.12.0以降 csSession に subTags は存在しない）
-    const session = stored.continuousSession;
-    const tags    = session?.tags || [];
-    const allTags = [...new Set([...tags])];
+    // 引き継ぎ設定からタグ・サブタグ・権利者を取得
+    const session  = stored.continuousSession;
+    const tags     = stored.retainTag    ? (stored.retainedTags    || []) : [];
+    const subTags  = stored.retainSubTag ? (stored.retainedSubTags || []) : [];
+    const authors  = stored.retainAuthor ? (stored.retainedAuthors || []) : [];
+    const allTags  = [...new Set([...tags, ...subTags])];
 
-    // ファイル名設定に基づいてタグをファイル名に付加（即保存は権利者なし）
-    const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
-      await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
-    const effectiveFilenameInstant = buildFilenameWithMeta(filename, tags, [], [], {
-      filenameIncludeTag:    !!filenameIncludeTag,
-      filenameIncludeSubtag: !!filenameIncludeSubtag,
-      filenameIncludeAuthor: !!filenameIncludeAuthor,
+    // ファイル名設定に基づいてタグ・サブタグ・権利者をファイル名に付加
+    const effectiveFilenameInstant = buildFilenameWithMeta(filename, tags, subTags, authors, {
+      filenameIncludeTag:    !!stored.filenameIncludeTag,
+      filenameIncludeSubtag: !!stored.filenameIncludeSubtag,
+      filenameIncludeAuthor: !!stored.filenameIncludeAuthor,
     });
 
     const fullPath = `${savePath}\\${effectiveFilenameInstant}`;
@@ -712,7 +721,9 @@ async function handleInstantSave(imageUrl, pageUrl) {
     if (allTags.length > 0) {
       await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
       if (tags.length > 0) await updateRecentTags(tags);
+      if (subTags.length > 0) await updateRecentSubTags(subTags);
     }
+    for (const a of authors) await updateRecentAuthors(a);
 
     // Python側が返すサムネイルデータを使用（通常保存と同じ処理）
     if (res.thumbError) {
@@ -725,7 +736,7 @@ async function handleInstantSave(imageUrl, pageUrl) {
 
     // 履歴に追加
     await addSaveHistory({
-      imageUrl, filename: effectiveFilenameInstant, savePath, tags: allTags, pageUrl,
+      imageUrl, filename: effectiveFilenameInstant, savePath, tags: allTags, authors, pageUrl,
       thumbDataUrl, thumbWidth, thumbHeight,
       sessionId: session?.id || null,
       sessionIndex: session ? (session.count + 1) : null,

@@ -5,6 +5,17 @@
 
 ---
 
+## [1.19.7] - 2026-04-14
+
+### Fixed
+- **即保存でTwitter/X等のURLから保存すると拡張子なしになる問題を修正**：URLパスに拡張子がない場合（例: `pbs.twimg.com/media/XXXXX?format=jpg`）、クエリパラメータ `format=` から拡張子を取得する。それもなければ `.jpg` をフォールバック補完。
+- **即保存時にファイル名にタグ・サブタグ・権利者が付与されない問題を修正**：引き継ぎ設定（`retainTag` / `retainSubTag` / `retainAuthor`）がONの場合、`retainedTags` / `retainedSubTags` / `retainedAuthors` を取得しファイル名に付与するよう修正。`recentSubTags` / `recentAuthors` の更新、保存履歴への権利者記録にも対応。
+
+### Changed
+- **設計書（01_基本設計書・02_詳細設計書）に即保存の拡張子補完・引き継ぎタグ取得の仕様を追記**
+
+---
+
 ## [1.19.6] - 2026-04-13
 
 ### Fixed

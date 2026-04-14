@@ -219,6 +219,17 @@ browser.runtime.onMessage.addListener(async (message) => {
         cmd:   "GENERATE_THUMBS_BATCH",
         paths: message.paths || [],
       });
+    case "LIST_SUBFOLDERS":
+      return sendNative({
+        cmd:  "LIST_SUBFOLDERS",
+        path: message.path || "",
+      });
+    case "READ_LOCAL_IMAGE_BASE64":
+      return sendNative({
+        cmd:     "READ_LOCAL_IMAGE_BASE64",
+        path:    message.path    || "",
+        maxSize: message.maxSize || 1200,
+      });
     case "GET_STORAGE_SIZE":
       return getStorageSize();
     // ---- エクスプローラーで開く ----
@@ -278,8 +289,11 @@ function sendNative(payload) {
     // WRITE_FILE はエクスポート用途で大容量 JSON（数百 MB 級）を渡すことがあり、
     // SAVE_IMAGE_BASE64 はブラウザ Cookie で取得した画像の Base64 データ（数 MB〜数十 MB）を渡すため、
     // Firefox の拡張→ネイティブ方向は実質的に大容量を許容するので上限チェックから除外する。
+    // READ_LOCAL_IMAGE_BASE64 は外部取り込み（1枚ずつ形式）のプレビュー取得で、
+    //   ・拡張 → ネイティブ方向は path のみで小さいが、将来の引数増加を考慮して除外に含める
+    //   ・ネイティブ → 拡張方向は大容量（プレビュー画像 Base64）
     // それ以外のコマンドは想定外の巨大ペイロードを早期に弾いて Native 切断事故を防ぐ。
-    const exemptCmds = ["WRITE_FILE", "SAVE_IMAGE_BASE64"];
+    const exemptCmds = ["WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
     if (!exemptCmds.includes(payload.cmd) && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
       const kb = (payloadJson.length / 1024).toFixed(0);
       addLog("ERROR", `sendNative: payload 過大 ${payload.cmd}`, `${kb} KB`);

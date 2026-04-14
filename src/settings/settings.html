@@ -1103,6 +1103,23 @@
   <!-- 外部取り込みタブ -->
   <div class="tab-panel" id="tab-external-import">
 
+    <!-- 形式切替（v1.20.0） -->
+    <div class="ext-mode-switch" style="display:flex;align-items:center;gap:14px;padding:8px 12px;background:#f5f8fb;border:1px solid #d0dae5;border-radius:6px;margin-bottom:12px;">
+      <span style="font-size:12px;font-weight:600;color:#2c3e50;">形式:</span>
+      <label style="font-size:12px;cursor:pointer;">
+        <input type="radio" name="ext-mode" value="batch" id="ext-mode-batch" checked />
+        一括形式
+      </label>
+      <label style="font-size:12px;cursor:pointer;">
+        <input type="radio" name="ext-mode" value="per_item" id="ext-mode-per-item" />
+        1枚ずつ形式
+      </label>
+      <span id="ext-mode-hint" style="font-size:11px;color:#666;margin-left:auto;"></span>
+    </div>
+
+    <!-- ────────── 一括形式（従来） ────────── -->
+    <div id="ext-batch-mode">
+
     <!-- ① スキャン設定 -->
     <div>
       <div class="section-title">スキャン設定</div>
@@ -1240,6 +1257,180 @@
         </div>
         <div class="import-result" id="ext-import-result" style="display:none;white-space:pre-wrap;"></div>
         <div id="ext-import-actions" style="display:none;margin-top:6px;"></div>
+      </div>
+    </div>
+
+    </div><!-- /#ext-batch-mode -->
+
+    <!-- ────────── 1枚ずつ形式（v1.20.0 新規） ────────── -->
+    <div id="ext-per-item-mode" style="display:none;">
+
+      <!-- A. 取り込み予定フォルダリスト -->
+      <div>
+        <div class="section-title">取り込み予定フォルダリスト</div>
+        <div class="backup-section">
+          <div style="font-size:12px;color:#555;margin-bottom:8px;">
+            取り込み対象となるルートフォルダを登録します。単体指定、または指定フォルダの直下サブフォルダから複数選択できます（再帰なし）。
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+            <input type="text" id="ext-fl-path" placeholder="フォルダパス（例: D:\Pictures\artwork）"
+              style="flex:1;min-width:220px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-fl-add-single" class="backup-btn" style="padding:3px 10px;font-size:12px;">＋ 単体登録</button>
+            <button id="ext-fl-add-subfolders" class="backup-btn" style="padding:3px 10px;font-size:12px;">📂 サブフォルダから選択</button>
+          </div>
+          <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
+            <div style="font-size:12px;color:#555;margin-bottom:6px;">
+              <span id="ext-fl-picker-title">親フォルダ:</span>
+              <span id="ext-fl-picker-parent" style="color:#2c3e50;font-weight:600;"></span>
+            </div>
+            <div id="ext-fl-picker-list" style="max-height:220px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:4px;padding:6px;background:#fff;"></div>
+            <div style="display:flex;gap:6px;margin-top:8px;">
+              <button id="ext-fl-picker-ok" class="backup-btn" style="padding:3px 10px;font-size:12px;">✓ 選択したフォルダを登録</button>
+              <button id="ext-fl-picker-cancel" class="backup-btn" style="padding:3px 10px;font-size:12px;">キャンセル</button>
+            </div>
+          </div>
+          <table id="ext-fl-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead>
+              <tr style="background:#f5f5f5;">
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:60px;">完了</th>
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">フォルダ</th>
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:180px;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="ext-fl-tbody"></tbody>
+          </table>
+          <div id="ext-fl-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
+            登録されたフォルダはありません。
+          </div>
+        </div>
+      </div>
+
+      <!-- B. セッション一覧 -->
+      <div>
+        <div class="section-title">セッション一覧</div>
+        <div class="backup-section">
+          <div style="font-size:12px;color:#555;margin-bottom:8px;">
+            進行中・中断中の取り込みセッションです。複数を並行で保持できます。
+          </div>
+          <div id="ext-sessions-list"></div>
+          <div id="ext-sessions-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
+            アクティブなセッションはありません。
+          </div>
+        </div>
+      </div>
+
+      <!-- C. 完了ルートフォルダ履歴（折りたたみ） -->
+      <div>
+        <div class="section-title" style="cursor:pointer;" id="ext-completed-toggle">
+          ▸ 完了ルートフォルダ履歴 <span id="ext-completed-count" style="font-size:11px;color:#888;font-weight:400;"></span>
+        </div>
+        <div class="backup-section" id="ext-completed-panel" style="display:none;">
+          <div style="font-size:12px;color:#555;margin-bottom:8px;">
+            過去に1枚ずつ形式で取り込みが完了したルートフォルダの履歴です。再度取り込もうとしたときに警告します。
+          </div>
+          <table id="ext-completed-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead>
+              <tr style="background:#f5f5f5;">
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">ルートパス</th>
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:120px;">完了日時</th>
+                <th style="padding:5px 8px;text-align:right;border:1px solid #e0e0e0;width:120px;">件数</th>
+                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:60px;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="ext-completed-tbody"></tbody>
+          </table>
+          <div id="ext-completed-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
+            履歴はありません。
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /#ext-per-item-mode -->
+
+    <!-- b1 プレビュー・入力オーバーレイ -->
+    <div id="ext-b1-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:stretch;justify-content:center;">
+      <div id="ext-b1-panel" style="display:flex;width:96vw;height:94vh;margin:auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <!-- 左ペイン: プレビュー -->
+        <div id="ext-b1-left" style="flex:1 1 60%;min-width:280px;background:#1a1f24;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:10px;overflow:auto;">
+          <div id="ext-b1-preview-wrap" style="display:flex;align-items:center;justify-content:center;flex:1;width:100%;min-height:0;">
+            <img id="ext-b1-preview-img" alt="preview" style="max-width:100%;max-height:100%;object-fit:contain;background:#222;" />
+          </div>
+          <div id="ext-b1-preview-info" style="font-size:11px;color:#ccc;margin-top:6px;text-align:center;"></div>
+        </div>
+        <!-- リサイザ -->
+        <div id="ext-b1-resizer" style="width:6px;cursor:col-resize;background:#e0e0e0;"></div>
+        <!-- 右ペイン: 入力 -->
+        <div id="ext-b1-right" style="flex:1 1 40%;min-width:320px;max-width:600px;display:flex;flex-direction:column;overflow:hidden;">
+          <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <div style="font-size:13px;font-weight:700;color:#2c3e50;">📥 1枚ずつ取り込み</div>
+              <div id="ext-b1-progress" style="font-size:12px;color:#1abc9c;font-weight:600;"></div>
+            </div>
+            <div id="ext-b1-session-name" style="font-size:11px;color:#888;margin-top:2px;"></div>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:12px 14px;">
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">ファイル名</div>
+            <div id="ext-b1-filename" style="font-size:13px;color:#2c3e50;font-weight:600;margin-bottom:6px;word-break:break-all;"></div>
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">元パス</div>
+            <div id="ext-b1-filepath" style="font-size:11px;color:#666;margin-bottom:6px;word-break:break-all;font-family:'Courier New',monospace;"></div>
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">更新日時</div>
+            <div id="ext-b1-mtime" style="font-size:12px;color:#2c3e50;margin-bottom:10px;"></div>
+
+            <div style="font-size:12px;color:#555;margin-bottom:4px;font-weight:600;">保存先</div>
+            <div style="display:flex;gap:6px;margin-bottom:4px;">
+              <input type="text" id="ext-b1-savepath" style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <button id="ext-b1-pick-folder" class="backup-btn" style="padding:3px 10px;font-size:12px;">📁 選ぶ</button>
+            </div>
+            <div id="ext-b1-savepath-sugg" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:10px;"></div>
+
+            <div style="font-size:12px;color:#555;margin-bottom:4px;font-weight:600;">メインタグ</div>
+            <div id="ext-b1-tag-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-tag-input" placeholder="メインタグを追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-tag-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+
+            <div style="font-size:12px;color:#555;margin-bottom:4px;font-weight:600;">サブタグ</div>
+            <div id="ext-b1-subtag-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-subtag-input" placeholder="サブタグを追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-subtag-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+
+            <div style="font-size:12px;color:#555;margin-bottom:4px;font-weight:600;">権利者</div>
+            <div id="ext-b1-author-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-author-input" placeholder="権利者を追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-author-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+          </div>
+          <div style="padding:10px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;gap:6px;flex-wrap:wrap;">
+            <button id="ext-b1-save-next" class="backup-btn export" style="padding:5px 14px;font-size:12px;font-weight:600;">✓ 保存して次へ</button>
+            <button id="ext-b1-skip" class="backup-btn" style="padding:5px 14px;font-size:12px;">⏭ スキップ</button>
+            <button id="ext-b1-close" class="backup-btn" style="padding:5px 14px;font-size:12px;margin-left:auto;">✕ 中断して閉じる</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- フォルダピッカーモーダル（保存先選択: tree-view を modal と共用するのではなく、簡易ツリーで実装） -->
+    <div id="ext-b1-folder-picker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1010;align-items:center;justify-content:center;">
+      <div style="display:flex;flex-direction:column;width:720px;max-width:90vw;height:560px;max-height:85vh;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;display:flex;align-items:center;gap:8px;">
+          <div style="font-size:13px;font-weight:700;color:#2c3e50;">📁 保存先フォルダを選択</div>
+          <button id="ext-b1-fp-close" class="backup-btn" style="padding:3px 10px;font-size:12px;margin-left:auto;">✕</button>
+        </div>
+        <div id="ext-b1-fp-breadcrumb" style="padding:6px 14px;font-size:12px;color:#555;border-bottom:1px solid #eee;background:#fafcff;word-break:break-all;"></div>
+        <div style="flex:1;overflow-y:auto;padding:8px;" id="ext-b1-fp-list"></div>
+        <div style="padding:10px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <button id="ext-b1-fp-mkdir" class="backup-btn" style="padding:3px 10px;font-size:12px;">📁+ 新規フォルダ</button>
+          <button id="ext-b1-fp-tagdir" class="backup-btn" style="padding:3px 10px;font-size:12px;">🏷 タグ名でフォルダ作成</button>
+          <div style="flex:1;"></div>
+          <button id="ext-b1-fp-apply" class="backup-btn export" style="padding:4px 14px;font-size:12px;font-weight:600;">✓ このフォルダに決定</button>
+        </div>
       </div>
     </div>
 

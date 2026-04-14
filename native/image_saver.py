@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.8.4
+version: 1.9.0
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -630,6 +630,107 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
     }
 
 
+def handle_list_subfolders(path):
+    """
+    指定フォルダの直下サブフォルダ一覧を返す（再帰なし）。
+    外部取り込み（1枚ずつ形式）の c1: 取り込み予定フォルダリスト用。
+    """
+    try:
+        if not path or not os.path.isdir(path):
+            return {"ok": False, "error": f"ディレクトリが存在しません: {path}"}
+
+        entries = []
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        attrs = ctypes.windll.kernel32.GetFileAttributesW(entry.path)
+                        if attrs != -1 and (attrs & 0x2 or attrs & 0x4):
+                            continue
+                    except Exception:
+                        pass
+                    if not entry.is_dir(follow_symlinks=True):
+                        continue
+                    entries.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "createdAt": int(entry.stat().st_ctime),
+                        "isDir": True,
+                    })
+                except PermissionError:
+                    continue
+
+        sorted_entries = sort_entries(entries)
+        return {"ok": True, "path": path, "subfolders": sorted_entries}
+    except PermissionError:
+        return {"ok": False, "error": f"アクセス権がありません: {path}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def handle_read_local_image_base64(file_path, max_size=1200):
+    """
+    ローカル画像ファイルを読み込み、プレビュー表示用に Base64 で返す。
+    b1（1枚ずつ形式）のプレビュー取得で使用。
+    大きい画像は max_size（長辺）までリサイズして返却する。
+    """
+    import io as _io
+    try:
+        if not file_path or not os.path.isfile(file_path):
+            return {"ok": False, "error": f"ファイルが存在しません: {file_path}"}
+
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        try:
+            from PIL import Image
+        except ImportError:
+            # Pillow 未インストール時はそのまま返す
+            ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+            mime = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "gif": "image/gif",
+                "webp": "image/webp", "bmp": "image/bmp",
+            }.get(ext, "application/octet-stream")
+            b64 = base64.b64encode(data).decode("ascii")
+            return {"ok": True, "dataUrl": f"data:{mime};base64,{b64}",
+                    "width": None, "height": None, "resized": False}
+
+        img = Image.open(_io.BytesIO(data))
+        # プレビュー用は RGB で統一（JPEG 出力のため）
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        elif img.mode == "RGBA":
+            img = img.convert("RGB")
+
+        w, h = img.size
+        try:
+            max_size = int(max_size) if max_size else 1200
+        except Exception:
+            max_size = 1200
+
+        scale = min(max_size / w, max_size / h, 1.0) if (w > 0 and h > 0) else 1.0
+        resized = False
+        if scale < 1.0:
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            w, h = img.size
+            resized = True
+
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=90, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {"ok": True, "dataUrl": f"data:image/jpeg;base64,{b64}",
+                "width": w, "height": h, "resized": resized}
+    except PermissionError:
+        return {"ok": False, "error": f"アクセス権がありません: {file_path}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def handle_generate_thumbs_batch(paths):
     """
     ローカルファイルパスのリストからサムネイルをバッチ生成して Base64 で返す。
@@ -727,6 +828,15 @@ def main():
 
         elif cmd == "GENERATE_THUMBS_BATCH":
             result = handle_generate_thumbs_batch(message.get("paths", []))
+
+        elif cmd == "LIST_SUBFOLDERS":
+            result = handle_list_subfolders(message.get("path", ""))
+
+        elif cmd == "READ_LOCAL_IMAGE_BASE64":
+            result = handle_read_local_image_base64(
+                message.get("path", ""),
+                message.get("maxSize", 1200),
+            )
 
         elif cmd == "OPEN_EXPLORER":
             result = handle_open_explorer(message.get("path", ""))

@@ -59,6 +59,17 @@ let _extImportCancelled  = false;  // 中断フラグ
 let _lastImportIds       = null;   // 直前インポートのエントリID配列（取り消し用）
 let _extDragData         = null;   // チップD&D中の移動元情報 { folder, type, idx, tag }
 
+// ---- v1.20.0: 1枚ずつ形式の状態 ----
+let _extMode           = "batch";   // "batch" | "per_item"
+let _extFolderList     = [];        // extImportFolderList
+let _extSessions       = [];        // extImportSessions
+let _extCompletedRoots = [];        // extImportCompletedRoots
+let _extActiveSession  = null;      // 現在プレビュー中のセッション
+let _extSubfolderCands = [];        // サブフォルダ選択候補
+let _extFpStack        = [];        // フォルダピッカーの breadcrumb stack
+let _extFpCurrent      = null;      // フォルダピッカーの現在パス
+let _extFpSelectedPath = null;      // フォルダピッカーで選択中のパス
+
 // ----------------------------------------------------------------
 // 初期化
 // ----------------------------------------------------------------
@@ -4040,6 +4051,13 @@ async function setupExternalImportTab() {
       e.returnValue = "";
     }
   });
+
+  // v1.20.0: 1枚ずつ形式の初期化（形式切替ラジオ・c1/c2・セッション一覧・b1 画面）
+  try {
+    await _setupExtPerItemMode();
+  } catch (e) {
+    console.error("[ext per-item] setup failed:", e);
+  }
 }
 
 /** スキャン実行 */
@@ -4453,4 +4471,1081 @@ async function executeExternalImport() {
   });
   actionsEl.appendChild(undoBtn);
   actionsEl.style.display = "";
+}
+
+// ================================================================
+// v1.20.0: 外部取り込み 1枚ずつ形式（b1/b2/b3/c1/c2 + 完了履歴）
+// ================================================================
+
+/** 外部取り込みタブ setup の末尾で呼ばれる初期化 */
+async function _setupExtPerItemMode() {
+  const stored = await browser.storage.local.get([
+    "extImportMode", "extImportSessions", "extImportFolderList", "extImportCompletedRoots",
+  ]);
+  _extMode           = stored.extImportMode       || "batch";
+  _extSessions       = stored.extImportSessions   || [];
+  _extFolderList     = stored.extImportFolderList || [];
+  _extCompletedRoots = stored.extImportCompletedRoots || [];
+
+  // モード切替の初期反映
+  const rBatch = document.getElementById("ext-mode-batch");
+  const rPer   = document.getElementById("ext-mode-per-item");
+  if (_extMode === "per_item" && rPer) rPer.checked = true;
+  else if (rBatch) rBatch.checked = true;
+  _applyExtModeUI();
+
+  // モード切替イベント
+  rBatch?.addEventListener("change", async () => {
+    if (rBatch.checked) {
+      _extMode = "batch";
+      await browser.storage.local.set({ extImportMode: "batch" });
+      _applyExtModeUI();
+    }
+  });
+  rPer?.addEventListener("change", async () => {
+    if (rPer.checked) {
+      _extMode = "per_item";
+      await browser.storage.local.set({ extImportMode: "per_item" });
+      _applyExtModeUI();
+    }
+  });
+
+  // c1 フォルダリスト操作
+  document.getElementById("ext-fl-add-single")?.addEventListener("click", _extFlAddSingle);
+  document.getElementById("ext-fl-add-subfolders")?.addEventListener("click", _extFlOpenSubfolderPicker);
+  document.getElementById("ext-fl-picker-ok")?.addEventListener("click", _extFlApplySubfolders);
+  document.getElementById("ext-fl-picker-cancel")?.addEventListener("click", () => {
+    document.getElementById("ext-fl-subfolder-picker").style.display = "none";
+    _extSubfolderCands = [];
+  });
+
+  // C 完了履歴トグル
+  document.getElementById("ext-completed-toggle")?.addEventListener("click", () => {
+    const panel = document.getElementById("ext-completed-panel");
+    const toggle = document.getElementById("ext-completed-toggle");
+    const isOpen = panel.style.display !== "none";
+    panel.style.display = isOpen ? "none" : "";
+    toggle.textContent = (isOpen ? "▸" : "▾")
+      + " 完了ルートフォルダ履歴 ";
+    const cntSpan = document.createElement("span");
+    cntSpan.style.cssText = "font-size:11px;color:#888;font-weight:400;";
+    cntSpan.textContent = `(${_extCompletedRoots.length} 件)`;
+    toggle.appendChild(cntSpan);
+  });
+
+  // b1 オーバーレイのイベント設定
+  _extB1SetupEvents();
+
+  // 初期レンダリング
+  _extRenderFolderList();
+  _extRenderSessionsList();
+  _extRenderCompletedRoots();
+}
+
+function _applyExtModeUI() {
+  const batchEl = document.getElementById("ext-batch-mode");
+  const perEl   = document.getElementById("ext-per-item-mode");
+  const hintEl  = document.getElementById("ext-mode-hint");
+  if (!batchEl || !perEl) return;
+  if (_extMode === "per_item") {
+    batchEl.style.display = "none";
+    perEl.style.display   = "";
+    if (hintEl) hintEl.textContent = "1枚ずつプレビュー表示しながら取り込みます。中断・再開、複数セッション並行可。";
+  } else {
+    batchEl.style.display = "";
+    perEl.style.display   = "none";
+    if (hintEl) hintEl.textContent = "従来の一括取り込み形式です。";
+  }
+}
+
+// ---------- c1/c2: 取り込み予定フォルダリスト ----------
+
+async function _extFlSave() {
+  await browser.storage.local.set({ extImportFolderList: _extFolderList });
+}
+
+function _extFlIsCompleted(rootPath) {
+  const n = (p) => (p || "").replace(/[\\/]+/g, "/").replace(/\/$/, "").toLowerCase();
+  return _extCompletedRoots.some(r => n(r.rootPath) === n(rootPath));
+}
+
+async function _extFlAddSingle() {
+  const inputEl = document.getElementById("ext-fl-path");
+  const path    = (inputEl?.value || "").trim();
+  if (!path) { showStatus("⚠️ フォルダパスを入力してください", true); return; }
+  if (_extFolderList.some(f => (f.rootPath || "").toLowerCase() === path.toLowerCase() && f.mode === "single")) {
+    showStatus("⚠️ 既に登録されています", true);
+    return;
+  }
+  _extFolderList.push({
+    id: crypto.randomUUID(),
+    rootPath: path,
+    mode: "single",
+    subfolders: [],
+    done: false,
+    createdAt: new Date().toISOString(),
+  });
+  await _extFlSave();
+  _extRenderFolderList();
+  if (inputEl) inputEl.value = "";
+  showStatus("✅ フォルダを登録しました");
+}
+
+async function _extFlOpenSubfolderPicker() {
+  const inputEl = document.getElementById("ext-fl-path");
+  const parent  = (inputEl?.value || "").trim();
+  if (!parent) { showStatus("⚠️ 親フォルダパスを入力してください", true); return; }
+
+  const pickerEl = document.getElementById("ext-fl-subfolder-picker");
+  const parentEl = document.getElementById("ext-fl-picker-parent");
+  const listEl   = document.getElementById("ext-fl-picker-list");
+  if (parentEl) parentEl.textContent = parent;
+  if (listEl)   listEl.innerHTML = "⏳ サブフォルダを取得中...";
+  pickerEl.style.display = "";
+
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({ type: "LIST_SUBFOLDERS", path: parent });
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:#c0392b;">エラー: ${escHtml(e.message || "")}</div>`;
+    return;
+  }
+  if (!res?.ok) {
+    listEl.innerHTML = `<div style="color:#c0392b;">取得失敗: ${escHtml(res?.error || "")}</div>`;
+    return;
+  }
+
+  _extSubfolderCands = (res.subfolders || []).map(s => ({
+    path: s.path, name: s.name, checked: false,
+  }));
+
+  if (_extSubfolderCands.length === 0) {
+    listEl.innerHTML = `<div style="color:#888;">直下にサブフォルダがありません。</div>`;
+    return;
+  }
+
+  listEl.innerHTML = "";
+  _extSubfolderCands.forEach((s, idx) => {
+    const row = document.createElement("label");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;border-radius:3px;";
+    row.onmouseover = () => row.style.background = "#f0f6ff";
+    row.onmouseout  = () => row.style.background = "";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.idx = String(idx);
+    cb.addEventListener("change", () => {
+      _extSubfolderCands[idx].checked = cb.checked;
+    });
+    const label = document.createElement("span");
+    label.style.cssText = "font-size:12px;color:#2c3e50;";
+    label.textContent = s.name;
+    const doneMark = _extFlIsCompleted(s.path)
+      ? ' <span style="font-size:10px;color:#e67e22;">（過去に完了）</span>'
+      : "";
+    if (doneMark) {
+      const sp = document.createElement("span");
+      sp.innerHTML = doneMark;
+      label.appendChild(sp);
+    }
+    row.appendChild(cb);
+    row.appendChild(label);
+    listEl.appendChild(row);
+  });
+}
+
+async function _extFlApplySubfolders() {
+  const selected = _extSubfolderCands.filter(s => s.checked);
+  if (selected.length === 0) {
+    showStatus("⚠️ サブフォルダを1つ以上選択してください", true);
+    return;
+  }
+  const parent = document.getElementById("ext-fl-picker-parent")?.textContent || "";
+  // 1行で subfolders を持つ形で登録（mode="subfolders"）
+  _extFolderList.push({
+    id: crypto.randomUUID(),
+    rootPath: parent,
+    mode: "subfolders",
+    subfolders: selected.map(s => ({ path: s.path, done: false })),
+    done: false,
+    createdAt: new Date().toISOString(),
+  });
+  await _extFlSave();
+  document.getElementById("ext-fl-subfolder-picker").style.display = "none";
+  _extSubfolderCands = [];
+  _extRenderFolderList();
+  showStatus(`✅ ${selected.length} 件のサブフォルダを登録しました`);
+}
+
+function _extRenderFolderList() {
+  const tbody  = document.getElementById("ext-fl-tbody");
+  const emptyEl = document.getElementById("ext-fl-empty");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (_extFolderList.length === 0) {
+    if (emptyEl) emptyEl.style.display = "";
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = "none";
+
+  for (const item of _extFolderList) {
+    if (item.mode === "single") {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;"></td>
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
+      const tds = tr.querySelectorAll("td");
+      // 完了チェック
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!item.done;
+      cb.addEventListener("change", async () => {
+        item.done = cb.checked;
+        await _extFlSave();
+      });
+      tds[0].appendChild(cb);
+      // パス
+      const isCompleted = _extFlIsCompleted(item.rootPath);
+      tds[1].textContent = item.rootPath;
+      if (isCompleted) {
+        const badge = document.createElement("span");
+        badge.style.cssText = "margin-left:6px;font-size:10px;color:#fff;background:#e67e22;padding:1px 6px;border-radius:8px;";
+        badge.textContent = "過去に完了";
+        tds[1].appendChild(badge);
+      }
+      // 操作
+      const btnStart = document.createElement("button");
+      btnStart.className = "backup-btn";
+      btnStart.style.cssText = "padding:2px 8px;font-size:11px;margin-right:4px;";
+      btnStart.textContent = "▶ 開始";
+      btnStart.addEventListener("click", () => _extStartSessionFromFolderList(item, item.rootPath, null));
+      const btnDel = document.createElement("button");
+      btnDel.className = "backup-btn";
+      btnDel.style.cssText = "padding:2px 8px;font-size:11px;";
+      btnDel.textContent = "🗑";
+      btnDel.addEventListener("click", async () => {
+        if (!confirm("このフォルダを登録リストから削除しますか？")) return;
+        _extFolderList = _extFolderList.filter(f => f.id !== item.id);
+        await _extFlSave();
+        _extRenderFolderList();
+      });
+      tds[2].appendChild(btnStart);
+      tds[2].appendChild(btnDel);
+      tbody.appendChild(tr);
+    } else if (item.mode === "subfolders") {
+      // グループヘッダ行
+      const trH = document.createElement("tr");
+      trH.style.background = "#f9fbfd";
+      trH.innerHTML = `
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;color:#888;font-size:11px;">―</td>
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;color:#2c3e50;font-weight:600;"></td>
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
+      const tdsH = trH.querySelectorAll("td");
+      tdsH[1].textContent = item.rootPath + " （サブフォルダ別）";
+      const btnDelH = document.createElement("button");
+      btnDelH.className = "backup-btn";
+      btnDelH.style.cssText = "padding:2px 8px;font-size:11px;";
+      btnDelH.textContent = "🗑 グループ削除";
+      btnDelH.addEventListener("click", async () => {
+        if (!confirm("このサブフォルダグループを削除しますか？")) return;
+        _extFolderList = _extFolderList.filter(f => f.id !== item.id);
+        await _extFlSave();
+        _extRenderFolderList();
+      });
+      tdsH[2].appendChild(btnDelH);
+      tbody.appendChild(trH);
+
+      for (const sub of item.subfolders) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
+          <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;padding-left:24px;"></td>
+          <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
+        const tds = tr.querySelectorAll("td");
+        // 完了
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!sub.done;
+        cb.addEventListener("change", async () => {
+          sub.done = cb.checked;
+          // 全 sub が done になったら item.done も更新
+          item.done = item.subfolders.every(s => s.done);
+          await _extFlSave();
+        });
+        tds[0].appendChild(cb);
+        // パス
+        tds[1].textContent = sub.path;
+        const isCompleted = _extFlIsCompleted(sub.path);
+        if (isCompleted) {
+          const badge = document.createElement("span");
+          badge.style.cssText = "margin-left:6px;font-size:10px;color:#fff;background:#e67e22;padding:1px 6px;border-radius:8px;";
+          badge.textContent = "過去に完了";
+          tds[1].appendChild(badge);
+        }
+        // 操作
+        const btnStart = document.createElement("button");
+        btnStart.className = "backup-btn";
+        btnStart.style.cssText = "padding:2px 8px;font-size:11px;";
+        btnStart.textContent = "▶ 開始";
+        btnStart.addEventListener("click", () => _extStartSessionFromFolderList(item, sub.path, sub.path));
+        tds[2].appendChild(btnStart);
+        tbody.appendChild(tr);
+      }
+    }
+  }
+}
+
+// ---------- セッション開始 ----------
+
+async function _extStartSessionFromFolderList(folderListItem, rootPath, subfolderPath) {
+  // 過去完了の注意喚起
+  if (_extFlIsCompleted(rootPath)) {
+    const entry = _extCompletedRoots.find(r => (r.rootPath || "").toLowerCase() === rootPath.toLowerCase());
+    const msg = `このフォルダは過去に取り込みが完了しています。\n\n` +
+      `パス: ${rootPath}\n` +
+      `完了日時: ${entry?.completedAt?.slice(0, 10) || "―"}\n` +
+      `取込: ${entry?.doneCount ?? "?"} 件 / スキップ: ${entry?.skippedCount ?? "?"} 件\n\n` +
+      `再度取り込みますか？`;
+    if (!confirm(msg)) return;
+  }
+
+  showStatus("⏳ スキャン中...");
+  const stored = await browser.storage.local.get(["extImportExcludes", "saveHistory"]);
+  const excludes = stored.extImportExcludes || [];
+  let scanRes;
+  try {
+    scanRes = await browser.runtime.sendMessage({
+      type:       "SCAN_EXTERNAL_IMAGES",
+      path:       rootPath,
+      cutoffDate: "",
+      excludes:   excludes,
+    });
+  } catch (e) {
+    showStatus(`❌ スキャン失敗: ${e.message || ""}`, true);
+    return;
+  }
+  if (!scanRes?.ok) {
+    showStatus(`❌ スキャン失敗: ${scanRes?.error || ""}`, true);
+    return;
+  }
+
+  const existingSet = new Set((stored.saveHistory || []).map(h => (h.savePaths || [])[0]).filter(Boolean));
+  const entries = (scanRes.entries || []).filter(e => !existingSet.has(e.filePath || e.savePath));
+
+  if (entries.length === 0) {
+    showStatus("⚠️ 対象ファイルが見つかりませんでした（既存の履歴を除外済み）", true);
+    return;
+  }
+
+  // セッション生成
+  const session = {
+    id: crypto.randomUUID(),
+    name: subfolderPath || rootPath,
+    rootPath: rootPath,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    cursor: 0,
+    queue: entries.map(e => ({
+      filePath: e.filePath || e.savePath,
+      fileName: e.fileName,
+      mtime: e.savedAt,
+      status: "pending",
+      entryId: null,
+    })),
+    folderListRef: folderListItem ? {
+      folderListId: folderListItem.id,
+      subfolderPath: subfolderPath,
+    } : null,
+  };
+  _extSessions.unshift(session);
+  await browser.storage.local.set({ extImportSessions: _extSessions });
+  _extRenderSessionsList();
+  _extOpenB1(session);
+}
+
+// ---------- セッション一覧 ----------
+
+function _extRenderSessionsList() {
+  const listEl  = document.getElementById("ext-sessions-list");
+  const emptyEl = document.getElementById("ext-sessions-empty");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+  if (_extSessions.length === 0) {
+    if (emptyEl) emptyEl.style.display = "";
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = "none";
+
+  for (const s of _extSessions) {
+    const pending = s.queue.filter(q => q.status === "pending").length;
+    const done    = s.queue.filter(q => q.status === "done").length;
+    const skipped = s.queue.filter(q => q.status === "skipped").length;
+    const total   = s.queue.length;
+
+    const card = document.createElement("div");
+    card.style.cssText = "border:1px solid #d0dae5;border-radius:6px;padding:8px 10px;margin-bottom:6px;background:#fafcff;";
+
+    const header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    const title = document.createElement("div");
+    title.style.cssText = "font-size:12px;font-weight:600;color:#2c3e50;flex:1;word-break:break-all;min-width:200px;";
+    title.textContent = s.name || s.rootPath;
+    header.appendChild(title);
+
+    const stat = document.createElement("div");
+    stat.style.cssText = "font-size:11px;color:#555;";
+    stat.innerHTML = `完了 <b style="color:#1abc9c;">${done}</b> / スキップ <b style="color:#e67e22;">${skipped}</b> / 残り <b>${pending}</b> / 合計 ${total}`;
+    header.appendChild(stat);
+    card.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.style.cssText = "font-size:11px;color:#888;margin-top:3px;";
+    meta.textContent = `更新: ${s.updatedAt?.slice(0, 16).replace("T", " ") || "―"}`;
+    card.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;";
+
+    if (pending > 0) {
+      const btn = document.createElement("button");
+      btn.className = "backup-btn";
+      btn.style.cssText = "padding:2px 10px;font-size:11px;";
+      btn.textContent = "▶ 再開";
+      btn.addEventListener("click", () => _extOpenB1(s));
+      actions.appendChild(btn);
+    }
+    if (skipped > 0) {
+      const btn = document.createElement("button");
+      btn.className = "backup-btn";
+      btn.style.cssText = "padding:2px 10px;font-size:11px;";
+      btn.textContent = "⏭ スキップ分再処理";
+      btn.addEventListener("click", () => _extResumeSkipped(s));
+      actions.appendChild(btn);
+    }
+    const btnDel = document.createElement("button");
+    btnDel.className = "backup-btn";
+    btnDel.style.cssText = "padding:2px 10px;font-size:11px;";
+    btnDel.textContent = "🗑 削除";
+    btnDel.addEventListener("click", async () => {
+      if (!confirm("このセッションを削除しますか？\n（保存済みの履歴エントリは削除されません）")) return;
+      _extSessions = _extSessions.filter(x => x.id !== s.id);
+      await browser.storage.local.set({ extImportSessions: _extSessions });
+      _extRenderSessionsList();
+    });
+    actions.appendChild(btnDel);
+
+    card.appendChild(actions);
+    listEl.appendChild(card);
+  }
+}
+
+async function _extResumeSkipped(session) {
+  // スキップ分の最初のインデックスへ cursor を戻し、skipped を pending に戻す
+  for (const q of session.queue) {
+    if (q.status === "skipped") q.status = "pending";
+  }
+  session.cursor = session.queue.findIndex(q => q.status === "pending");
+  if (session.cursor < 0) session.cursor = 0;
+  session.updatedAt = new Date().toISOString();
+  await browser.storage.local.set({ extImportSessions: _extSessions });
+  _extOpenB1(session);
+}
+
+// ---------- 完了ルートフォルダ履歴 ----------
+
+function _extRenderCompletedRoots() {
+  const tbody  = document.getElementById("ext-completed-tbody");
+  const emptyEl = document.getElementById("ext-completed-empty");
+  const cntEl   = document.getElementById("ext-completed-count");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (cntEl) cntEl.textContent = `(${_extCompletedRoots.length} 件)`;
+  if (_extCompletedRoots.length === 0) {
+    if (emptyEl) emptyEl.style.display = "";
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = "none";
+
+  // 新しい順
+  const sorted = [..._extCompletedRoots].sort(
+    (a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+
+  for (const r of sorted) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;"></td>
+      <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>
+      <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:right;font-size:11px;color:#555;"></td>
+      <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
+    const tds = tr.querySelectorAll("td");
+    tds[0].textContent = r.rootPath;
+    tds[1].textContent = (r.completedAt || "").slice(0, 10);
+    tds[2].textContent = `✓${r.doneCount ?? 0} / ⏭${r.skippedCount ?? 0}`;
+    const btn = document.createElement("button");
+    btn.className = "backup-btn";
+    btn.style.cssText = "padding:2px 8px;font-size:11px;";
+    btn.textContent = "🗑";
+    btn.addEventListener("click", async () => {
+      if (!confirm("履歴から削除しますか？")) return;
+      _extCompletedRoots = _extCompletedRoots.filter(x =>
+        (x.rootPath || "").toLowerCase() !== (r.rootPath || "").toLowerCase());
+      await browser.storage.local.set({ extImportCompletedRoots: _extCompletedRoots });
+      _extRenderCompletedRoots();
+      _extRenderFolderList();
+    });
+    tds[3].appendChild(btn);
+    tbody.appendChild(tr);
+  }
+}
+
+// ---------- b1: プレビュー + 入力画面 ----------
+
+function _extB1SetupEvents() {
+  document.getElementById("ext-b1-save-next")?.addEventListener("click", _extB1SaveAndNext);
+  document.getElementById("ext-b1-skip")?.addEventListener("click", _extB1Skip);
+  document.getElementById("ext-b1-close")?.addEventListener("click", _extB1Close);
+  document.getElementById("ext-b1-pick-folder")?.addEventListener("click", _extB1OpenFolderPicker);
+
+  // チップ入力（タグ・サブタグ・権利者）
+  _extB1SetupChipInput("tag");
+  _extB1SetupChipInput("subtag");
+  _extB1SetupChipInput("author");
+
+  // フォルダピッカー
+  document.getElementById("ext-b1-fp-close")?.addEventListener("click", () => {
+    document.getElementById("ext-b1-folder-picker").style.display = "none";
+  });
+  document.getElementById("ext-b1-fp-apply")?.addEventListener("click", () => {
+    if (_extFpSelectedPath) {
+      const inp = document.getElementById("ext-b1-savepath");
+      if (inp) inp.value = _extFpSelectedPath;
+      document.getElementById("ext-b1-folder-picker").style.display = "none";
+    } else {
+      showStatus("⚠️ フォルダを選択してください", true);
+    }
+  });
+  document.getElementById("ext-b1-fp-mkdir")?.addEventListener("click", _extFpMakeDir);
+  document.getElementById("ext-b1-fp-tagdir")?.addEventListener("click", _extFpMakeTagDir);
+
+  // リサイザ
+  _extB1SetupResizer();
+}
+
+function _extB1SetupResizer() {
+  const resizer = document.getElementById("ext-b1-resizer");
+  const left    = document.getElementById("ext-b1-left");
+  const right   = document.getElementById("ext-b1-right");
+  if (!resizer || !left || !right) return;
+  let startX = 0, startLeftW = 0, startRightW = 0;
+  resizer.addEventListener("mousedown", (e) => {
+    startX = e.clientX;
+    startLeftW  = left.getBoundingClientRect().width;
+    startRightW = right.getBoundingClientRect().width;
+    document.body.style.cursor = "col-resize";
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX;
+      const newL = Math.max(280, startLeftW + dx);
+      const newR = Math.max(320, startRightW - dx);
+      left.style.flex  = `0 0 ${newL}px`;
+      right.style.flex = `0 0 ${newR}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+// 現在の b1 画面の入力状態
+let _extB1MainTags = [];
+let _extB1SubTags  = [];
+let _extB1Authors  = [];
+
+function _extB1SetupChipInput(kind) {
+  const input   = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-input`);
+  const sugg    = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-sugg`);
+  if (!input) return;
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      const v = input.value.trim();
+      if (!v) return;
+      _extB1AddChip(kind, v);
+      input.value = "";
+      if (sugg) sugg.style.display = "none";
+    }
+  });
+  input.addEventListener("input", () => _extB1UpdateSugg(kind));
+  input.addEventListener("blur", () => setTimeout(() => { if (sugg) sugg.style.display = "none"; }, 150));
+}
+
+function _extB1UpdateSugg(kind) {
+  const input = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-input`);
+  const sugg  = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-sugg`);
+  if (!input || !sugg) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { sugg.style.display = "none"; return; }
+  const source = (kind === "author") ? globalAuthors : globalTags;
+  const existing = (kind === "tag") ? _extB1MainTags
+                  : (kind === "subtag") ? _extB1SubTags
+                  : _extB1Authors;
+  const cands = (source || []).filter(s =>
+    s.toLowerCase().includes(q) && !existing.includes(s)).slice(0, 10);
+  if (cands.length === 0) { sugg.style.display = "none"; return; }
+  sugg.innerHTML = "";
+  for (const c of cands) {
+    const item = document.createElement("div");
+    item.style.cssText = "padding:4px 8px;cursor:pointer;";
+    item.textContent = c;
+    item.onmouseover = () => item.style.background = "#f0f6ff";
+    item.onmouseout  = () => item.style.background = "";
+    item.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      _extB1AddChip(kind, c);
+      input.value = "";
+      sugg.style.display = "none";
+    });
+    sugg.appendChild(item);
+  }
+  sugg.style.display = "";
+}
+
+function _extB1AddChip(kind, value) {
+  const arr = (kind === "tag") ? _extB1MainTags
+              : (kind === "subtag") ? _extB1SubTags
+              : _extB1Authors;
+  if (arr.includes(value)) return;
+  arr.push(value);
+  _extB1RenderChips(kind);
+  if (kind === "tag") _extB1RenderSavepathSugg();
+}
+
+function _extB1RenderChips(kind) {
+  const el  = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-chips`);
+  if (!el) return;
+  const arr = (kind === "tag") ? _extB1MainTags
+              : (kind === "subtag") ? _extB1SubTags
+              : _extB1Authors;
+  el.innerHTML = "";
+  arr.forEach((v, idx) => {
+    const chip = document.createElement("span");
+    const color = (kind === "tag") ? "#1abc9c" : (kind === "subtag") ? "#3498db" : "#9b59b6";
+    chip.style.cssText = `display:inline-flex;align-items:center;gap:4px;background:${color};color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;`;
+    chip.textContent = v;
+    const x = document.createElement("span");
+    x.style.cssText = "cursor:pointer;opacity:.8;";
+    x.textContent = "×";
+    x.addEventListener("click", () => {
+      arr.splice(idx, 1);
+      _extB1RenderChips(kind);
+      if (kind === "tag") _extB1RenderSavepathSugg();
+    });
+    chip.appendChild(x);
+    el.appendChild(chip);
+  });
+}
+
+function _extB1RenderSavepathSugg() {
+  const el = document.getElementById("ext-b1-savepath-sugg");
+  if (!el) return;
+  el.innerHTML = "";
+  const cands = new Set();
+  for (const t of _extB1MainTags) {
+    const dests = tagDestinations[t] || [];
+    for (const d of dests) if (d.path) cands.add(d.path);
+  }
+  if (cands.size === 0) return;
+  const note = document.createElement("span");
+  note.style.cssText = "font-size:10px;color:#888;margin-right:4px;";
+  note.textContent = "タグに対応する保存先:";
+  el.appendChild(note);
+  for (const path of cands) {
+    const btn = document.createElement("button");
+    btn.className = "backup-btn";
+    btn.style.cssText = "padding:1px 8px;font-size:10px;";
+    btn.textContent = path;
+    btn.title = path;
+    btn.addEventListener("click", () => {
+      const inp = document.getElementById("ext-b1-savepath");
+      if (inp) inp.value = path;
+    });
+    el.appendChild(btn);
+  }
+}
+
+async function _extOpenB1(session) {
+  _extActiveSession = session;
+  // cursor を pending の先頭に合わせる
+  if (session.queue[session.cursor]?.status !== "pending") {
+    const nextIdx = session.queue.findIndex(q => q.status === "pending");
+    session.cursor = nextIdx >= 0 ? nextIdx : session.queue.length;
+  }
+  document.getElementById("ext-b1-overlay").style.display = "flex";
+  document.getElementById("ext-b1-session-name").textContent = session.name || session.rootPath;
+  await _extB1LoadCurrent();
+}
+
+async function _extB1LoadCurrent() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const cur = session.queue[session.cursor];
+
+  const pending = session.queue.filter(q => q.status === "pending").length;
+  const done    = session.queue.filter(q => q.status === "done").length;
+  const skipped = session.queue.filter(q => q.status === "skipped").length;
+  const total   = session.queue.length;
+  const progressEl = document.getElementById("ext-b1-progress");
+  if (progressEl) {
+    progressEl.textContent = `完了 ${done} / スキップ ${skipped} / 残り ${pending} / 合計 ${total}`;
+  }
+
+  // cursor が終端 or pending なしなら完了処理へ
+  if (!cur || cur.status !== "pending") {
+    await _extB1FinishSessionIfDone();
+    return;
+  }
+
+  // 初期値セット
+  _extB1MainTags = [];
+  _extB1SubTags  = [];
+  _extB1Authors  = [];
+  _extB1RenderChips("tag");
+  _extB1RenderChips("subtag");
+  _extB1RenderChips("author");
+  _extB1RenderSavepathSugg();
+
+  const fnameEl = document.getElementById("ext-b1-filename");
+  const pathEl  = document.getElementById("ext-b1-filepath");
+  const mtimeEl = document.getElementById("ext-b1-mtime");
+  const saveEl  = document.getElementById("ext-b1-savepath");
+  if (fnameEl) fnameEl.textContent = cur.fileName || "";
+  if (pathEl)  { pathEl.textContent  = cur.filePath || ""; pathEl.title = cur.filePath || ""; }
+  if (mtimeEl) mtimeEl.textContent = (cur.mtime || "").replace("T", " ").slice(0, 19);
+  // デフォルト保存先 = 元ファイルの場所（親フォルダ）
+  const defaultDir = _extDirname(cur.filePath || "");
+  if (saveEl) saveEl.value = defaultDir;
+
+  // プレビュー取得
+  const imgEl  = document.getElementById("ext-b1-preview-img");
+  const infoEl = document.getElementById("ext-b1-preview-info");
+  if (imgEl)  imgEl.src = "";
+  if (infoEl) infoEl.textContent = "⏳ プレビュー読み込み中...";
+  try {
+    const res = await browser.runtime.sendMessage({
+      type: "READ_LOCAL_IMAGE_BASE64",
+      path: cur.filePath,
+      maxSize: 1600,
+    });
+    if (res?.ok && res.dataUrl) {
+      if (imgEl) imgEl.src = res.dataUrl;
+      if (infoEl) infoEl.textContent = `${res.width}×${res.height}` + (res.resized ? "（縮小表示）" : "");
+    } else {
+      if (infoEl) infoEl.textContent = `⚠ プレビュー取得失敗: ${res?.error || "unknown"}`;
+    }
+  } catch (e) {
+    if (infoEl) infoEl.textContent = `⚠ プレビュー取得エラー: ${e.message || ""}`;
+  }
+}
+
+function _extDirname(p) {
+  if (!p) return "";
+  const n = p.replace(/\\/g, "/");
+  const idx = n.lastIndexOf("/");
+  if (idx < 0) return "";
+  return p.slice(0, idx);
+}
+
+async function _extB1Skip() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const cur = session.queue[session.cursor];
+  if (cur) {
+    cur.status = "skipped";
+    session.cursor = Math.min(session.queue.length, session.cursor + 1);
+    session.updatedAt = new Date().toISOString();
+    await browser.storage.local.set({ extImportSessions: _extSessions });
+  }
+  await _extB1LoadCurrent();
+  _extRenderSessionsList();
+}
+
+async function _extB1Close() {
+  const session = _extActiveSession;
+  if (session) {
+    session.updatedAt = new Date().toISOString();
+    await browser.storage.local.set({ extImportSessions: _extSessions });
+  }
+  _extActiveSession = null;
+  document.getElementById("ext-b1-overlay").style.display = "none";
+  _extRenderSessionsList();
+}
+
+async function _extB1SaveAndNext() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const cur = session.queue[session.cursor];
+  if (!cur) return;
+
+  const savePathInput = document.getElementById("ext-b1-savepath");
+  const savePath = (savePathInput?.value || "").trim() || _extDirname(cur.filePath);
+
+  const tags    = [..._extB1MainTags];
+  const subTags = [..._extB1SubTags];
+  const authors = [..._extB1Authors];
+  const allTags = [...new Set([...tags, ...subTags])];
+
+  // ファイル名（ファイル名メタ埋め込みは行わない。外部取り込みはファイル名を変更しない）
+  const filename = cur.fileName;
+
+  // サムネイル生成（Python 経由）
+  let thumbId = null;
+  try {
+    const res = await browser.runtime.sendMessage({
+      type:  "GENERATE_THUMBS_BATCH",
+      paths: [cur.filePath],
+    });
+    const b64 = res?.thumbs?.[cur.filePath];
+    if (b64) {
+      thumbId = crypto.randomUUID();
+      await browser.runtime.sendMessage({
+        type:   "IMPORT_IDB_THUMBS",
+        thumbs: [{ id: thumbId, dataUrl: `data:image/jpeg;base64,${b64}` }],
+      });
+    }
+  } catch (_) { /* サムネ失敗は無視 */ }
+
+  // saveHistory にエントリ追加
+  const entry = {
+    id:         crypto.randomUUID(),
+    savedAt:    cur.mtime || new Date().toISOString(),
+    imageUrl:   "",
+    pageUrl:    "",
+    savePaths:  [savePath],
+    filename:   filename,
+    tags:       allTags,
+    authors:    authors,
+    thumbId:    thumbId,
+    source:     "external_import",
+  };
+
+  const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"]);
+  const merged = [...(stored.saveHistory || []), entry]
+    .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+  const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
+  const gAuthorSet = new Set([...(stored.globalAuthors || []), ...authors]);
+
+  // recentTags / recentSubTags / recentAuthors の更新（先頭に追加して重複排除）
+  const recentTags    = [...tags,    ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
+  const recentSubTags = [...subTags, ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+  const recentAuthors = [...authors, ...(stored.recentAuthors || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+
+  // tagDestinations の更新（メインタグのみ）
+  for (const t of tags) {
+    if (!tagDestinations[t]) tagDestinations[t] = [];
+    if (!tagDestinations[t].some(d => d.path === savePath)) {
+      tagDestinations[t].push({ id: crypto.randomUUID(), path: savePath, label: "" });
+    }
+  }
+
+  await browser.storage.local.set({
+    saveHistory:   merged,
+    globalTags:    [...gTagSet],
+    globalAuthors: [...gAuthorSet],
+    recentTags, recentSubTags, recentAuthors,
+    tagDestinations,
+  });
+  _historyData  = merged;
+  globalTags    = [...gTagSet];
+  globalAuthors = [...gAuthorSet];
+
+  // queue を更新
+  cur.status  = "done";
+  cur.entryId = entry.id;
+  session.cursor = Math.min(session.queue.length, session.cursor + 1);
+  session.updatedAt = new Date().toISOString();
+  await browser.storage.local.set({ extImportSessions: _extSessions });
+
+  _extRenderSessionsList();
+
+  // 次へ
+  await _extB1LoadCurrent();
+}
+
+async function _extB1FinishSessionIfDone() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const pending = session.queue.filter(q => q.status === "pending").length;
+  if (pending > 0) return;
+
+  const done    = session.queue.filter(q => q.status === "done").length;
+  const skipped = session.queue.filter(q => q.status === "skipped").length;
+  const total   = session.queue.length;
+
+  // 完了ルートフォルダ履歴に追加（既存は上書き）
+  const rootPathKey = session.rootPath;
+  _extCompletedRoots = _extCompletedRoots.filter(r =>
+    (r.rootPath || "").toLowerCase() !== rootPathKey.toLowerCase());
+  _extCompletedRoots.unshift({
+    rootPath:     rootPathKey,
+    completedAt:  new Date().toISOString(),
+    totalCount:   total,
+    doneCount:    done,
+    skippedCount: skipped,
+  });
+  await browser.storage.local.set({ extImportCompletedRoots: _extCompletedRoots });
+
+  // folderListRef があれば対応フォルダを done にマーク
+  if (session.folderListRef?.folderListId) {
+    const fl = _extFolderList.find(f => f.id === session.folderListRef.folderListId);
+    if (fl) {
+      if (fl.mode === "single") {
+        fl.done = true;
+      } else if (fl.mode === "subfolders" && session.folderListRef.subfolderPath) {
+        const sub = fl.subfolders.find(s => s.path === session.folderListRef.subfolderPath);
+        if (sub) sub.done = true;
+        fl.done = fl.subfolders.every(s => s.done);
+      }
+      await _extFlSave();
+    }
+  }
+
+  // オーバーレイを閉じる
+  _extActiveSession = null;
+  document.getElementById("ext-b1-overlay").style.display = "none";
+
+  _extRenderSessionsList();
+  _extRenderFolderList();
+  _extRenderCompletedRoots();
+
+  const msg = skipped > 0
+    ? `✅ セッション完了: 取込 ${done} / スキップ ${skipped}（スキップ分はセッション一覧から再処理できます）`
+    : `✅ セッション完了: ${done} 件を取り込みました`;
+  showStatus(msg);
+}
+
+// ---------- b1 フォルダピッカー（簡易 tree-view） ----------
+
+async function _extB1OpenFolderPicker() {
+  const inp = document.getElementById("ext-b1-savepath");
+  const cur = (inp?.value || "").trim();
+  _extFpSelectedPath = cur || null;
+  document.getElementById("ext-b1-folder-picker").style.display = "flex";
+  await _extFpNavigate(cur || null);
+}
+
+async function _extFpNavigate(path) {
+  _extFpCurrent = path;
+  _extFpSelectedPath = path;
+  const bc = document.getElementById("ext-b1-fp-breadcrumb");
+  if (bc) bc.textContent = path || "（ドライブ一覧）";
+  const listEl = document.getElementById("ext-b1-fp-list");
+  if (listEl) listEl.innerHTML = "⏳ 取得中...";
+
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({ type: "LIST_DIR", path: path ?? null });
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:#c0392b;">エラー: ${escHtml(e.message || "")}</div>`;
+    return;
+  }
+  if (!res?.ok) {
+    listEl.innerHTML = `<div style="color:#c0392b;">取得失敗: ${escHtml(res?.error || "")}</div>`;
+    return;
+  }
+  listEl.innerHTML = "";
+
+  // 親へ戻る
+  if (path) {
+    const up = document.createElement("div");
+    up.style.cssText = "padding:5px 8px;cursor:pointer;border-radius:3px;font-size:12px;color:#555;";
+    up.textContent = "↑ 親フォルダへ";
+    up.onmouseover = () => up.style.background = "#f0f6ff";
+    up.onmouseout  = () => up.style.background = "";
+    up.addEventListener("click", () => {
+      const parentPath = _extDirname(path);
+      _extFpNavigate(parentPath || null);
+    });
+    listEl.appendChild(up);
+  }
+
+  const dirs = (res.entries || []).filter(e => e.isDir);
+  for (const d of dirs) {
+    const row = document.createElement("div");
+    row.style.cssText = "padding:5px 8px;cursor:pointer;border-radius:3px;font-size:12px;color:#2c3e50;display:flex;align-items:center;gap:6px;";
+    row.innerHTML = `<span>📁</span><span></span>`;
+    row.children[1].textContent = d.name;
+    row.onmouseover = () => row.style.background = "#f0f6ff";
+    row.onmouseout  = () => row.style.background = "";
+    row.addEventListener("click", () => {
+      const sep = path && !path.endsWith("\\") && !path.endsWith("/") ? "\\" : "";
+      const child = path ? (path + sep + d.name) : (d.name.endsWith(":") ? d.name + "\\" : d.name);
+      _extFpNavigate(child);
+    });
+    listEl.appendChild(row);
+  }
+
+  if (dirs.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "padding:8px;color:#888;font-size:12px;";
+    empty.textContent = "サブフォルダはありません。";
+    listEl.appendChild(empty);
+  }
+}
+
+async function _extFpMakeDir() {
+  if (!_extFpCurrent) {
+    showStatus("⚠️ ドライブ一覧では新規フォルダを作成できません", true);
+    return;
+  }
+  const name = prompt("新規フォルダ名を入力してください");
+  if (!name) return;
+  const sep = _extFpCurrent && !_extFpCurrent.endsWith("\\") && !_extFpCurrent.endsWith("/") ? "\\" : "";
+  const newPath = _extFpCurrent + sep + name;
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({
+      type: "MKDIR", path: newPath, contextPath: _extFpCurrent,
+    });
+  } catch (e) {
+    showStatus(`❌ 作成失敗: ${e.message || ""}`, true);
+    return;
+  }
+  if (!res?.ok) {
+    showStatus(`❌ 作成失敗: ${res?.error || ""}`, true);
+    return;
+  }
+  showStatus(`✅ 作成しました: ${newPath}`);
+  await _extFpNavigate(_extFpCurrent);
+}
+
+async function _extFpMakeTagDir() {
+  if (!_extFpCurrent) {
+    showStatus("⚠️ ドライブ一覧ではフォルダを作成できません", true);
+    return;
+  }
+  if (_extB1MainTags.length === 0) {
+    showStatus("⚠️ メインタグが入力されていません", true);
+    return;
+  }
+  const name = _extB1MainTags[0];
+  const sep = _extFpCurrent && !_extFpCurrent.endsWith("\\") && !_extFpCurrent.endsWith("/") ? "\\" : "";
+  const newPath = _extFpCurrent + sep + name;
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({
+      type: "MKDIR", path: newPath, contextPath: _extFpCurrent,
+    });
+  } catch (e) {
+    showStatus(`❌ 作成失敗: ${e.message || ""}`, true);
+    return;
+  }
+  if (!res?.ok) {
+    showStatus(`❌ 作成失敗: ${res?.error || ""}`, true);
+    return;
+  }
+  showStatus(`✅ 作成しました: ${newPath}`);
+  await _extFpNavigate(_extFpCurrent);
 }

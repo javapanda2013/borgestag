@@ -3227,8 +3227,21 @@ function setupModalEvents(
           const chk = item.querySelector(".dest-cand-check");
           if (chk) chk.checked = true;
         }
+        // エクスプローラー側も自動選択されたパスへナビゲート
+        // （候補クリック時と同等の挙動にして、フォルダツリーと表示を同期させる）
+        navigateToCandidatePath(onlyPath);
       }
     }
+  }
+
+  /** 候補パスをエクスプローラーのナビゲーション状態に反映する共通処理 */
+  function navigateToCandidatePath(p) {
+    const parts = normalizePath(p).split("\\").filter(Boolean);
+    const stack = parts.reduce((acc, seg, i) => {
+      acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
+      return acc;
+    }, []);
+    navigateTo(p, stack);
   }
 
   /** 複数選択フッターの表示を更新 */
@@ -3367,13 +3380,7 @@ function setupModalEvents(
         updateMultiFooter();
         renderCandidateList(collectCandidates(selectedTags));
 
-        const p = cand.path;
-        const parts = normalizePath(p).split("\\").filter(Boolean);
-        const stack = parts.reduce((acc, seg, i) => {
-          acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
-          return acc;
-        }, []);
-        navigateTo(p, stack);
+        navigateToCandidatePath(cand.path);
       });
 
       destCandidates.appendChild(item);
@@ -3501,7 +3508,9 @@ function setupModalEvents(
     if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
   });
   subTagInput.addEventListener("focus", () => {
-    if (!subTagInput.value && recentTags.length > 0) {
+    // サブタグ入力欄にフォーカスが当たった時点で、入力が空でも直近サブタグを提示する
+    // （直近タグ数ではなく直近サブタグ数を参照。以前の条件は参照先を誤っていた）
+    if (!subTagInput.value && recentSubTagsList.length > 0) {
       showSubSuggestions("");
     }
   });

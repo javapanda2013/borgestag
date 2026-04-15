@@ -1828,7 +1828,8 @@ function setupHistoryTab() {
         const matches = allTags.filter(t =>
           t.toLowerCase().includes(q.toLowerCase()) && !pendingTags.has(t)
         );
-        if (!matches.length || !q) { suggestBox.style.display = "none"; return; }
+        // 1文字入力でもサジェストを表示する（以前は 2 文字以上で発火）
+        if (!matches.length) { suggestBox.style.display = "none"; return; }
         suggestBox.innerHTML = matches.slice(0, 8)
           .map(t => `<div class="atd-sug" style="padding:6px 10px;cursor:pointer;font-size:13px"
             data-tag="${escHtml(t)}">${escHtml(t)}</div>`).join("");
@@ -1949,7 +1950,8 @@ function setupHistoryTab() {
         const matches = allAuthors.filter(a =>
           a.toLowerCase().includes(q.toLowerCase()) && !pendingAuthors.has(a)
         );
-        if (!matches.length || !q) { suggestBox.style.display = "none"; return; }
+        // 1文字入力でもサジェストを表示する（以前は 2 文字以上で発火）
+        if (!matches.length) { suggestBox.style.display = "none"; return; }
         suggestBox.innerHTML = matches.slice(0, 8)
           .map(a => `<div class="aad-sug" style="padding:6px 10px;cursor:pointer;font-size:13px"
             data-author="${escHtml(a)}">${escHtml(a)}</div>`).join("");

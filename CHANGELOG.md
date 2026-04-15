@@ -5,6 +5,24 @@
 
 ---
 
+## [1.20.2] - 2026-04-15
+
+### Fixed
+- **長期利用・大規模データで顕在化する固定タイムアウトを一括見直し（H1）**：`sendNative()` の 300 秒タイムアウト対象コマンドを拡大。v1.20.1 で対応済みの 3 種（`WRITE_FILE` / `SAVE_IMAGE_BASE64` / `READ_LOCAL_IMAGE_BASE64`）に加え、以下を追加：
+  - `SCAN_EXTERNAL_IMAGES`：大規模フォルダ再帰スキャン（数万ファイル級で 10 秒不足）
+  - `GENERATE_THUMBS_BATCH`：サムネイル一括生成（Pillow 処理が枚数線形）
+  - `LIST_SUBFOLDERS`：ネットワークドライブ等の遅延対策
+  - `SAVE_IMAGE`：内部 urllib 30 秒 + 403 リトライが 10 秒を超え得る
+  - `FETCH_PREVIEW`：内部 urllib 15 秒 + Pillow リサイズ
+  - `READ_FILE_BASE64`：大容量ローカル画像読込（サムネイル再生成）
+- **`saveTagRecord` のキー衝突リスクを緩和（H3）**：URL ベースのキー生成で 100 文字 slice が Fanbox / CDN の署名付 URL（`?Expires=...&Signature=...`）で衝突していた問題を、上限 512 文字へ拡張して解消。`tagRecords` は write-only（監査記録）用途のためマイグレーション不要で旧データと共存可能。
+
+### Changed
+- **Python 側 `urllib.request.urlopen` タイムアウトを延長（M4）**：`handle_save_image` 30s → 60s、`handle_fetch_preview` 15s → 60s。大容量画像・低速回線でのタイムアウト頻発を緩和。`native/image_saver.py` 1.9.1 → 1.9.2。
+- 設計書 04_影響範囲マップ G1 を新しいタイムアウト分類（LONG 9 種 / SHORT 残り）に更新。
+
+---
+
 ## [1.20.1] - 2026-04-15
 
 ### Fixed

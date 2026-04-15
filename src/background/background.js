@@ -312,11 +312,21 @@ function sendNative(payload) {
 
     addLog("INFO", `Native送信: ${payload.cmd}`, payloadJson.slice(0, 200));
 
-    // v1.20.1: コマンド別タイムアウト。
-    // 大容量ペイロードを扱うコマンド（exemptCmds と同じ3種）は書き込み・取得に時間がかかるため 300 秒へ延長。
-    // その他は従来どおり 10 秒で素早くハング検知する。
+    // v1.20.2: コマンド別タイムアウト（v1.20.1 の対象をさらに拡大）。
+    // 長時間処理の可能性があるコマンドは 300 秒に延長。瞬時操作は従来どおり 10 秒でハング検知。
+    //   - WRITE_FILE / SAVE_IMAGE_BASE64 / READ_LOCAL_IMAGE_BASE64: 大容量ペイロード（v1.20.1 から）
+    //   - SCAN_EXTERNAL_IMAGES: 大規模フォルダ再帰スキャン（数万〜数十万ファイル）
+    //   - GENERATE_THUMBS_BATCH: サムネイル一括生成（Pillow 処理が枚数線形）
+    //   - LIST_SUBFOLDERS: ネットワークドライブ等で遅くなり得る（念のため）
+    //   - SAVE_IMAGE: 内部 urllib タイムアウト 30 秒 + 403 リトライがあり 10 秒では不足
+    //   - FETCH_PREVIEW: 内部 urllib 15 秒 + Pillow リサイズ
+    //   - READ_FILE_BASE64: 大容量ローカル画像読込（サムネイル再生成で使用）
     // 既知懸念（04_影響範囲マップ G1「大ファイル書き込みは超過リスク」）の解消。
-    const LONG_TIMEOUT_CMDS = ["WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
+    const LONG_TIMEOUT_CMDS = [
+      "WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
+      "SCAN_EXTERNAL_IMAGES", "GENERATE_THUMBS_BATCH", "LIST_SUBFOLDERS",
+      "SAVE_IMAGE", "FETCH_PREVIEW", "READ_FILE_BASE64",
+    ];
     const timeoutMs = LONG_TIMEOUT_CMDS.includes(payload.cmd) ? 300000 : 10000;
 
     const timer = setTimeout(() => {
@@ -493,7 +503,12 @@ async function handleSave(payload) {
 // タグ永続化
 // ----------------------------------------------------------------
 async function saveTagRecord({ imageUrl, filename, tags }) {
-  const key = imageUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 100);
+  // v1.20.2: 上限 100 → 512 文字へ拡張。
+  // 通常の直画像 URL は 100 文字未満に収まるが、Fanbox / CDN の署名付 URL
+  // （?Expires=...&Signature=... 等が 200 文字以上付く）で先頭 100 文字が
+  // 同一になり異なる記録が衝突していた。tagRecords は write-only（監査記録）
+  // 用途のため、旧記録と共存しても機能影響はなくマイグレーション不要。
+  const key = imageUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 512);
   const stored = await browser.storage.local.get("tagRecords");
   const tagRecords = stored.tagRecords || {};
   tagRecords[key] = { imageUrl, filename, tags, savedAt: new Date().toISOString() };

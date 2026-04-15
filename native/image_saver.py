@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.9.1
+version: 1.9.2
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -172,7 +172,8 @@ def handle_save_image(url, save_path):
             "Referer": referer,
         }
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as response:
+        # v1.9.2: 30 → 60 秒へ延長（大容量画像・低速回線で頻発していたタイムアウト対策）
+        with urllib.request.urlopen(req, timeout=60) as response:
             data = response.read()
 
         with open(final_path, "wb") as f:
@@ -400,7 +401,8 @@ def handle_fetch_preview(url):
             "Referer": referer,
         }
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
+        # v1.9.2: 15 → 60 秒へ延長（プレビュー取得の安定性向上・sendNative 側も 300 秒へ拡張済み）
+        with urllib.request.urlopen(req, timeout=60) as response:
             data = response.read()
 
         from PIL import Image

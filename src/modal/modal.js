@@ -348,11 +348,13 @@ function buildModalHTML(defaultFilename) {
 
     /* suggestions の位置基準 */
     .dest-tabbar-tag-wrap {
-      position: relative; display: flex; flex-direction: column; flex: 1; max-width: 340px;
+      position: relative; display: flex; flex-direction: column; flex: 1;
+      /* max-width を削除：tag-toolbar 内で均等に広がる */
     }
-    /* サブタグ入力欄：タグ入力欄より少し幅狭 */
+    /* サブタグ入力欄 */
     .dest-tabbar-subtag-wrap {
-      position: relative; display: flex; flex-direction: column; flex: 1; max-width: 240px;
+      position: relative; display: flex; flex-direction: column; flex: 1;
+      /* max-width を削除：tag-toolbar 内で均等に広がる */
     }
     .dest-tabbar-subtag-wrap .dest-tabbar-tag-area {
       border-color: #d0c8f0; /* 薄紫でタグ欄と区別 */
@@ -583,15 +585,16 @@ function buildModalHTML(defaultFilename) {
     .dest-tabbar {
       display: none; flex-shrink: 0;
       background: #eef4ff; border-bottom: 1px solid #b8d0f8;
-      padding: 0 8px; gap: 0; min-height: 36px;
+      padding: 0 8px; gap: 6px; min-height: 34px;
       align-items: center;
     }
     .dest-tabbar.visible { display: flex; }
 
-    /* dest-tabbar 中央：タグ入力エリア */
-    .dest-tabbar-center {
-      flex: 1; display: flex; align-items: center;
-      justify-content: center; gap: 5px; padding: 0 8px; min-width: 0;
+    /* tag-toolbar：タグ入力欄（dest-tabbar の直前に常時表示） */
+    #tag-toolbar {
+      display: flex; align-items: center; gap: 6px;
+      background: #f4f7ff; border-bottom: 1px solid #d8e6f8;
+      padding: 4px 8px; flex-shrink: 0;
     }
     .dest-tabbar-tag-area {
       display: flex; align-items: center; flex-wrap: wrap; gap: 3px;
@@ -847,6 +850,11 @@ function buildModalHTML(defaultFilename) {
     }
     .main-tab:hover { color: #4a90e2; }
     .main-tab.active { color: #1a56db; border-bottom-color: #4a90e2; background: #fff; }
+
+    /* main-tabbar のチップエリア（a3） */
+    #main-chip-area .tag-chip {
+      font-size: 10px; padding: 2px 8px;
+    }
 
     /* 作者チップ */
     .history-author {
@@ -1328,6 +1336,30 @@ function buildModalHTML(defaultFilename) {
           <div class="main-tabbar">
             <button class="main-tab active" id="main-tab-dest">保存先</button>
             <button class="main-tab"        id="main-tab-history">保存履歴</button>
+
+            <!-- a3: 権利者入力（保存先タブ表示中のみ visible） -->
+            <div id="main-tabbar-author-area" style="display:none; align-items:center; gap:3px; flex-shrink:0; position:relative;">
+              <span style="width:1px; height:20px; background:#d0d8e8; margin:0 8px; flex-shrink:0;"></span>
+              <span style="font-size:10px; color:#888; white-space:nowrap;">✏️ 権利者:</span>
+              <div id="author-chips" style="display:flex; flex-wrap:wrap; gap:2px; align-items:center;"></div>
+              <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
+                style="width:90px; border:1px solid #d0d0d0; border-radius:4px; padding:2px 7px;
+                font-size:11px; outline:none; font-family:inherit;" />
+              <button id="author-input-clear" style="background:none; border:none; cursor:pointer;
+                color:#aaa; font-size:13px; padding:0 2px; display:none; line-height:1;" title="入力クリア">✕</button>
+              <div id="author-suggestions" style="position:absolute; top:calc(100% + 2px); left:0;
+                background:#fff; border:1px solid #d0d8f0; border-radius:5px;
+                box-shadow:0 4px 12px rgba(0,0,0,.15); max-height:120px; overflow-y:auto;
+                display:none; z-index:200; min-width:120px; font-size:11px;"></div>
+            </div>
+
+            <!-- spacer -->
+            <div style="flex:1;"></div>
+
+            <!-- a3: 確定チップ表示エリア（保存先タブ表示中のみ visible） -->
+            <div id="main-chip-area" style="display:none; align-items:center; gap:4px; flex-wrap:wrap; justify-content:flex-end; flex-shrink:0;"></div>
+
+            <!-- 保存履歴フィルター（変更なし） -->
             <div class="history-filter-wrap" id="history-filter-wrap">
               <div class="hist-chip-box" id="history-filter-box">
                 <input type="text" id="history-filter-input" class="hist-chip-input"
@@ -1351,52 +1383,45 @@ function buildModalHTML(defaultFilename) {
           <!-- 保存先パネル -->
           <div class="main-tab-panel active" id="panel-dest">
 
-            <!-- 権利者入力（常時表示・中央寄せ） -->
-            <div style="display:flex;justify-content:center;padding:3px 0 2px;flex-wrap:wrap;gap:2px;position:relative;">
-              <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">
-                <span style="font-size:10px;color:#888;white-space:nowrap">✏️ 権利者:</span>
-                <div id="author-chips" style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;"></div>
-                <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
-                  style="width:90px;border:1px solid #d0d0d0;border-radius:4px;padding:2px 7px;
-                  font-size:11px;outline:none;font-family:inherit;" />
-                <button id="author-input-clear" style="background:none;border:none;cursor:pointer;
-                  color:#aaa;font-size:13px;padding:0 2px;display:none;line-height:1;" title="入力クリア">✕</button>
+            <!-- a2: タグ入力行（常時表示） -->
+            <div id="tag-toolbar">
+              <div class="dest-tabbar-tag-wrap" style="flex:1; max-width:none;">
+                <div class="dest-tabbar-tag-area" id="dest-tabbar-tag-area">
+                  <input type="text" class="dest-tabbar-tag-input" id="tag-input"
+                    placeholder="保存先に関連付けるタグを入力" autocomplete="off" />
+                </div>
+                <div class="suggestions" id="suggestions"></div>
               </div>
-              <div id="author-suggestions" style="position:absolute;top:calc(100% + 2px);left:50%;transform:translateX(-50%);
-                background:#fff;border:1px solid #d0d8f0;border-radius:5px;
-                box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
-                display:none;z-index:200;min-width:120px;font-size:11px;"></div>
+              <div class="dest-tabbar-subtag-wrap" style="flex:1; max-width:none;">
+                <div class="dest-tabbar-tag-area" id="dest-tabbar-subtag-area">
+                  <input type="text" class="dest-tabbar-tag-input" id="subtag-input"
+                    placeholder="履歴に付与するタグ" autocomplete="off"
+                    title="保存先候補に使わないタグを入力（サブタグ）" />
+                </div>
+                <div class="suggestions" id="subtag-suggestions"></div>
+              </div>
             </div>
 
-            <!-- タブバー（タグ追加後に表示） + タグ入力（中央） -->
+            <!-- a2: タブバー（dest-tabbar）：ボタンのみ、右端にフィルタ・新規作成ボタン -->
             <div class="dest-tabbar" id="dest-tabbar">
               <button class="dest-tab active" id="dest-tab-suggest">💡 候補から選ぶ</button>
               <button class="dest-tab"        id="dest-tab-explorer">📁 フォルダを選ぶ</button>
-              <div class="dest-tabbar-center">
-                <button class="btn-tag-filter" id="btn-tag-filter"
-                  title="タグ名でフォルダを絞り込む" disabled>🔍 タグで絞り込み</button>
-                <div class="dest-tabbar-tag-wrap">
-                  <div class="dest-tabbar-tag-area" id="dest-tabbar-tag-area">
-                    <input type="text" class="dest-tabbar-tag-input" id="tag-input"
-                      placeholder="保存先に関連付けるタグを入力" autocomplete="off" />
-                  </div>
-                  <div class="suggestions" id="suggestions"></div>
-                </div>
-                <div class="dest-tabbar-subtag-wrap">
-                  <div class="dest-tabbar-tag-area" id="dest-tabbar-subtag-area">
-                    <input type="text" class="dest-tabbar-tag-input" id="subtag-input"
-                      placeholder="履歴に付与するタグ" autocomplete="off"
-                      title="保存先候補に使わないタグを入力（サブタグ）" />
-                  </div>
-                  <div class="suggestions" id="subtag-suggestions"></div>
-                </div>
-                <button class="new-folder-tag-btn" id="new-folder-tag-btn"
-                  title="タグ名でフォルダを新規作成" disabled>🏷 タグ名でフォルダを新規作成</button>
-              </div>
+              <div style="flex:1;"></div>
+              <button class="btn-tag-filter" id="btn-tag-filter"
+                title="タグ名でフォルダを絞り込む" disabled>🔍 タグで絞り込み</button>
+              <button class="new-folder-tag-btn" id="new-folder-tag-btn"
+                title="タグ名でフォルダを新規作成" disabled>🏷 タグ名でフォルダを新規作成</button>
             </div>
 
             <!-- 保存先候補パネル（候補タブ選択時に全体表示） -->
             <div class="dest-panel" id="dest-panel">
+              <!-- a1: currentPath バナー（候補パネル上部） -->
+              <div id="current-path-banner" style="display:none; align-items:center; gap:6px;
+                background:#f4f7ff; border-bottom:1px solid #dce8f8; padding:5px 12px;
+                font-size:10px; color:#555; flex-shrink:0;">
+                <span style="color:#888; white-space:nowrap;">📁 フォルダを選ぶ側の選択中：</span>
+                <span id="current-path-banner-text" style="color:#2c5aaa; font-weight:600; word-break:break-all;"></span>
+              </div>
               <div class="dest-candidates" id="dest-candidates">
                 <div class="dest-empty">タグに関連付けられた保存先がありません</div>
               </div>
@@ -1715,6 +1740,17 @@ function setupModalEvents(
       panelDest.classList.remove("active");
       historyFilterWrap.classList.add("visible");
     }
+    // a3: 権利者エリアとチップエリアの表示切り替え
+    updateMainTabbarExtras();
+  }
+
+  /** a3: 保存先タブ表示中のみ main-tabbar-author-area と main-chip-area を表示する */
+  function updateMainTabbarExtras() {
+    const authorArea = document.getElementById("main-tabbar-author-area");
+    const chipArea   = document.getElementById("main-chip-area");
+    const isDestTab  = panelDest.classList.contains("active");
+    if (authorArea) authorArea.style.display = isDestTab ? "flex" : "none";
+    if (chipArea)   chipArea.style.display   = isDestTab ? "flex" : "none";
   }
 
   mainTabDest.addEventListener("click",    () => switchMainTab("dest"));
@@ -3052,6 +3088,8 @@ function setupModalEvents(
     updateTagFilterBtn();
     if (tagFilterActive) applyTagFilter();
     updateNewFolderTagBtn();
+    // a1: フォルダ遷移後にバナーを更新
+    updateCurrentPathBanner();
   }
 
   function renderLoading() {
@@ -3305,14 +3343,8 @@ function setupModalEvents(
         <button class="tfd-btn cancel">キャンセル</button>
       </div>`;
 
-    // エクスプローラーの新規フォルダ行の上に表示
-    // dest-tabbar-center の直下に表示
-    const center = document.querySelector(".dest-tabbar-center");
-    if (center) {
-      center.parentNode.insertBefore(dialog, center.nextSibling);
-    } else {
-      document.getElementById("dest-tabbar").appendChild(dialog);
-    }
+    // dest-tabbar の直後に表示
+    document.getElementById("dest-tabbar").appendChild(dialog);
 
     dialog.querySelector(".tfd-btn.cancel").addEventListener("click", () => dialog.remove());
     dialog.querySelector(".tfd-btn.confirm").addEventListener("click", async () => {
@@ -3352,7 +3384,7 @@ function setupModalEvents(
           const idx = selectedTags.indexOf(tag);
           selectedTags.splice(idx, 1);
           // チップも削除
-          tagArea.querySelectorAll(".tag-chip").forEach((chip) => {
+          document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach((chip) => {
             if (chip.textContent.replace("×", "").trim() === tag) chip.remove();
           });
           refreshCandidatePanel();
@@ -3395,6 +3427,9 @@ function setupModalEvents(
   destTabbar.classList.add("visible");
   destTabSuggest.style.display  = "none";
   destTabExplorer.style.display = "none";
+
+  // a3: 初期表示時に権利者エリアとチップエリアの表示状態を反映
+  updateMainTabbarExtras();
   const explorerSection = document.getElementById("explorer-wrapper");
   const destMultiFooter = document.getElementById("dest-multi-footer");
   const destMultiCount  = document.getElementById("dest-multi-count");
@@ -3649,6 +3684,20 @@ function setupModalEvents(
     // モード切替後にパス表示と保存ボタンを更新
     updatePathDisplay(null);
     updateSaveButton();
+    // a1: currentPath バナーを更新
+    updateCurrentPathBanner();
+  }
+
+  /** a1: 候補パネル上部の currentPath バナーを更新する */
+  function updateCurrentPathBanner() {
+    const banner = document.getElementById("current-path-banner");
+    if (!banner) return;
+    if (destMode === "suggest" && currentPath) {
+      document.getElementById("current-path-banner-text").textContent = currentPath;
+      banner.style.display = "flex";
+    } else {
+      banner.style.display = "none";
+    }
   }
 
   destTabSuggest.addEventListener("click",  () => switchDestMode("suggest"));
@@ -3661,10 +3710,12 @@ function setupModalEvents(
     const tag = value.trim();
     if (!tag || selectedTags.includes(tag)) return;
     selectedTags.push(tag);
+    const mainChipArea = document.getElementById("main-chip-area");
     const chip = document.createElement("span");
     chip.className = "tag-chip";
+    chip.dataset.type = "main";
     chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
-    tagArea.insertBefore(chip, tagInput);
+    mainChipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
       selectedTags.splice(selectedTags.indexOf(tag), 1);
@@ -3692,11 +3743,13 @@ function setupModalEvents(
     const tag = value.trim();
     if (!tag || selectedSubTags.includes(tag)) return;
     selectedSubTags.push(tag);
+    const mainChipArea = document.getElementById("main-chip-area");
     const chip = document.createElement("span");
     chip.className = "tag-chip";
+    chip.dataset.type = "sub";
     chip.style.cssText = "background:#ede9f9;border-color:#c3b1e1;color:#5a3fa0;";
     chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
-    subTagArea.insertBefore(chip, subTagInput);
+    mainChipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
       selectedSubTags.splice(selectedSubTags.indexOf(tag), 1);
@@ -3751,7 +3804,7 @@ function setupModalEvents(
       }
     } else if (e.key === "Backspace" && !subTagInput.value) {
       // 入力が空の状態でバックスペース → 末尾のサブタグを削除（タグ入力欄と同仕様）
-      subTagArea.querySelectorAll(".tag-chip").forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
       selectedSubTags.pop();
     }
     if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
@@ -3876,7 +3929,7 @@ function setupModalEvents(
         if (!btnTagFilter.disabled) btnTagFilter.click();
       }
     } else if (e.key === "Backspace" && !tagInput.value) {
-      tagArea.querySelectorAll(".tag-chip").forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
       selectedTags.pop();
     } else if (e.key === "ArrowDown") { e.preventDefault(); moveSuggestionActive(1); }
       else if (e.key === "ArrowUp")   { e.preventDefault(); moveSuggestionActive(-1); }
@@ -3912,14 +3965,14 @@ function setupModalEvents(
     // タグをリセット（引き継ぎOFFのみ）
     if (!retainTag) {
       selectedTags.length = 0;
-      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
     // サブタグをリセット（引き継ぎOFFのみ）
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -3960,7 +4013,7 @@ function setupModalEvents(
     // タグをリセット（引き継ぎOFFのみ）
     if (!retainTag) {
       selectedTags.length = 0;
-      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
@@ -3968,7 +4021,7 @@ function setupModalEvents(
     // サブタグをリセット（引き継ぎOFFのみ）
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -4105,7 +4158,7 @@ function setupModalEvents(
     // OFF にした瞬間に入力欄をクリア
     if (!retainTag) {
       selectedTags.length = 0;
-      tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
@@ -4115,7 +4168,7 @@ function setupModalEvents(
     browser.storage.local.set({ retainSubTag });
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -4139,11 +4192,11 @@ function setupModalEvents(
     chkRetainAuthor.checked = false;
     // フォームクリア
     selectedTags.length = 0;
-    tagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+    document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
     tagInput.value = "";
     hideSuggestions();
     selectedSubTags.length = 0;
-    subTagArea.querySelectorAll(".tag-chip").forEach(c => c.remove());
+    document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
     subTagInput.value = "";
     hideSubSuggestions();
     selectedAuthors = [];

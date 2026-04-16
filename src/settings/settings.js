@@ -4640,9 +4640,10 @@ async function executeExternalImport() {
         if (b64) {
           const pending   = pendingEntries[i];
           pending.thumbId = pending.id;
+          const mime = thumbRes.thumbMimes?.[entry.filePath] || "image/jpeg";
           await browser.runtime.sendMessage({
             type:   "IMPORT_IDB_THUMBS",
-            thumbs: [{ id: pending.id, dataUrl: `data:image/jpeg;base64,${b64}` }],
+            thumbs: [{ id: pending.id, dataUrl: `data:${mime};base64,${b64}` }],
           });
         }
       }
@@ -6050,9 +6051,10 @@ async function _extB1SaveAndNext() {
     const b64 = res?.thumbs?.[cur.filePath];
     if (b64) {
       thumbId = crypto.randomUUID();
+      const mime = res?.thumbMimes?.[cur.filePath] || "image/jpeg";
       await browser.runtime.sendMessage({
         type:   "IMPORT_IDB_THUMBS",
-        thumbs: [{ id: thumbId, dataUrl: `data:image/jpeg;base64,${b64}` }],
+        thumbs: [{ id: thumbId, dataUrl: `data:${mime};base64,${b64}` }],
       });
     }
   } catch (_) { /* サムネ失敗は無視 */ }

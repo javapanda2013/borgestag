@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.9.2
+version: 1.22.3
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -133,6 +133,47 @@ def handle_list_dir(path):
 
 
 
+def make_gif_thumbnail(gif_bytes, max_size=600):
+    """
+    GIF バイト列の各フレームをリサイズして再合成し、
+    アニメーション GIF バイト列と (幅, 高さ) を返す。
+    失敗時は (None, None, None) を返す。
+    """
+    try:
+        from PIL import Image, ImageSequence
+        import io as _io
+        img = Image.open(_io.BytesIO(gif_bytes))
+        orig_w, orig_h = img.size
+        scale = min(max_size / orig_w, max_size / orig_h, 1.0)
+        new_w = max(1, int(orig_w * scale))
+        new_h = max(1, int(orig_h * scale))
+
+        frames = []
+        durations = []
+        for frame in ImageSequence.Iterator(img):
+            f = frame.convert("RGBA")
+            if scale < 1.0:
+                f = f.resize((new_w, new_h), Image.LANCZOS)
+            frames.append(f)
+            durations.append(frame.info.get("duration", 100))
+
+        if not frames:
+            return None, None, None
+
+        buf = _io.BytesIO()
+        frames[0].save(
+            buf, format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            loop=0,
+            duration=durations,
+            optimize=False,
+        )
+        return buf.getvalue(), new_w, new_h
+    except Exception:
+        return None, None, None
+
+
 def handle_save_image(url, save_path):
     """
     URL から画像をダウンロードして save_path に保存する。
@@ -179,9 +220,25 @@ def handle_save_image(url, save_path):
         with open(final_path, "wb") as f:
             f.write(data)
 
-        # サムネイル用: Pillow でリサイズして JPEG で返す
+        # サムネイル用: Pillow でリサイズして返す
         # 元画像をそのまま Base64 化すると Native Messaging の 4MB 上限を超えるため必ずリサイズする
         try:
+            # GIF はアニメーション情報を維持するため専用ヘルパーで処理する
+            if save_path.lower().endswith(".gif"):
+                gif_bytes, thumb_w, thumb_h = make_gif_thumbnail(data, max_size=600)
+                if gif_bytes is not None:
+                    thumb_b64 = base64.b64encode(gif_bytes).decode("ascii")
+                    return {
+                        "ok": True,
+                        "savedPath": final_path,
+                        "thumbData": thumb_b64,
+                        "thumbMime": "image/gif",
+                        "thumbWidth": thumb_w,
+                        "thumbHeight": thumb_h,
+                    }
+                # GIF サムネイル生成失敗時はサムネイルなしで保存成功を返す
+                return {"ok": True, "savedPath": final_path, "thumbError": "GIF thumbnail failed"}
+
             from PIL import Image
             import io as _io
             img = Image.open(_io.BytesIO(data))
@@ -247,6 +304,21 @@ def handle_save_image_base64(data_url, save_path):
 
     # サムネイル生成（handle_save_image と同じロジック）
     try:
+        # GIF はアニメーション情報を維持するため専用ヘルパーで処理する
+        if save_path.lower().endswith(".gif"):
+            gif_bytes, thumb_w, thumb_h = make_gif_thumbnail(data, max_size=600)
+            if gif_bytes is not None:
+                thumb_b64 = base64.b64encode(gif_bytes).decode("ascii")
+                return {
+                    "ok": True,
+                    "savedPath": final_path,
+                    "thumbData": thumb_b64,
+                    "thumbMime": "image/gif",
+                    "thumbWidth": thumb_w,
+                    "thumbHeight": thumb_h,
+                }
+            return {"ok": True, "savedPath": final_path, "thumbError": "GIF thumbnail failed"}
+
         from PIL import Image
         import io as _io
         img = Image.open(_io.BytesIO(data))
@@ -465,9 +537,10 @@ def handle_open_file(path):
 
 def handle_read_file_base64(path):
     """
-    ローカルファイルを読み込み、Pillowでリサイズして Base64 data URL として返す。
+    ローカルファイルを読み込み、Base64 data URL として返す。
     保存履歴の「保存した画像を開く」でブラウザ別タブ表示に使用。
-    元画像をそのまま返すと Native Messaging の 4MB 上限を超えるため、必ずリサイズする。
+    GIF はアニメーションを保持するため生バイトをそのまま返す（最大1600pxにリサイズ）。
+    非GIF は Pillow で JPEG 変換し 2MB 以内に収める。
     """
     try:
         if not os.path.isfile(path):
@@ -475,6 +548,16 @@ def handle_read_file_base64(path):
 
         with open(path, "rb") as f:
             data = f.read()
+
+        # GIF はアニメーション情報を維持するため Pillow JPEG 変換をスキップする
+        if path.lower().endswith(".gif"):
+            gif_bytes, _, _ = make_gif_thumbnail(data, max_size=1600)
+            if gif_bytes is not None:
+                data_url = "data:image/gif;base64," + base64.b64encode(gif_bytes).decode("ascii")
+                return {"ok": True, "dataUrl": data_url}
+            # フォールバック: リサイズなしで生データを返す（サイズ超過の恐れあり）
+            data_url = "data:image/gif;base64," + base64.b64encode(data).decode("ascii")
+            return {"ok": True, "dataUrl": data_url}
 
         from PIL import Image
         import io as _io
@@ -761,15 +844,28 @@ def handle_generate_thumbs_batch(paths):
     """
     ローカルファイルパスのリストからサムネイルをバッチ生成して Base64 で返す。
     handle_save_image と同一のリサイズロジック（MAX=600, JPEG, quality=85）を使用。
+    GIF はアニメーション情報を維持するため make_gif_thumbnail を使用する。
     JS 側から 1 件ずつ呼び出すことで Native Messaging 1MB 上限を回避する。
     """
     import io as _io
     thumbs = {}
+    thumbMimes = {}  # パスごとの MIME type（デフォルト image/jpeg）
     errors = {}
     for p in paths:
         try:
             with open(p, "rb") as f:
                 data = f.read()
+
+            # GIF はアニメーション情報を維持するため専用ヘルパーで処理する
+            if p.lower().endswith(".gif"):
+                gif_bytes, _, _ = make_gif_thumbnail(data, max_size=600)
+                if gif_bytes is not None:
+                    thumbs[p] = base64.b64encode(gif_bytes).decode("ascii")
+                    thumbMimes[p] = "image/gif"
+                else:
+                    errors[p] = "GIF thumbnail failed"
+                continue
+
             from PIL import Image
             img = Image.open(_io.BytesIO(data))
             img = img.convert("RGB")
@@ -785,7 +881,7 @@ def handle_generate_thumbs_batch(paths):
             thumbs[p] = base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception as e:
             errors[p] = str(e)
-    return {"ok": True, "thumbs": thumbs, "errors": errors}
+    return {"ok": True, "thumbs": thumbs, "thumbMimes": thumbMimes, "errors": errors}
 
 
 # ---------------------------------------------------------------

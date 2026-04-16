@@ -5,6 +5,19 @@
 
 ---
 
+## [1.22.3] - 2026-04-17
+
+### Added
+- **保存履歴：GIF アニメーションのサムネイル再生に対応**：従来 Pillow が `convert("RGB")` → JPEG 変換するため GIF アニメーションが静止画になっていた問題を修正。
+  - `native/image_saver.py` に `make_gif_thumbnail()` ヘルパーを追加。`PIL.ImageSequence.Iterator` で全フレームを RGBA で読み出し、最大 600px にリサイズして再合成したアニメーション GIF バイト列を返す。
+  - `handle_save_image` / `handle_save_image_base64`：保存時のサムネイル生成で `.gif` 拡張子の場合のみ `make_gif_thumbnail` を呼び出し、`thumbMime: "image/gif"`, `thumbWidth`, `thumbHeight` を付加して返すよう変更。`thumbWidth`/`thumbHeight` を明示することで `addSaveHistoryMulti` 内の Canvas → JPEG 変換バイパスを確保する。
+  - `handle_read_file_base64`：「保存した画像」ボタン押下時、`.gif` ファイルは `make_gif_thumbnail(max_size=1600)` を経由してアニメーション GIF のまま返すよう変更（従来は JPEG 変換で静止画化していた）。
+  - `handle_generate_thumbs_batch`：バッチ再生成でも `.gif` は `make_gif_thumbnail` を使用。レスポンスに `thumbMimes` フィールド（パス→ MIME type 辞書）を追加し、GIF 対象は `"image/gif"` をセット。
+  - `src/settings/settings.js`：外部取り込みのサムネイル登録（一括形式・1枚ずつ形式の2箇所）で `thumbMimes` を参照して dataURL の MIME を動的に決定するよう修正（従来 `image/jpeg` ハードコード）。
+  - JS 側の `<img src>` にはブラウザが `data:image/gif;base64,...` を自動再生するため追加変更不要。
+
+---
+
 ## [1.22.2] - 2026-04-17
 
 ### Added

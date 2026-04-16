@@ -5,6 +5,20 @@
 
 ---
 
+## [1.22.7] - 2026-04-17
+
+### Changed
+- **保存ウィンドウ：メインタブバーのチップ表示エリアを左寄せに修正**：`#main-chip-area` 直前の `<div style="flex:1;"></div>` スペーサーを削除し、`justify-content:flex-end` を `flex-start` に変更。確定済みチップが「✏️ 権利者:」入力欄の右隣から左詰めで並ぶようになった。
+- **保存ウィンドウ：「🔍 フォルダを絞り込み」「新しいフォルダ名」「＋ 作成」エリアを左寄せに修正**：内包する div から `margin:0 auto`（中央寄せ）を削除した。
+
+### Fixed
+- **native/image_saver.py の version コメント訂正**：v1.22.3 以降 manifest と誤って同期していたのを、別系統の連番に戻した（1.22.6 → 1.9.5）。CLAUDE.md の「native は manifest と別系統」ルールに整合させた。
+
+### Added
+- **GIF サムネイル生成失敗時の診断ログ**：`make_gif_thumbnail` に `_errors` 引数を追加し、`handle_read_file_base64` の GIF パスで以下を `diagnostic` として返すように変更：元ファイルサイズ・元サイズ・フレーム数・各 max_size 試行の結果（出力バイト数 or 例外メッセージ）。`background.js:generateMissingThumbs` で失敗時に `addLog("WARN", ...)` にこの診断情報を出力する。v1.22.8 で実装する本修正の原因特定に利用する。
+
+---
+
 ## [1.22.6] - 2026-04-17
 
 ### Fixed

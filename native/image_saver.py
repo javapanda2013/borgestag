@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.22.6
+version: 1.9.5
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -133,11 +133,12 @@ def handle_list_dir(path):
 
 
 
-def make_gif_thumbnail(gif_bytes, max_size=600):
+def make_gif_thumbnail(gif_bytes, max_size=600, _errors=None):
     """
     GIF バイト列の各フレームをリサイズして再合成し、
     アニメーション GIF バイト列と (幅, 高さ) を返す。
     失敗時は (None, None, None) を返す。
+    _errors: list を渡すと例外発生時に型と文字列を追記する（診断用）。
     """
     try:
         from PIL import Image, ImageSequence
@@ -158,6 +159,8 @@ def make_gif_thumbnail(gif_bytes, max_size=600):
             durations.append(frame.info.get("duration", 100))
 
         if not frames:
+            if _errors is not None:
+                _errors.append("no frames")
             return None, None, None
 
         buf = _io.BytesIO()
@@ -170,7 +173,9 @@ def make_gif_thumbnail(gif_bytes, max_size=600):
             optimize=False,
         )
         return buf.getvalue(), new_w, new_h
-    except Exception:
+    except Exception as e:
+        if _errors is not None:
+            _errors.append(f"{type(e).__name__}: {e}")
         return None, None, None
 
 
@@ -554,12 +559,43 @@ def handle_read_file_base64(path):
             # Native Messaging の 1MB 上限を超えないように、出力サイズをチェックしつつ段階的に縮小する
             # （生データフォールバックは Native 切断の原因になるため廃止）
             MAX_GIF_BYTES = 700 * 1024  # Base64 化後 ~933KB → JSON 全体 1MB 未満
+            diagnostic = {"rawSize": len(data), "attempts": []}
+
+            # 元 GIF の幅・高さ・フレーム数を取得（ベストエフォート）
+            try:
+                from PIL import Image as _Image, ImageSequence as _ISeq
+                import io as _io2
+                _img = _Image.open(_io2.BytesIO(data))
+                diagnostic["origWidth"] = _img.size[0]
+                diagnostic["origHeight"] = _img.size[1]
+                diagnostic["frameCount"] = sum(1 for _ in _ISeq.Iterator(_img))
+            except Exception as e:
+                diagnostic["openError"] = f"{type(e).__name__}: {e}"
+
             for max_size in (800, 400, 200):
-                gif_bytes, _, _ = make_gif_thumbnail(data, max_size=max_size)
-                if gif_bytes is not None and len(gif_bytes) <= MAX_GIF_BYTES:
+                _errs = []
+                gif_bytes, _, _ = make_gif_thumbnail(data, max_size=max_size, _errors=_errs)
+                if gif_bytes is None:
+                    diagnostic["attempts"].append({
+                        "maxSize": max_size,
+                        "error": _errs[0] if _errs else "unknown",
+                    })
+                    continue
+                size = len(gif_bytes)
+                within = size <= MAX_GIF_BYTES
+                diagnostic["attempts"].append({
+                    "maxSize": max_size,
+                    "outputBytes": size,
+                    "withinLimit": within,
+                })
+                if within:
                     data_url = "data:image/gif;base64," + base64.b64encode(gif_bytes).decode("ascii")
                     return {"ok": True, "dataUrl": data_url}
-            return {"ok": False, "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。"}
+            return {
+                "ok": False,
+                "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。",
+                "diagnostic": diagnostic,
+            }
 
         from PIL import Image
         import io as _io

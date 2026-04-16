@@ -1211,7 +1211,13 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 
       // Python 経由でローカルファイルを Base64 取得（Pillow でリサイズ済み）
       const res = await sendNative({ cmd: "READ_FILE_BASE64", path: filePath });
-      if (!res?.ok || !res.dataUrl) { failed++; continue; }
+      if (!res?.ok || !res.dataUrl) {
+        failed++;
+        // 診断情報をログに出力（GIF 失敗原因の特定用）
+        const diagStr = res?.diagnostic ? JSON.stringify(res.diagnostic) : "(no diagnostic)";
+        addLog("WARN", `サムネイル生成失敗: ${entry.filename}`, `error=${res?.error || "unknown"} diagnostic=${diagStr}`);
+        continue;
+      }
 
       // Base64 → Blob → IDB 保存
       const [meta, b64] = res.dataUrl.split(",");

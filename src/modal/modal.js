@@ -1351,11 +1351,8 @@ function buildModalHTML(defaultFilename) {
                 display:none; z-index:200; min-width:120px; font-size:11px;"></div>
             </div>
 
-            <!-- spacer -->
-            <div style="flex:1;"></div>
-
             <!-- a3: 確定チップ表示エリア（保存先タブ表示中のみ visible） -->
-            <div id="main-chip-area" style="display:none; align-items:center; gap:4px; flex-wrap:wrap; justify-content:flex-end; flex-shrink:0;"></div>
+            <div id="main-chip-area" style="display:none; align-items:center; gap:4px; flex-wrap:wrap; justify-content:flex-start; flex-shrink:0;"></div>
 
             <!-- 保存履歴フィルター（変更なし） -->
             <div class="history-filter-wrap" id="history-filter-wrap">
@@ -1454,7 +1451,7 @@ function buildModalHTML(defaultFilename) {
                   <option value="created-asc">作成日 ↑</option>
                   <option value="created-desc">作成日 ↓</option>
                 </select>
-                <div style="display:flex;align-items:center;gap:3px;margin:0 auto;">
+                <div style="display:flex;align-items:center;gap:3px;">
                   <input type="text" id="folder-kw-input" placeholder="🔍 フォルダを絞り込み"
                     autocomplete="off" style="width:160px;border:1px solid #d0d0d0;
                     border-radius:4px;padding:2px 7px;font-size:11px;outline:none;font-family:inherit;" />

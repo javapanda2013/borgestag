@@ -70,6 +70,14 @@ let _extFpStack        = [];        // フォルダピッカーの breadcrumb st
 let _extFpCurrent      = null;      // フォルダピッカーの現在パス
 let _extFpSelectedPath = null;      // フォルダピッカーで選択中のパス
 
+// ---- v1.22.0: 取り込み予定リスト共通化（一括取り込み・1枚ずつ取り込みのフィード）----
+// 選択キー: single なら item.id、subfolders なら `${item.id}\0${sub.path}`
+let _extFlSelectedKeys = new Set();
+// サブフォルダピッカー用: ドラッグ操作の状態
+let _extPickerDrag     = null;
+//   { mode: "unify"|"invert", target: bool, lastIdx: number, processed: Set<number>, anchorIdx: number }
+let _extPickerLastClickedIdx = -1;  // Shift+クリック範囲選択の起点
+
 // ----------------------------------------------------------------
 // 初期化
 // ----------------------------------------------------------------
@@ -4306,10 +4314,23 @@ async function scanExternal(savedExcludes) {
       return `${p}\0${e.filename || e.fileName || ""}`;
     })
   );
-  const deduped = res.entries.filter(e => !existingKeys.has(`${e.savePath}\0${e.fileName}`));
+  // v1.22.0: 各エントリに sourceRoot / completionRoot を付与（複数ルート対応の基礎）
+  const deduped = res.entries
+    .filter(e => !existingKeys.has(`${e.savePath}\0${e.fileName}`))
+    .map(e => ({ ...e, sourceRoot: path, completionRoot: path }));
   const skipped = res.entries.length - deduped.length;
 
-  _extScanResult = { ...res, entries: deduped };
+  _extScanResult = {
+    ...res,
+    entries: deduped,
+    roots: [{
+      rootPath:     path,
+      scanPath:     path,
+      displayRoot:  path,
+      allFolders:   res.allFolders || [],
+      folderTokens: res.folderTokens || {},
+    }],
+  };
 
   resultEl.innerHTML = "";
   log(`✅ スキャン完了: ${res.scanned} 件スキャン`);
@@ -4327,26 +4348,43 @@ async function scanExternal(savedExcludes) {
   if (warnEl) warnEl.style.display = document.getElementById("ext-gen-thumb").checked ? "" : "none";
 }
 
+/** v1.22.0: ルートパス+相対フォルダから _extFolderTagMap のキーを生成 */
+function _extTagKey(rootPath, relFolder) {
+  return `${rootPath || ""}\0${relFolder || ""}`;
+}
+
 /** フォルダ別タグ設定テーブル描画
- *  folders:      Python の allFolders（"." = ルート直下、"sub" や "sub\\child" = サブフォルダ）
- *  folderTokens: Python の folderTokens（{ relFolder: [token, ...] }）
- *  scanPath:     スキャン対象パス（ルートフォルダ名の表示に使用）
+ *  - v1.22.0 より複数ルート対応（rootsInfo 優先）。_extFolderTagMap はルート修飾キーで統一。
+ *  - 後方互換: rootsInfo を省略した場合は folders/folderTokens/scanPath から単一ルートとして扱う。
+ *
+ *  folders:       Python の allFolders（"." = ルート直下、"sub" や "sub\\child" = サブフォルダ）
+ *  folderTokens:  Python の folderTokens（{ relFolder: [token, ...] }）
+ *  scanPath:      スキャン対象パス（ルートフォルダ名の表示に使用）
+ *  rootsInfo:     [{rootPath, scanPath, displayRoot, allFolders, folderTokens}, ...]
  */
-async function renderFolderTable(folders, folderTokens, scanPath) {
+async function renderFolderTable(folders, folderTokens, scanPath, rootsInfo = null) {
   const tbody = document.getElementById("ext-folder-tbody");
   tbody.innerHTML = "";
   _extFolderTagMap = {};
 
-  if (!folders.length) {
+  if (!rootsInfo) {
+    rootsInfo = [{
+      rootPath:     scanPath,
+      scanPath:     scanPath,
+      displayRoot:  scanPath,
+      allFolders:   folders || [],
+      folderTokens: folderTokens || {},
+    }];
+  }
+
+  const totalFolders = rootsInfo.reduce((n, r) => n + (r.allFolders?.length || 0), 0);
+  if (totalFolders === 0) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td colspan="2" style="padding:8px;color:#aaa;font-size:12px;border:1px solid #e0e0e0;">
       フォルダが見つかりませんでした</td>`;
     tbody.appendChild(tr);
     return;
   }
-
-  // スキャンルートの最後のフォルダ名を取得（表示用）
-  const rootName = scanPath.replace(/[/\\]+$/, "").split(/[/\\]/).filter(Boolean).pop() || scanPath;
 
   // チップの背景色・ボーダー色をタイプ別に定義
   const chipStyle = {
@@ -4355,19 +4393,38 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
     auth: "background:#fff3e0;border:1px solid #ffcc80;",
   };
 
-  for (const folder of folders) {
-    // 初期メインタグ: Python から受け取った絶対パストークン（除外ワード適用済み）
-    const initialMainTags = folderTokens[folder] || [];
-    _extFolderTagMap[folder] = { mainTags: [...initialMainTags], subTags: [], authTags: [] };
+  const multiRoot = rootsInfo.length > 1;
 
-    const displayName = folder === "."
-      ? `${escHtml(rootName)} <span style="font-size:10px;color:#888;">（ルート）</span>`
-      : escHtml(folder);
+  for (const ri of rootsInfo) {
+    const rootPath    = ri.rootPath;
+    const rootDisplay = ri.displayRoot || ri.scanPath || ri.rootPath || "";
+    // スキャンルートの最後のフォルダ名を取得（"."セル表示用）
+    const rootName = (rootDisplay || "").replace(/[/\\]+$/, "").split(/[/\\]/).filter(Boolean).pop() || rootDisplay;
+
+  for (const folder of (ri.allFolders || [])) {
+    const tagKey = _extTagKey(rootPath, folder);
+    // 初期メインタグ: Python から受け取った絶対パストークン（除外ワード適用済み）
+    const initialMainTags = (ri.folderTokens || {})[folder] || [];
+    _extFolderTagMap[tagKey] = { mainTags: [...initialMainTags], subTags: [], authTags: [] };
+
+    // フォルダ表示: 複数ルートなら X-3（薄字ルート + 太字相対パス）
+    let displayName;
+    if (multiRoot) {
+      const rootLine = `<div style="font-size:10px;color:#888;font-weight:400;word-break:break-all;line-height:1.3;">${escHtml(rootDisplay)}</div>`;
+      const relLine  = folder === "."
+        ? `<div style="font-size:11px;font-weight:600;color:#2c3e50;line-height:1.3;">${escHtml(rootName)} <span style="font-size:10px;color:#888;font-weight:400;">（ルート直下）</span></div>`
+        : `<div style="font-size:11px;font-weight:600;color:#2c3e50;word-break:break-all;line-height:1.3;">${escHtml(folder)}</div>`;
+      displayName = rootLine + relLine;
+    } else {
+      displayName = folder === "."
+        ? `${escHtml(rootName)} <span style="font-size:10px;color:#888;">（ルート）</span>`
+        : escHtml(folder);
+    }
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td style="padding:4px 8px;border:1px solid #e0e0e0;white-space:nowrap;font-size:11px;
-        font-weight:600;color:#2c3e50;vertical-align:top;">${displayName}</td>
+      <td style="padding:4px 8px;border:1px solid #e0e0e0;${multiRoot ? "" : "white-space:nowrap;"}font-size:11px;
+        ${multiRoot ? "" : "font-weight:600;"}color:#2c3e50;vertical-align:top;">${displayName}</td>
       <td style="padding:4px 8px;border:1px solid #e0e0e0;">
         <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">メイン:</span>
@@ -4403,7 +4460,7 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
     };
 
     const renderChips = (type) => {
-      const arr = _extFolderTagMap[folder][type + "Tags"];
+      const arr = _extFolderTagMap[tagKey][type + "Tags"];
       const el  = chipsEls[type];
       el.innerHTML = "";
       arr.forEach((tag, i) => {
@@ -4412,12 +4469,12 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
         chip.style.cssText = `${chipStyle[type]}border-radius:10px;padding:1px 8px;font-size:11px;display:inline-flex;align-items:center;gap:3px;cursor:grab;`;
         chip.innerHTML = `${escHtml(tag)}<span data-idx="${i}" style="cursor:pointer;color:#999;font-size:10px;line-height:1;padding-left:2px;">✕</span>`;
         chip.querySelector("span").addEventListener("click", (ev) => {
-          _extFolderTagMap[folder][type + "Tags"].splice(Number(ev.target.dataset.idx), 1);
+          _extFolderTagMap[tagKey][type + "Tags"].splice(Number(ev.target.dataset.idx), 1);
           renderChips(type);
         });
         // ドラッグ開始: 移動元情報を記録・同行チップの pointer-events を無効化
         chip.addEventListener("dragstart", (e) => {
-          _extDragData = { folder, type, idx: i, tag };
+          _extDragData = { folder: tagKey, type, idx: i, tag };
           e.dataTransfer.effectAllowed = "move";
           chip.style.opacity = "0.4";
           // ドラッグ中は全チップの pointer-events を無効化（ドロップゾーンの邪魔をしないよう）
@@ -4441,7 +4498,7 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
     ["main", "sub", "auth"].forEach(targetType => {
       const dropEl = chipsEls[targetType];
       dropEl.addEventListener("dragover", (e) => {
-        if (!_extDragData || _extDragData.folder !== folder) return;
+        if (!_extDragData || _extDragData.folder !== tagKey) return;
         if (_extDragData.type === targetType) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
@@ -4454,12 +4511,12 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
       dropEl.addEventListener("drop", (e) => {
         e.preventDefault();
         dropEl.style.outline = "";
-        if (!_extDragData || _extDragData.folder !== folder) return;
+        if (!_extDragData || _extDragData.folder !== tagKey) return;
         const { type: srcType, idx: srcIdx, tag } = _extDragData;
         if (srcType === targetType) return;
         // ソースから削除、ターゲットに追加（重複なし）
-        _extFolderTagMap[folder][srcType + "Tags"].splice(srcIdx, 1);
-        const targetArr = _extFolderTagMap[folder][targetType + "Tags"];
+        _extFolderTagMap[tagKey][srcType + "Tags"].splice(srcIdx, 1);
+        const targetArr = _extFolderTagMap[tagKey][targetType + "Tags"];
         if (!targetArr.includes(tag)) targetArr.push(tag);
         renderChips(srcType);
         renderChips(targetType);
@@ -4470,7 +4527,7 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
     const addTag = (input, type) => {
       const v = input.value.trim();
       if (!v) return;
-      const arr = _extFolderTagMap[folder][type + "Tags"];
+      const arr = _extFolderTagMap[tagKey][type + "Tags"];
       if (!arr.includes(v)) { arr.push(v); renderChips(type); }
       input.value = "";
     };
@@ -4484,6 +4541,7 @@ async function renderFolderTable(folders, folderTokens, scanPath) {
     // 初期チップ描画（メインタグのみ初期値あり）
     renderChips("main");
   }
+  } // end for rootsInfo
 }
 
 /** インポート実行 */
@@ -4510,8 +4568,13 @@ async function executeExternalImport() {
   log(`⏳ インポート準備中... (${entries.length} 件)`);
 
   // エントリごとに tags/subTags/authors をフォルダ別設定から決定
+  // v1.22.0: ルート修飾キー（${sourceRoot}\0${relFolder}）で _extFolderTagMap を参照。
+  //          後方互換として relFolder 単独キーへのフォールバックも保持。
   const pendingEntries = entries.map(e => {
-    const fm = _extFolderTagMap[e.relFolder] || { mainTags: [], subTags: [], authTags: [] };
+    const tagKey = e.sourceRoot ? _extTagKey(e.sourceRoot, e.relFolder) : e.relFolder;
+    const fm = _extFolderTagMap[tagKey]
+            || _extFolderTagMap[e.relFolder]
+            || { mainTags: [], subTags: [], authTags: [] };
     return {
       id:       crypto.randomUUID(),
       savedAt:  e.savedAt,
@@ -4523,6 +4586,8 @@ async function executeExternalImport() {
       authors:  [...fm.authTags,  ..._extManualAuthors],
       thumbId:  null,
       source:   "external_import",
+      // 完了履歴の集計用に保持（saveHistory には載せない方が良いが、軽量なので残す）
+      _completionRoot: e.completionRoot || e.sourceRoot || null,
     };
   });
 
@@ -4621,6 +4686,33 @@ async function executeExternalImport() {
   _extImporting  = false;
   _lastImportIds = pendingEntries.map(e => e.id);
 
+  // v1.22.0: 一括取り込みの完了履歴を記録（ルートパスごとに集計）
+  const rootCounts = new Map(); // rootPath → { doneCount, total }
+  for (const pe of pendingEntries) {
+    const rp = pe._completionRoot;
+    if (!rp) continue;
+    if (!rootCounts.has(rp)) rootCounts.set(rp, { doneCount: 0, total: 0 });
+    const c = rootCounts.get(rp);
+    c.doneCount++;
+    c.total++;
+  }
+  if (rootCounts.size > 0) {
+    for (const [rp, c] of rootCounts) {
+      _extCompletedRoots = _extCompletedRoots.filter(r =>
+        (r.rootPath || "").toLowerCase() !== rp.toLowerCase());
+      _extCompletedRoots.unshift({
+        rootPath:     rp,
+        completedAt:  new Date().toISOString(),
+        totalCount:   c.total,
+        doneCount:    c.doneCount,
+        skippedCount: 0,
+        source:       "batch",
+      });
+    }
+    await browser.storage.local.set({ extImportCompletedRoots: _extCompletedRoots });
+    _extRenderCompletedRoots();
+  }
+
   resultEl.className = "import-result success";
   resultEl.innerHTML = "";
   log(`✅ ${pendingEntries.length} 件をインポートしました`);
@@ -4700,7 +4792,7 @@ async function _setupExtPerItemMode() {
     }
   });
 
-  // c1 フォルダリスト操作
+  // c1 フォルダリスト操作（v1.22.0 で per-item 専用→共通化）
   document.getElementById("ext-fl-add-single")?.addEventListener("click", _extFlAddSingle);
   document.getElementById("ext-fl-add-subfolders")?.addEventListener("click", _extFlOpenSubfolderPicker);
   document.getElementById("ext-fl-picker-ok")?.addEventListener("click", _extFlApplySubfolders);
@@ -4708,6 +4800,18 @@ async function _setupExtPerItemMode() {
     document.getElementById("ext-fl-subfolder-picker").style.display = "none";
     _extSubfolderCands = [];
   });
+  // v1.22.0: ピッカーヘッダー一括ボタン
+  document.getElementById("ext-fl-picker-all")?.addEventListener("click", () => _extPickerSetAll(true));
+  document.getElementById("ext-fl-picker-none")?.addEventListener("click", () => _extPickerSetAll(false));
+  document.getElementById("ext-fl-picker-invert")?.addEventListener("click", () => _extPickerInvertAll());
+
+  // v1.22.0: フォルダリスト一括操作バー
+  document.getElementById("ext-fl-bulk-all")?.addEventListener("click",     () => _extFlSelectAll(true));
+  document.getElementById("ext-fl-bulk-none")?.addEventListener("click",    () => _extFlSelectAll(false));
+  document.getElementById("ext-fl-bulk-invert")?.addEventListener("click",  () => _extFlSelectInvert());
+  document.getElementById("ext-fl-bulk-batch")?.addEventListener("click",   () => _extFlBulkImport("batch"));
+  document.getElementById("ext-fl-bulk-peritem")?.addEventListener("click", () => _extFlBulkImport("per_item"));
+  document.getElementById("ext-fl-bulk-delete")?.addEventListener("click",  () => _extFlBulkDelete());
 
   // C 完了履歴トグル
   document.getElementById("ext-completed-toggle")?.addEventListener("click", () => {
@@ -4808,39 +4912,147 @@ async function _extFlOpenSubfolderPicker() {
   _extSubfolderCands = (res.subfolders || []).map(s => ({
     path: s.path, name: s.name, checked: false,
   }));
+  _extPickerLastClickedIdx = -1;
+  _extPickerDrag           = null;
 
   if (_extSubfolderCands.length === 0) {
     listEl.innerHTML = `<div style="color:#888;">直下にサブフォルダがありません。</div>`;
+    _extPickerUpdateCount();
     return;
   }
 
   listEl.innerHTML = "";
   _extSubfolderCands.forEach((s, idx) => {
-    const row = document.createElement("label");
+    // v1.22.0: <label> → <div> に変更。cb のデフォルト toggle を使わず mousedown で制御
+    const row = document.createElement("div");
+    row.dataset.idx = String(idx);
     row.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;border-radius:3px;";
-    row.onmouseover = () => row.style.background = "#f0f6ff";
-    row.onmouseout  = () => row.style.background = "";
+    row.onmouseover = () => { if (!_extPickerDrag) row.style.background = "#f0f6ff"; };
+    row.onmouseout  = () => { row.style.background = ""; };
+
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.dataset.idx = String(idx);
-    cb.addEventListener("change", () => {
-      _extSubfolderCands[idx].checked = cb.checked;
-    });
+    cb.checked = s.checked;
+    // cb 自身のクリックでのデフォルト toggle を殺す（mousedown で一元管理するため）
+    cb.addEventListener("click", (ev) => { ev.preventDefault(); });
+
     const label = document.createElement("span");
-    label.style.cssText = "font-size:12px;color:#2c3e50;";
+    label.style.cssText = "font-size:12px;color:#2c3e50;pointer-events:none;user-select:none;";
     label.textContent = s.name;
-    const doneMark = _extFlIsCompleted(s.path)
-      ? ' <span style="font-size:10px;color:#e67e22;">（過去に完了）</span>'
-      : "";
-    if (doneMark) {
+    if (_extFlIsCompleted(s.path)) {
       const sp = document.createElement("span");
-      sp.innerHTML = doneMark;
+      sp.innerHTML = ' <span style="font-size:10px;color:#e67e22;">（過去に完了）</span>';
       label.appendChild(sp);
     }
+
     row.appendChild(cb);
     row.appendChild(label);
+
+    row.addEventListener("mousedown", (ev) => {
+      // クリック／ドラッグ開始を拾う
+      if (ev.button !== 0) return;  // 左クリック以外は無視
+      ev.preventDefault();          // テキスト選択・デフォルト toggle 抑止
+      const i = idx;
+
+      // Shift 押下: 範囲選択（起点～現在）
+      if (ev.shiftKey && _extPickerLastClickedIdx >= 0) {
+        const from = Math.min(_extPickerLastClickedIdx, i);
+        const to   = Math.max(_extPickerLastClickedIdx, i);
+        if (ev.altKey) {
+          // Alt+Shift: 範囲反転
+          for (let j = from; j <= to; j++) {
+            _extSubfolderCands[j].checked = !_extSubfolderCands[j].checked;
+          }
+        } else {
+          // 通常 Shift: 範囲を「現在行の反転後状態」に揃える
+          const newState = !_extSubfolderCands[i].checked;
+          for (let j = from; j <= to; j++) {
+            _extSubfolderCands[j].checked = newState;
+          }
+        }
+        _extPickerLastClickedIdx = i;
+        _extPickerDrag = null;  // Shift 時はドラッグ追従しない
+        _extPickerSyncDOM();
+        return;
+      }
+
+      // 通常クリック/ドラッグ開始
+      const isInvert = !!ev.altKey;
+      if (isInvert) {
+        _extSubfolderCands[i].checked = !_extSubfolderCands[i].checked;
+      } else {
+        _extSubfolderCands[i].checked = !_extSubfolderCands[i].checked;
+      }
+      _extPickerLastClickedIdx = i;
+      _extPickerDrag = {
+        mode:      isInvert ? "invert" : "unify",
+        target:    _extSubfolderCands[i].checked,   // unify 用
+        processed: new Set([i]),
+      };
+      _extPickerSyncDOM();
+    });
+
+    row.addEventListener("mouseenter", () => {
+      if (!_extPickerDrag) return;
+      const i = idx;
+      if (_extPickerDrag.processed.has(i)) return;
+      _extPickerDrag.processed.add(i);
+      if (_extPickerDrag.mode === "invert") {
+        _extSubfolderCands[i].checked = !_extSubfolderCands[i].checked;
+      } else {
+        _extSubfolderCands[i].checked = _extPickerDrag.target;
+      }
+      _extPickerSyncDOM();
+    });
+
     listEl.appendChild(row);
   });
+
+  // ドラッグ終了のグローバルハンドラ（重複登録を避けつつ必ずクリアできるように）
+  document.removeEventListener("mouseup", _extPickerMouseUp);
+  document.addEventListener("mouseup",    _extPickerMouseUp);
+
+  _extPickerSyncDOM();
+}
+
+/** v1.22.0: ピッカー側の DOM チェックボックスを _extSubfolderCands に同期＋件数表示更新 */
+function _extPickerSyncDOM() {
+  const listEl = document.getElementById("ext-fl-picker-list");
+  if (listEl) {
+    listEl.querySelectorAll("input[type='checkbox'][data-idx]").forEach(cb => {
+      const i = Number(cb.dataset.idx);
+      if (!Number.isFinite(i) || !_extSubfolderCands[i]) return;
+      cb.checked = !!_extSubfolderCands[i].checked;
+    });
+  }
+  _extPickerUpdateCount();
+}
+
+/** v1.22.0: ピッカー上部の件数表示 */
+function _extPickerUpdateCount() {
+  const el = document.getElementById("ext-fl-picker-count");
+  if (!el) return;
+  const total = _extSubfolderCands.length;
+  const n     = _extSubfolderCands.filter(s => s.checked).length;
+  el.textContent = total > 0 ? `${n} / ${total} 件選択中` : "";
+}
+
+/** v1.22.0: ピッカー全選択/全解除 */
+function _extPickerSetAll(state) {
+  _extSubfolderCands.forEach(s => { s.checked = !!state; });
+  _extPickerSyncDOM();
+}
+
+/** v1.22.0: ピッカー反転 */
+function _extPickerInvertAll() {
+  _extSubfolderCands.forEach(s => { s.checked = !s.checked; });
+  _extPickerSyncDOM();
+}
+
+/** v1.22.0: mouseup でドラッグ状態をクリア（document レベル） */
+function _extPickerMouseUp() {
+  _extPickerDrag = null;
 }
 
 async function _extFlApplySubfolders() {
@@ -4866,6 +5078,267 @@ async function _extFlApplySubfolders() {
   showStatus(`✅ ${selected.length} 件のサブフォルダを登録しました`);
 }
 
+/**
+ * v1.22.0: 取り込み予定リストの行キー生成
+ *   - single   行: item.id 単独
+ *   - subfolders 行: `${item.id}\0${sub.path}`（グループヘッダ行は選択対象外）
+ */
+function _extFlRowKey(itemId, subPath) {
+  return subPath ? `${itemId}\0${subPath}` : itemId;
+}
+
+/**
+ * v1.22.0: 選択中の論理エントリ一覧を返す
+ *   返り値: [{ folderListItem, rootPath, subfolderPath|null }, ...]
+ *   - subfolderPath が null の場合: rootPath をそのまま取り込み対象とする
+ *   - subfolderPath があれば、その物理パスが取り込み対象（rootPath は親）
+ */
+function _extFlGetSelectedEntries() {
+  const out = [];
+  for (const item of _extFolderList) {
+    if (item.mode === "single") {
+      if (_extFlSelectedKeys.has(_extFlRowKey(item.id, null))) {
+        out.push({ folderListItem: item, rootPath: item.rootPath, subfolderPath: null });
+      }
+    } else if (item.mode === "subfolders") {
+      for (const sub of (item.subfolders || [])) {
+        if (_extFlSelectedKeys.has(_extFlRowKey(item.id, sub.path))) {
+          out.push({ folderListItem: item, rootPath: item.rootPath, subfolderPath: sub.path });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** v1.22.0: 一括バー右端の選択件数表示更新 */
+function _extFlUpdateBulkCount() {
+  const el = document.getElementById("ext-fl-bulk-count");
+  if (!el) return;
+  const n = _extFlGetSelectedEntries().length;
+  el.textContent = n > 0 ? `${n} 件選択中` : "（未選択）";
+}
+
+/** v1.22.0: ☑ 一括選択／全解除 */
+function _extFlSelectAll(state) {
+  _extFlSelectedKeys.clear();
+  if (state) {
+    for (const item of _extFolderList) {
+      if (item.mode === "single") {
+        _extFlSelectedKeys.add(_extFlRowKey(item.id, null));
+      } else if (item.mode === "subfolders") {
+        for (const sub of (item.subfolders || [])) {
+          _extFlSelectedKeys.add(_extFlRowKey(item.id, sub.path));
+        }
+      }
+    }
+  }
+  _extRenderFolderList();
+}
+
+/** v1.22.0: ☑ 反転 */
+function _extFlSelectInvert() {
+  for (const item of _extFolderList) {
+    if (item.mode === "single") {
+      const k = _extFlRowKey(item.id, null);
+      if (_extFlSelectedKeys.has(k)) _extFlSelectedKeys.delete(k);
+      else _extFlSelectedKeys.add(k);
+    } else if (item.mode === "subfolders") {
+      for (const sub of (item.subfolders || [])) {
+        const k = _extFlRowKey(item.id, sub.path);
+        if (_extFlSelectedKeys.has(k)) _extFlSelectedKeys.delete(k);
+        else _extFlSelectedKeys.add(k);
+      }
+    }
+  }
+  _extRenderFolderList();
+}
+
+/** v1.22.0: 選択行を一括削除 */
+async function _extFlBulkDelete() {
+  const sel = _extFlGetSelectedEntries();
+  if (sel.length === 0) { showStatus("⚠️ 選択行がありません", true); return; }
+  if (!confirm(`選択した ${sel.length} 件を取り込み予定リストから削除しますか？`)) return;
+  // single 行: そのまま除外。subfolders 行: 該当 sub を抜き、空になったらグループも削除
+  const removeKeys = _extFlSelectedKeys;
+  _extFolderList = _extFolderList
+    .map(item => {
+      if (item.mode === "single") {
+        return removeKeys.has(_extFlRowKey(item.id, null)) ? null : item;
+      } else if (item.mode === "subfolders") {
+        const remaining = (item.subfolders || []).filter(s =>
+          !removeKeys.has(_extFlRowKey(item.id, s.path))
+        );
+        if (remaining.length === 0) return null;
+        return { ...item, subfolders: remaining };
+      }
+      return item;
+    })
+    .filter(Boolean);
+  _extFlSelectedKeys.clear();
+  await _extFlSave();
+  _extRenderFolderList();
+  showStatus(`✅ ${sel.length} 件を削除しました`);
+}
+
+/** v1.22.0: 選択行を一括 / 1枚ずつ取り込みに渡す */
+async function _extFlBulkImport(mode /* "batch" | "per_item" */) {
+  const sel = _extFlGetSelectedEntries();
+  if (sel.length === 0) { showStatus("⚠️ 選択行がありません", true); return; }
+  if (mode === "per_item") {
+    // 1枚ずつ：選択行ごとに既存のセッション開始フローを呼ぶ
+    if (!confirm(`選択した ${sel.length} 件を 1枚ずつ取り込みのセッションとして開始しますか？`)) return;
+    // モードを 1枚ずつ形式に切替（ユーザーがすぐ見えるように）
+    const rPer = document.getElementById("ext-mode-per-item");
+    if (rPer && !rPer.checked) { rPer.checked = true; rPer.dispatchEvent(new Event("change")); }
+    for (const e of sel) {
+      try {
+        await _extStartSessionFromFolderList(
+          e.folderListItem,
+          e.subfolderPath || e.rootPath,
+          e.subfolderPath || null
+        );
+      } catch (err) {
+        console.error("[ext] start session failed", err);
+      }
+    }
+    showStatus(`📥 ${sel.length} 件のセッションを作成しました`);
+  } else {
+    // 一括取り込み：複数ルートを順次スキャンして 1 つのタグ設定テーブルへ統合
+    if (!confirm(`選択した ${sel.length} 件を一括スキャンして、フォルダ別タグ設定画面を開きますか？`)) return;
+    // モードを一括形式に切替（ユーザーがすぐ見えるように）
+    const rBatch = document.getElementById("ext-mode-batch");
+    if (rBatch && !rBatch.checked) { rBatch.checked = true; rBatch.dispatchEvent(new Event("change")); }
+    await _extScanMultiRootForBatch(sel);
+  }
+}
+
+/**
+ * v1.22.0: β動線 — 選択エントリ（複数ルート可）を順次スキャンし、
+ *  1 つのフォルダ別タグ設定テーブルへ統合してインポート準備状態にする。
+ *
+ *  selEntries: [{ folderListItem, rootPath, subfolderPath }, ...]
+ *  - subfolderPath が null なら rootPath でスキャン
+ *  - subfolderPath があればその物理パスでスキャン（ルート修飾キーには rootPath を使用）
+ */
+async function _extScanMultiRootForBatch(selEntries) {
+  if (!selEntries || selEntries.length === 0) {
+    showStatus("⚠️ 取り込み対象が選択されていません", true);
+    return;
+  }
+
+  // UI 上のスキャン結果エリアをリセット
+  const resultEl = document.getElementById("ext-scan-result");
+  if (resultEl) {
+    resultEl.innerHTML = "";
+    resultEl.className = "import-result";
+    resultEl.style.display = "block";
+  }
+  const log = (msg) => { if (resultEl) resultEl.innerHTML += escHtml(msg) + "\n"; };
+
+  // 除外ワードを収集
+  const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "saveHistory"]);
+  const savedExcludes  = stored.extImportExcludes || [];
+  const allExcludes    = [...savedExcludes, ..._extTempExcludes];
+  const excludesNorm   = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
+  const cutoffIso      = stored.extImportCutoffDate
+    ? new Date(stored.extImportCutoffDate).toISOString() : "";
+
+  // 既存 saveHistory から重複チェック用 Set を準備
+  const existingKeys = new Set(
+    (stored.saveHistory || []).map(e => {
+      const p = Array.isArray(e.savePaths) ? (e.savePaths[0] || "") : (e.savePath || "");
+      return `${p}\0${e.filename || e.fileName || ""}`;
+    })
+  );
+
+  let totalScanned = 0;
+  let totalDeduped = 0;
+  let totalSkipped = 0;
+  const allEntries  = [];
+  const rootsInfo   = [];
+
+  log(`⏳ ${selEntries.length} 件のフォルダをスキャン中...`);
+
+  for (const sel of selEntries) {
+    const scanTarget = sel.subfolderPath || sel.rootPath;
+    // rootPath: _extFolderTagMap のキー上位部分（完了履歴キー兼）
+    const rootPath   = sel.rootPath;
+
+    let res;
+    try {
+      res = await browser.runtime.sendMessage({
+        type:       "SCAN_EXTERNAL_IMAGES",
+        path:       scanTarget,
+        cutoffDate: cutoffIso,
+        excludes:   excludesNorm,
+      });
+    } catch (e) {
+      log(`❌ スキャン失敗 (${scanTarget}): ${e.message || ""}`);
+      continue;
+    }
+    if (!res?.ok) {
+      log(`❌ スキャン失敗 (${scanTarget}): ${res?.error || "不明なエラー"}`);
+      continue;
+    }
+
+    const deduped = (res.entries || [])
+      .filter(e => !existingKeys.has(`${e.savePath}\0${e.fileName}`))
+      .map(e => ({
+        ...e,
+        sourceRoot:      rootPath,
+        completionRoot:  rootPath,
+      }));
+
+    totalScanned += res.scanned || 0;
+    totalDeduped += deduped.length;
+    totalSkipped += (res.entries?.length || 0) - deduped.length;
+
+    allEntries.push(...deduped);
+
+    rootsInfo.push({
+      rootPath,
+      scanPath:    rootPath,
+      displayRoot: rootPath,
+      allFolders:   res.allFolders   || [],
+      folderTokens: res.folderTokens || {},
+    });
+
+    log(`  ✓ ${scanTarget}: ${res.scanned} 件スキャン / ${deduped.length} 件対象`);
+  }
+
+  if (allEntries.length === 0) {
+    log(`📋 対象エントリが 0 件でした（スキャン: ${totalScanned} 件）`);
+    if (resultEl) resultEl.className = "import-result success";
+    return;
+  }
+
+  // _extScanResult をβ動線の形式で更新
+  _extScanResult = {
+    ok:      true,
+    entries: allEntries,
+    roots:   rootsInfo,
+  };
+
+  // タグ設定テーブルを多ルート形式で描画
+  await renderFolderTable([], {}, "", rootsInfo);
+
+  // タグ設定・インポート実行セクションを表示
+  document.getElementById("ext-tag-section").style.display    = "";
+  document.getElementById("ext-import-section").style.display = "";
+  const countEl = document.getElementById("ext-entry-count");
+  if (countEl) countEl.textContent = allEntries.length;
+  const warnEl = document.getElementById("ext-thumb-warning");
+  if (warnEl) warnEl.style.display = document.getElementById("ext-gen-thumb").checked ? "" : "none";
+
+  if (resultEl) {
+    resultEl.className = "import-result success";
+    resultEl.innerHTML = "";
+    log(`✅ スキャン完了: 合計 ${totalScanned} 件スキャン`);
+    log(`📋 対象: ${totalDeduped} 件（重複スキップ: ${totalSkipped} 件）`);
+  }
+}
+
 function _extRenderFolderList() {
   const tbody  = document.getElementById("ext-fl-tbody");
   const emptyEl = document.getElementById("ext-fl-empty");
@@ -4873,116 +5346,176 @@ function _extRenderFolderList() {
   tbody.innerHTML = "";
   if (_extFolderList.length === 0) {
     if (emptyEl) emptyEl.style.display = "";
+    _extFlUpdateBulkCount();
     return;
   }
   if (emptyEl) emptyEl.style.display = "none";
 
+  // 共通: 選択チェック描画
+  const makeSelectCb = (key) => {
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = _extFlSelectedKeys.has(key);
+    cb.addEventListener("change", () => {
+      if (cb.checked) _extFlSelectedKeys.add(key);
+      else _extFlSelectedKeys.delete(key);
+      _extFlUpdateBulkCount();
+    });
+    return cb;
+  };
+
+  // 共通: 行操作ボタン群（個別行の 📦 / 📥 / 🗑）
+  const makeRowActions = (item, targetPath, subfolderPath) => {
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "display:flex;gap:3px;flex-wrap:wrap;";
+
+    const btnBatch = document.createElement("button");
+    btnBatch.className = "backup-btn";
+    btnBatch.style.cssText = "padding:2px 6px;font-size:10px;background:#e8f5e9;border-color:#a5d6a7;";
+    btnBatch.title = "このフォルダだけ一括取り込み";
+    btnBatch.textContent = "📦";
+    btnBatch.addEventListener("click", async () => {
+      const rBatch = document.getElementById("ext-mode-batch");
+      if (rBatch && !rBatch.checked) { rBatch.checked = true; rBatch.dispatchEvent(new Event("change")); }
+      await _extScanMultiRootForBatch([{ folderListItem: item, rootPath: item.rootPath, subfolderPath }]);
+    });
+
+    const btnPer = document.createElement("button");
+    btnPer.className = "backup-btn";
+    btnPer.style.cssText = "padding:2px 6px;font-size:10px;background:#e3f2fd;border-color:#90caf9;";
+    btnPer.title = "このフォルダだけ1枚ずつ取り込み";
+    btnPer.textContent = "📥";
+    btnPer.addEventListener("click", () => {
+      const rPer = document.getElementById("ext-mode-per-item");
+      if (rPer && !rPer.checked) { rPer.checked = true; rPer.dispatchEvent(new Event("change")); }
+      _extStartSessionFromFolderList(item, targetPath, subfolderPath);
+    });
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "backup-btn";
+    btnDel.style.cssText = "padding:2px 6px;font-size:10px;";
+    btnDel.title = "削除";
+    btnDel.textContent = "🗑";
+    btnDel.addEventListener("click", async () => {
+      const label = subfolderPath || item.rootPath;
+      if (!confirm(`「${label}」をリストから削除しますか？`)) return;
+      if (item.mode === "single") {
+        _extFolderList = _extFolderList.filter(f => f.id !== item.id);
+        _extFlSelectedKeys.delete(_extFlRowKey(item.id, null));
+      } else if (item.mode === "subfolders") {
+        item.subfolders = (item.subfolders || []).filter(s => s.path !== subfolderPath);
+        _extFlSelectedKeys.delete(_extFlRowKey(item.id, subfolderPath));
+        if (item.subfolders.length === 0) {
+          _extFolderList = _extFolderList.filter(f => f.id !== item.id);
+        }
+      }
+      await _extFlSave();
+      _extRenderFolderList();
+    });
+
+    wrap.appendChild(btnBatch);
+    wrap.appendChild(btnPer);
+    wrap.appendChild(btnDel);
+    return wrap;
+  };
+
   for (const item of _extFolderList) {
     if (item.mode === "single") {
+      const key = _extFlRowKey(item.id, null);
       const tr = document.createElement("tr");
       tr.innerHTML = `
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
         <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
         <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;"></td>
         <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
       const tds = tr.querySelectorAll("td");
-      // 完了チェック
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = !!item.done;
-      cb.addEventListener("change", async () => {
-        item.done = cb.checked;
+      // 選択
+      tds[0].appendChild(makeSelectCb(key));
+      // 完了
+      const cbDone = document.createElement("input");
+      cbDone.type = "checkbox";
+      cbDone.checked = !!item.done;
+      cbDone.addEventListener("change", async () => {
+        item.done = cbDone.checked;
         await _extFlSave();
       });
-      tds[0].appendChild(cb);
+      tds[1].appendChild(cbDone);
       // パス
-      const isCompleted = _extFlIsCompleted(item.rootPath);
-      tds[1].textContent = item.rootPath;
-      if (isCompleted) {
+      tds[2].textContent = item.rootPath;
+      if (_extFlIsCompleted(item.rootPath)) {
         const badge = document.createElement("span");
         badge.style.cssText = "margin-left:6px;font-size:10px;color:#fff;background:#e67e22;padding:1px 6px;border-radius:8px;";
         badge.textContent = "過去に完了";
-        tds[1].appendChild(badge);
+        tds[2].appendChild(badge);
       }
       // 操作
-      const btnStart = document.createElement("button");
-      btnStart.className = "backup-btn";
-      btnStart.style.cssText = "padding:2px 8px;font-size:11px;margin-right:4px;";
-      btnStart.textContent = "▶ 開始";
-      btnStart.addEventListener("click", () => _extStartSessionFromFolderList(item, item.rootPath, null));
-      const btnDel = document.createElement("button");
-      btnDel.className = "backup-btn";
-      btnDel.style.cssText = "padding:2px 8px;font-size:11px;";
-      btnDel.textContent = "🗑";
-      btnDel.addEventListener("click", async () => {
-        if (!confirm("このフォルダを登録リストから削除しますか？")) return;
-        _extFolderList = _extFolderList.filter(f => f.id !== item.id);
-        await _extFlSave();
-        _extRenderFolderList();
-      });
-      tds[2].appendChild(btnStart);
-      tds[2].appendChild(btnDel);
+      tds[3].appendChild(makeRowActions(item, item.rootPath, null));
       tbody.appendChild(tr);
+
     } else if (item.mode === "subfolders") {
       // グループヘッダ行
       const trH = document.createElement("tr");
       trH.style.background = "#f9fbfd";
       trH.innerHTML = `
         <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;color:#888;font-size:11px;">―</td>
+        <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;color:#888;font-size:11px;">―</td>
         <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;color:#2c3e50;font-weight:600;"></td>
         <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
       const tdsH = trH.querySelectorAll("td");
-      tdsH[1].textContent = item.rootPath + " （サブフォルダ別）";
+      tdsH[2].textContent = item.rootPath + " （サブフォルダ別）";
       const btnDelH = document.createElement("button");
       btnDelH.className = "backup-btn";
       btnDelH.style.cssText = "padding:2px 8px;font-size:11px;";
       btnDelH.textContent = "🗑 グループ削除";
       btnDelH.addEventListener("click", async () => {
         if (!confirm("このサブフォルダグループを削除しますか？")) return;
+        // 関連する選択キーをクリーンアップ
+        for (const s of (item.subfolders || [])) {
+          _extFlSelectedKeys.delete(_extFlRowKey(item.id, s.path));
+        }
         _extFolderList = _extFolderList.filter(f => f.id !== item.id);
         await _extFlSave();
         _extRenderFolderList();
       });
-      tdsH[2].appendChild(btnDelH);
+      tdsH[3].appendChild(btnDelH);
       tbody.appendChild(trH);
 
-      for (const sub of item.subfolders) {
+      for (const sub of (item.subfolders || [])) {
+        const key = _extFlRowKey(item.id, sub.path);
         const tr = document.createElement("tr");
         tr.innerHTML = `
+          <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
           <td style="padding:5px 8px;border:1px solid #e0e0e0;text-align:center;"></td>
           <td style="padding:5px 8px;border:1px solid #e0e0e0;word-break:break-all;padding-left:24px;"></td>
           <td style="padding:5px 8px;border:1px solid #e0e0e0;"></td>`;
         const tds = tr.querySelectorAll("td");
+        // 選択
+        tds[0].appendChild(makeSelectCb(key));
         // 完了
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.checked = !!sub.done;
-        cb.addEventListener("change", async () => {
-          sub.done = cb.checked;
-          // 全 sub が done になったら item.done も更新
+        const cbDone = document.createElement("input");
+        cbDone.type = "checkbox";
+        cbDone.checked = !!sub.done;
+        cbDone.addEventListener("change", async () => {
+          sub.done = cbDone.checked;
           item.done = item.subfolders.every(s => s.done);
           await _extFlSave();
         });
-        tds[0].appendChild(cb);
+        tds[1].appendChild(cbDone);
         // パス
-        tds[1].textContent = sub.path;
-        const isCompleted = _extFlIsCompleted(sub.path);
-        if (isCompleted) {
+        tds[2].textContent = sub.path;
+        if (_extFlIsCompleted(sub.path)) {
           const badge = document.createElement("span");
           badge.style.cssText = "margin-left:6px;font-size:10px;color:#fff;background:#e67e22;padding:1px 6px;border-radius:8px;";
           badge.textContent = "過去に完了";
-          tds[1].appendChild(badge);
+          tds[2].appendChild(badge);
         }
         // 操作
-        const btnStart = document.createElement("button");
-        btnStart.className = "backup-btn";
-        btnStart.style.cssText = "padding:2px 8px;font-size:11px;";
-        btnStart.textContent = "▶ 開始";
-        btnStart.addEventListener("click", () => _extStartSessionFromFolderList(item, sub.path, sub.path));
-        tds[2].appendChild(btnStart);
+        tds[3].appendChild(makeRowActions(item, sub.path, sub.path));
         tbody.appendChild(tr);
       }
     }
   }
+  _extFlUpdateBulkCount();
 }
 
 // ---------- セッション開始 ----------

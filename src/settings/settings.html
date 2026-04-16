@@ -1152,8 +1152,74 @@
   <!-- 外部取り込みタブ -->
   <div class="tab-panel" id="tab-external-import">
 
+    <!-- ========================================================== -->
+    <!-- 共通: 取り込み予定フォルダリスト（v1.22.0 で per-item から共通化）-->
+    <!-- ========================================================== -->
+    <div>
+      <div class="section-title">取り込み予定フォルダリスト</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:8px;">
+          取り込み対象となるルートフォルダを登録します。単体指定、または指定フォルダの直下サブフォルダから複数選択できます（再帰なし）。
+          リストの行はチェック選択して<strong>📦 一括取り込み</strong>または<strong>📥 1枚ずつ取り込み</strong>に渡せます。
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          <input type="text" id="ext-fl-path" placeholder="フォルダパス（例: D:\Pictures\artwork）"
+            style="flex:1;min-width:220px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+          <button id="ext-fl-add-single" class="backup-btn" style="padding:3px 10px;font-size:12px;">＋ 単体登録</button>
+          <button id="ext-fl-add-subfolders" class="backup-btn" style="padding:3px 10px;font-size:12px;">📂 サブフォルダから選択</button>
+        </div>
+        <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
+          <div style="font-size:12px;color:#555;margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span id="ext-fl-picker-title">親フォルダ:</span>
+            <span id="ext-fl-picker-parent" style="color:#2c3e50;font-weight:600;flex:1;min-width:120px;word-break:break-all;"></span>
+          </div>
+          <!-- v1.22.0: ヘッダー一括操作ボタン -->
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+            <button id="ext-fl-picker-all"     class="backup-btn" style="padding:2px 8px;font-size:11px;" title="表示中のサブフォルダを全選択">☑ 全選択</button>
+            <button id="ext-fl-picker-none"    class="backup-btn" style="padding:2px 8px;font-size:11px;" title="表示中のサブフォルダを全解除">☐ 全解除</button>
+            <button id="ext-fl-picker-invert"  class="backup-btn" style="padding:2px 8px;font-size:11px;" title="チェック状態を反転">⇄ 反転</button>
+            <span id="ext-fl-picker-count" style="font-size:11px;color:#666;margin-left:auto;"></span>
+          </div>
+          <div style="font-size:10px;color:#888;margin-bottom:4px;">
+            💡 <strong>Shift+クリック</strong>で範囲選択／<strong>マウスドラッグ</strong>で連続選択／<strong>Alt+ドラッグ</strong>または<strong>Alt+Shift+クリック</strong>で範囲反転
+          </div>
+          <div id="ext-fl-picker-list"
+               style="min-height:300px;max-height:60vh;resize:vertical;overflow:auto;border:1px solid #e0e0e0;border-radius:4px;padding:6px;background:#fff;user-select:none;"></div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <button id="ext-fl-picker-ok" class="backup-btn" style="padding:3px 10px;font-size:12px;">✓ 選択したフォルダを登録</button>
+            <button id="ext-fl-picker-cancel" class="backup-btn" style="padding:3px 10px;font-size:12px;">キャンセル</button>
+          </div>
+        </div>
+        <!-- v1.22.0: 一括操作バー -->
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;padding:6px 8px;background:#fafcff;border:1px solid #e3eaf2;border-radius:4px;">
+          <button id="ext-fl-bulk-all"      class="backup-btn" style="padding:2px 8px;font-size:11px;">☑ 全選択</button>
+          <button id="ext-fl-bulk-none"     class="backup-btn" style="padding:2px 8px;font-size:11px;">☐ 全解除</button>
+          <button id="ext-fl-bulk-invert"   class="backup-btn" style="padding:2px 8px;font-size:11px;">⇄ 反転</button>
+          <span style="border-left:1px solid #d0d0d0;height:16px;margin:0 4px;"></span>
+          <button id="ext-fl-bulk-batch"    class="backup-btn" style="padding:2px 10px;font-size:11px;background:#e8f5e9;border-color:#a5d6a7;">📦 選択を一括取り込み</button>
+          <button id="ext-fl-bulk-peritem"  class="backup-btn" style="padding:2px 10px;font-size:11px;background:#e3f2fd;border-color:#90caf9;">📥 選択を1枚ずつ取り込み</button>
+          <button id="ext-fl-bulk-delete"   class="backup-btn" style="padding:2px 10px;font-size:11px;">🗑 選択を削除</button>
+          <span id="ext-fl-bulk-count" style="font-size:11px;color:#666;margin-left:auto;"></span>
+        </div>
+        <table id="ext-fl-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="padding:5px 8px;text-align:center;border:1px solid #e0e0e0;width:36px;">☑</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:60px;">完了</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">フォルダ</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:230px;">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ext-fl-tbody"></tbody>
+        </table>
+        <div id="ext-fl-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
+          登録されたフォルダはありません。
+        </div>
+      </div>
+    </div>
+
     <!-- 形式切替（v1.20.0） -->
-    <div class="ext-mode-switch" style="display:flex;align-items:center;gap:14px;padding:8px 12px;background:#f5f8fb;border:1px solid #d0dae5;border-radius:6px;margin-bottom:12px;">
+    <div class="ext-mode-switch" style="display:flex;align-items:center;gap:14px;padding:8px 12px;background:#f5f8fb;border:1px solid #d0dae5;border-radius:6px;margin:14px 0 12px;">
       <span style="font-size:12px;font-weight:600;color:#2c3e50;">形式:</span>
       <label style="font-size:12px;cursor:pointer;">
         <input type="radio" name="ext-mode" value="batch" id="ext-mode-batch" checked />
@@ -1314,45 +1380,7 @@
     <!-- ────────── 1枚ずつ形式（v1.20.0 新規） ────────── -->
     <div id="ext-per-item-mode" style="display:none;">
 
-      <!-- A. 取り込み予定フォルダリスト -->
-      <div>
-        <div class="section-title">取り込み予定フォルダリスト</div>
-        <div class="backup-section">
-          <div style="font-size:12px;color:#555;margin-bottom:8px;">
-            取り込み対象となるルートフォルダを登録します。単体指定、または指定フォルダの直下サブフォルダから複数選択できます（再帰なし）。
-          </div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-            <input type="text" id="ext-fl-path" placeholder="フォルダパス（例: D:\Pictures\artwork）"
-              style="flex:1;min-width:220px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
-            <button id="ext-fl-add-single" class="backup-btn" style="padding:3px 10px;font-size:12px;">＋ 単体登録</button>
-            <button id="ext-fl-add-subfolders" class="backup-btn" style="padding:3px 10px;font-size:12px;">📂 サブフォルダから選択</button>
-          </div>
-          <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
-            <div style="font-size:12px;color:#555;margin-bottom:6px;">
-              <span id="ext-fl-picker-title">親フォルダ:</span>
-              <span id="ext-fl-picker-parent" style="color:#2c3e50;font-weight:600;"></span>
-            </div>
-            <div id="ext-fl-picker-list" style="max-height:220px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:4px;padding:6px;background:#fff;"></div>
-            <div style="display:flex;gap:6px;margin-top:8px;">
-              <button id="ext-fl-picker-ok" class="backup-btn" style="padding:3px 10px;font-size:12px;">✓ 選択したフォルダを登録</button>
-              <button id="ext-fl-picker-cancel" class="backup-btn" style="padding:3px 10px;font-size:12px;">キャンセル</button>
-            </div>
-          </div>
-          <table id="ext-fl-table" style="width:100%;border-collapse:collapse;font-size:12px;">
-            <thead>
-              <tr style="background:#f5f5f5;">
-                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:60px;">完了</th>
-                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">フォルダ</th>
-                <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:180px;">操作</th>
-              </tr>
-            </thead>
-            <tbody id="ext-fl-tbody"></tbody>
-          </table>
-          <div id="ext-fl-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
-            登録されたフォルダはありません。
-          </div>
-        </div>
-      </div>
+      <!-- A. 取り込み予定フォルダリストは v1.22.0 で共通領域へ移設（このタブ上部） -->
 
       <!-- B. セッション一覧 -->
       <div>

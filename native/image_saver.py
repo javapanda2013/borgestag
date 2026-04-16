@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.22.3
+version: 1.22.6
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -551,13 +551,15 @@ def handle_read_file_base64(path):
 
         # GIF はアニメーション情報を維持するため Pillow JPEG 変換をスキップする
         if path.lower().endswith(".gif"):
-            gif_bytes, _, _ = make_gif_thumbnail(data, max_size=1600)
-            if gif_bytes is not None:
-                data_url = "data:image/gif;base64," + base64.b64encode(gif_bytes).decode("ascii")
-                return {"ok": True, "dataUrl": data_url}
-            # フォールバック: リサイズなしで生データを返す（サイズ超過の恐れあり）
-            data_url = "data:image/gif;base64," + base64.b64encode(data).decode("ascii")
-            return {"ok": True, "dataUrl": data_url}
+            # Native Messaging の 1MB 上限を超えないように、出力サイズをチェックしつつ段階的に縮小する
+            # （生データフォールバックは Native 切断の原因になるため廃止）
+            MAX_GIF_BYTES = 700 * 1024  # Base64 化後 ~933KB → JSON 全体 1MB 未満
+            for max_size in (800, 400, 200):
+                gif_bytes, _, _ = make_gif_thumbnail(data, max_size=max_size)
+                if gif_bytes is not None and len(gif_bytes) <= MAX_GIF_BYTES:
+                    data_url = "data:image/gif;base64," + base64.b64encode(gif_bytes).decode("ascii")
+                    return {"ok": True, "dataUrl": data_url}
+            return {"ok": False, "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。"}
 
         from PIL import Image
         import io as _io

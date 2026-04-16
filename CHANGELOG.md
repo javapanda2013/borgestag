@@ -5,6 +5,24 @@
 
 ---
 
+## [1.22.8] - 2026-04-17
+
+### Fixed
+- **大容量 GIF サムネイル生成失敗時に Native プロセスが黙って死ぬ問題への耐性強化**：`native/image_saver.py` の `main()` ループにトップレベル `try/except BaseException` を追加し、コマンドハンドラ内部で未捕捉例外（`MemoryError` 等を含む）が発生してもプロセスを継続動作させる。ディスパッチャを `_dispatch_command()` として分離し、各ハンドラの例外をメインループ側で一括処理してエラーレスポンスを返すよう変更。
+- **`handle_read_file_base64` の GIF パスをステージ別に堅牢化**：
+  - 各 `make_gif_thumbnail` 呼び出しを `try/except BaseException` で保護し、Pillow 内部の未捕捉例外で Native が落ちないように防御。
+  - 全 `max_size`（800/400/200）試行で失敗した場合、**第1フレームを静止 JPEG に変換してフォールバック返却する暫定対策**を追加。`{ok: true, dataUrl, fallback: "first_frame_jpeg", diagnostic}` の形式で返すため、アニメーションは失われるが保存履歴タイルに画像は表示されるようになる。
+  - 各ステージ（`open` / `gif meta` / `gif attempt` / `fallback`）で stderr にトレースログを出力し、Firefox の Native Messaging stderr 収集機構で拾えるようにした。
+- **`background.js:generateMissingThumbs` の例外ログを詳細化**：catch ブロックで `err.name` / `err.message` / `err.stack` 先頭3行 / 対象パスを出力するよう変更。Native 応答 NG パスのログにも `path` を追加。
+
+### Added
+- **`background.js`：フォールバック適用時の INFO ログ**：Python 側が第1フレーム JPEG フォールバックを返した場合に `サムネイル GIF フォールバック適用: ...` を INFO ログに明記し、静止画化が発生したエントリをユーザーが認識できるようにした。
+
+### Changed
+- **native/image_saver.py**: version 1.9.5 → 1.9.6
+
+---
+
 ## [1.22.7] - 2026-04-17
 
 ### Changed

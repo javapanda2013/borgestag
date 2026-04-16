@@ -1215,8 +1215,13 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
         failed++;
         // 診断情報をログに出力（GIF 失敗原因の特定用）
         const diagStr = res?.diagnostic ? JSON.stringify(res.diagnostic) : "(no diagnostic)";
-        addLog("WARN", `サムネイル生成失敗: ${entry.filename}`, `error=${res?.error || "unknown"} diagnostic=${diagStr}`);
+        addLog("WARN", `サムネイル生成失敗: ${entry.filename}`, `path=${filePath} error=${res?.error || "unknown"} diagnostic=${diagStr}`);
         continue;
+      }
+      // v1.22.8: Python 側が第1フレーム JPEG フォールバックを適用した場合は INFO ログに明記
+      if (res.fallback) {
+        const diagStr = res.diagnostic ? JSON.stringify(res.diagnostic) : "";
+        addLog("INFO", `サムネイル GIF フォールバック適用: ${entry.filename}`, `fallback=${res.fallback} ${diagStr}`);
       }
 
       // Base64 → Blob → IDB 保存
@@ -1247,7 +1252,9 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
       changed = true;
       addLog("INFO", `サムネイル生成: ${entry.filename}`);
     } catch (err) {
-      addLog("WARN", `サムネイル生成失敗: ${entry.filename}`, err.message);
+      // v1.22.8: エラー型・メッセージ・スタック・対象パスを明記して原因特定を容易にする
+      const detail = `path=${filePath} type=${err?.name || err?.constructor?.name || "Error"} msg=${err?.message || String(err)} stack=${(err?.stack || "").split("\n").slice(0, 3).join(" | ")}`;
+      addLog("WARN", `サムネイル生成失敗(例外): ${entry.filename}`, detail);
       failed++;
     }
   }

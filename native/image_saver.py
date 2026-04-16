@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.9.5
+version: 1.9.6
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -546,13 +546,28 @@ def handle_read_file_base64(path):
     保存履歴の「保存した画像を開く」でブラウザ別タブ表示に使用。
     GIF はアニメーションを保持するため生バイトをそのまま返す（最大1600pxにリサイズ）。
     非GIF は Pillow で JPEG 変換し 2MB 以内に収める。
+
+    v1.9.6:
+      - GIF の全アニメ生成試行が失敗した場合、第1フレーム JPEG への暫定フォールバックを追加。
+        静止画にはなるが「何も表示されない」状態を回避する。
+      - 各ステージで stderr にログを吐き、Native 切断時の原因特定を支援。
+      - BaseException まで捕捉（MemoryError などを含む）し、プロセスクラッシュを防ぐ。
     """
+    def _slog(msg):
+        try:
+            sys.stderr.write(f"[read_file_base64] {msg}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
     try:
         if not os.path.isfile(path):
             return {"ok": False, "error": f"ファイルが存在しません: {path}"}
 
+        _slog(f"open: {path}")
         with open(path, "rb") as f:
             data = f.read()
+        _slog(f"read ok: size={len(data)}")
 
         # GIF はアニメーション情報を維持するため Pillow JPEG 変換をスキップする
         if path.lower().endswith(".gif"):
@@ -569,17 +584,30 @@ def handle_read_file_base64(path):
                 diagnostic["origWidth"] = _img.size[0]
                 diagnostic["origHeight"] = _img.size[1]
                 diagnostic["frameCount"] = sum(1 for _ in _ISeq.Iterator(_img))
-            except Exception as e:
+                _slog(f"gif meta ok: {diagnostic['origWidth']}x{diagnostic['origHeight']} frames={diagnostic['frameCount']}")
+            except BaseException as e:
                 diagnostic["openError"] = f"{type(e).__name__}: {e}"
+                _slog(f"gif meta fail: {type(e).__name__}: {e}")
 
+            # ステージ1: アニメ GIF サムネイル生成（段階的縮小）
             for max_size in (800, 400, 200):
+                _slog(f"gif attempt max_size={max_size}")
                 _errs = []
-                gif_bytes, _, _ = make_gif_thumbnail(data, max_size=max_size, _errors=_errs)
+                try:
+                    gif_bytes, _, _ = make_gif_thumbnail(data, max_size=max_size, _errors=_errs)
+                except BaseException as e:
+                    diagnostic["attempts"].append({
+                        "maxSize": max_size,
+                        "error": f"raised: {type(e).__name__}: {e}",
+                    })
+                    _slog(f"gif attempt raised: {type(e).__name__}: {e}")
+                    continue
                 if gif_bytes is None:
                     diagnostic["attempts"].append({
                         "maxSize": max_size,
                         "error": _errs[0] if _errs else "unknown",
                     })
+                    _slog(f"gif attempt returned None: {_errs[0] if _errs else 'unknown'}")
                     continue
                 size = len(gif_bytes)
                 within = size <= MAX_GIF_BYTES
@@ -588,14 +616,57 @@ def handle_read_file_base64(path):
                     "outputBytes": size,
                     "withinLimit": within,
                 })
+                _slog(f"gif attempt ok size={size} within={within}")
                 if within:
                     data_url = "data:image/gif;base64," + base64.b64encode(gif_bytes).decode("ascii")
                     return {"ok": True, "dataUrl": data_url}
-            return {
-                "ok": False,
-                "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。",
-                "diagnostic": diagnostic,
-            }
+
+            # ステージ2（v1.9.6 暫定対策）: 全サイズで失敗 or 上限超過 →
+            # 第1フレームを静止 JPEG としてフォールバック返却。少なくとも何か表示させる。
+            _slog("gif all attempts failed, falling back to first-frame JPEG")
+            try:
+                from PIL import Image as _ImageF, ImageSequence as _ISeqF
+                import io as _ioF
+                _img2 = _ImageF.open(_ioF.BytesIO(data))
+                _first = None
+                for _frame in _ISeqF.Iterator(_img2):
+                    _first = _frame.convert("RGB")
+                    break
+                if _first is None:
+                    diagnostic["fallbackError"] = "no frames in GIF"
+                    _slog("fallback fail: no frames")
+                    return {"ok": False, "error": "GIF からフレームを抽出できませんでした。", "diagnostic": diagnostic}
+
+                MAX_FB = 800
+                fw, fh = _first.size
+                fscale = min(MAX_FB / fw, MAX_FB / fh, 1.0)
+                if fscale < 1.0:
+                    _first = _first.resize((max(1, int(fw * fscale)), max(1, int(fh * fscale))), _ImageF.LANCZOS)
+                _fbuf = _ioF.BytesIO()
+                # サイズ制限: 700KB 以内に収める
+                for _q in (85, 70, 55, 40):
+                    _fbuf = _ioF.BytesIO()
+                    _first.save(_fbuf, format="JPEG", quality=_q, optimize=True)
+                    if len(_fbuf.getvalue()) <= 700 * 1024:
+                        break
+                _fb_size = len(_fbuf.getvalue())
+                if _fb_size > 700 * 1024:
+                    diagnostic["fallbackError"] = f"first-frame JPEG too large: {_fb_size}"
+                    _slog(f"fallback fail: jpeg too large ({_fb_size})")
+                    return {"ok": False, "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。", "diagnostic": diagnostic}
+                diagnostic["fallbackUsed"] = "first_frame_jpeg"
+                diagnostic["fallbackBytes"] = _fb_size
+                _slog(f"fallback ok: jpeg bytes={_fb_size}")
+                data_url = "data:image/jpeg;base64," + base64.b64encode(_fbuf.getvalue()).decode("ascii")
+                return {"ok": True, "dataUrl": data_url, "fallback": "first_frame_jpeg", "diagnostic": diagnostic}
+            except BaseException as e:
+                diagnostic["fallbackError"] = f"{type(e).__name__}: {e}"
+                _slog(f"fallback raised: {type(e).__name__}: {e}")
+                return {
+                    "ok": False,
+                    "error": "GIF が大きすぎて表示できません。ファイルを直接開いてください。",
+                    "diagnostic": diagnostic,
+                }
 
         from PIL import Image
         import io as _io
@@ -618,8 +689,9 @@ def handle_read_file_base64(path):
         data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         return {"ok": True, "dataUrl": data_url}
 
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    except BaseException as e:
+        _slog(f"top-level except: {type(e).__name__}: {e}")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------
@@ -952,68 +1024,96 @@ def main():
         if message is None:
             break
 
-        cmd = message.get("cmd")
+        # v1.9.6: コマンド処理中の未捕捉例外でプロセスが死ぬと
+        # ブラウザ側では Native 切断として観測され原因特定が困難になる。
+        # BaseException まで捕捉してエラーレスポンスを返すことで継続動作させる。
+        try:
+            result = _dispatch_command(message)
+        except BaseException as _top_e:
+            try:
+                sys.stderr.write(f"[main] uncaught in dispatch: {type(_top_e).__name__}: {_top_e}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            result = {"ok": False, "error": f"Native 内部エラー: {type(_top_e).__name__}: {_top_e}"}
 
-        if cmd == "LIST_DIR":
-            result = handle_list_dir(message.get("path"))
+        try:
+            send_message(result)
+        except BaseException as _send_e:
+            try:
+                sys.stderr.write(f"[main] send_message failed: {type(_send_e).__name__}: {_send_e}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            # 送信自体が失敗した場合は継続しても意味がないためループを抜ける
+            break
 
-        elif cmd == "SAVE_IMAGE":
-            result = handle_save_image(
-                message.get("url", ""),
-                message.get("savePath", ""),
-            )
 
-        elif cmd == "MKDIR":
-            result = handle_mkdir(message.get("path", ""), message.get("allowedRoots"))
+def _dispatch_command(message):
+    """
+    v1.9.6: main() から切り出したコマンドディスパッチャ。
+    例外はここでは捕捉せず、呼び出し側 main() の try/except でまとめて扱う。
+    """
+    cmd = message.get("cmd")
 
-        elif cmd == "WRITE_FILE":
-            result = handle_write_file(
-                message.get("path", ""),
-                message.get("content", "")
-            )
+    if cmd == "LIST_DIR":
+        return handle_list_dir(message.get("path"))
 
-        elif cmd == "SAVE_IMAGE_BASE64":
-            result = handle_save_image_base64(
-                message.get("dataUrl", ""),
-                message.get("savePath", "")
-            )
+    elif cmd == "SAVE_IMAGE":
+        return handle_save_image(
+            message.get("url", ""),
+            message.get("savePath", ""),
+        )
 
-        elif cmd == "SCAN_EXTERNAL_IMAGES":
-            result = handle_scan_external_images(
-                message.get("path", ""),
-                message.get("cutoffDate", ""),
-                message.get("excludes", []),
-                message.get("extensions", [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]),
-            )
+    elif cmd == "MKDIR":
+        return handle_mkdir(message.get("path", ""), message.get("allowedRoots"))
 
-        elif cmd == "GENERATE_THUMBS_BATCH":
-            result = handle_generate_thumbs_batch(message.get("paths", []))
+    elif cmd == "WRITE_FILE":
+        return handle_write_file(
+            message.get("path", ""),
+            message.get("content", "")
+        )
 
-        elif cmd == "LIST_SUBFOLDERS":
-            result = handle_list_subfolders(message.get("path", ""))
+    elif cmd == "SAVE_IMAGE_BASE64":
+        return handle_save_image_base64(
+            message.get("dataUrl", ""),
+            message.get("savePath", "")
+        )
 
-        elif cmd == "READ_LOCAL_IMAGE_BASE64":
-            result = handle_read_local_image_base64(
-                message.get("path", ""),
-                message.get("maxSize", 1200),
-            )
+    elif cmd == "SCAN_EXTERNAL_IMAGES":
+        return handle_scan_external_images(
+            message.get("path", ""),
+            message.get("cutoffDate", ""),
+            message.get("excludes", []),
+            message.get("extensions", [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]),
+        )
 
-        elif cmd == "OPEN_EXPLORER":
-            result = handle_open_explorer(message.get("path", ""))
+    elif cmd == "GENERATE_THUMBS_BATCH":
+        return handle_generate_thumbs_batch(message.get("paths", []))
 
-        elif cmd == "OPEN_FILE":
-            result = handle_open_file(message.get("path", ""))
+    elif cmd == "LIST_SUBFOLDERS":
+        return handle_list_subfolders(message.get("path", ""))
 
-        elif cmd == "READ_FILE_BASE64":
-            result = handle_read_file_base64(message.get("path", ""))
+    elif cmd == "READ_LOCAL_IMAGE_BASE64":
+        return handle_read_local_image_base64(
+            message.get("path", ""),
+            message.get("maxSize", 1200),
+        )
 
-        elif cmd == "FETCH_PREVIEW":
-            result = handle_fetch_preview(message.get("url", ""))
+    elif cmd == "OPEN_EXPLORER":
+        return handle_open_explorer(message.get("path", ""))
 
-        else:
-            result = {"ok": False, "error": f"不明なコマンド: {cmd}"}
+    elif cmd == "OPEN_FILE":
+        return handle_open_file(message.get("path", ""))
 
-        send_message(result)
+    elif cmd == "READ_FILE_BASE64":
+        return handle_read_file_base64(message.get("path", ""))
+
+    elif cmd == "FETCH_PREVIEW":
+        return handle_fetch_preview(message.get("url", ""))
+
+    else:
+        return {"ok": False, "error": f"不明なコマンド: {cmd}"}
 
 
 if __name__ == "__main__":

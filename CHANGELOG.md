@@ -5,6 +5,29 @@
 
 ---
 
+## [1.23.2] - 2026-04-18
+
+### Added
+- **サムネ一覧モーダルのページング**（GROUP-7-a）
+  - `設定画面 > 外部取り込み > 1 枚ずつ形式 > サムネ一覧` モーダルで **1 ページ 100 件**固定のページングを追加。フッターに `◀ 前ページ` / `N / M ページ` / `次ページ ▶` を配置。
+  - モーダル起動時、現在のカーソル（表示中画像）が含まれるページへ自動フォーカス。絞り込み結果が縮んだ場合はページ番号を範囲内にクランプ。
+  - 数千件規模のセッションでも初回描画が 100 件固定になるため、`grid.innerHTML` への DOM 一括挿入と `READ_LOCAL_IMAGE_BASE64` / `GENERATE_THUMBS_BATCH` の同時発射数が抑えられ、UI 固着リスクを解消。
+- **GIF サムネイルのアニメーション表示**（GROUP-7-c）
+  - 従来モーダルでは `.gif` を `img.src = ""` に置換して空白表示していた（コメントに「先頭フレーム JPEG にフォールバック」とあったが実装未接続）。
+  - `src/settings/settings.js` の `_extB1OpenThumbsModal` → `_extB1RenderThumbsPage` で GIF パスに対し `GENERATE_THUMBS_BATCH`（`paths: [filePath]`）を呼び出すよう変更。background.js が `thumbChunkPaths` → Base64 変換まで面倒を見る既存経路を流用するため、追加の Native 変更は不要。
+  - 結果：保存時サムネと同品質（600px アニメーション GIF）がモーダル上で動いて見えるようになった。
+
+### Changed
+- manifest.json: 1.23.1 → 1.23.2
+- **native/image_saver.py は変更なし**（version 1.9.9 据え置き）
+- `src/settings/settings.html`：サムネ一覧モーダルにページングコントロール（`#ext-b1-thumbs-prev` / `#ext-b1-thumbs-pageinfo` / `#ext-b1-thumbs-next`）を追加
+- `src/settings/settings.js`：モジュールレベル状態 `_EXT_B1_THUMB_PAGE_SIZE = 100` / `_extB1ThumbsPage` を新設。`_extB1OpenThumbsModal` をページ制御関数 `_extB1RenderThumbsPage` へ分割
+
+### Known Limitations
+- **保存済みサムネ（IDB の `thumbId`）流用は未実装**（GROUP-7-b）。モーダル開閉のたびに未保存分も既保存分も再取得する構造は変わっていない。流用は `saveHistory` と外部取り込みセッションの突合仕様が必要で、GROUP-5-A（RENAME_FILE 追加）と同時リリースになる v1.24.0 候補として 05 / 06 に残置。
+
+---
+
 ## [1.23.1] - 2026-04-18
 
 ### Fixed

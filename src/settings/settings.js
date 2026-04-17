@@ -5780,6 +5780,17 @@ function _extB1SetupEvents() {
   document.getElementById("ext-b1-thumbs-close")?.addEventListener("click", () => {
     document.getElementById("ext-b1-thumbs-modal").style.display = "none";
   });
+  // v1.23.2: GROUP-7-a ページング前後ボタン
+  document.getElementById("ext-b1-thumbs-prev")?.addEventListener("click", () => {
+    if (!_extActiveSession) return;
+    _extB1ThumbsPage--;
+    _extB1RenderThumbsPage(_extActiveSession, _extB1GetFilteredIndices(_extActiveSession));
+  });
+  document.getElementById("ext-b1-thumbs-next")?.addEventListener("click", () => {
+    if (!_extActiveSession) return;
+    _extB1ThumbsPage++;
+    _extB1RenderThumbsPage(_extActiveSession, _extB1GetFilteredIndices(_extActiveSession));
+  });
 
   // v1.23.0: GROUP-4 絞り込みチェックボックス
   ["done", "skipped", "pending"].forEach((k) => {
@@ -6404,26 +6415,62 @@ async function _extB1NavJump() {
   await _extB1LoadCurrent();
 }
 
-/** サムネ一覧モーダルを開く */
+// v1.23.2: GROUP-7-a サムネ一覧ページング状態（1 ページ 100 件固定）
+const _EXT_B1_THUMB_PAGE_SIZE = 100;
+let _extB1ThumbsPage = 0;
+
+/** サムネ一覧モーダルを開く（カーソルを含むページへ自動ジャンプ） */
 async function _extB1OpenThumbsModal() {
   const session = _extActiveSession;
   if (!session) return;
   const filtered = _extB1GetFilteredIndices(session);
   const modal = document.getElementById("ext-b1-thumbs-modal");
   const grid  = document.getElementById("ext-b1-thumbs-grid");
-  const cnt   = document.getElementById("ext-b1-thumbs-count");
   if (!modal || !grid) return;
   modal.style.display = "flex";
-  if (cnt) cnt.textContent = `${filtered.length} / ${session.queue.length} 件`;
+
+  // v1.23.2: カーソル（現在表示中の画像）が含まれるページへ初期フォーカス
+  const cursorPos = filtered.indexOf(session.cursor);
+  _extB1ThumbsPage = (cursorPos >= 0)
+    ? Math.floor(cursorPos / _EXT_B1_THUMB_PAGE_SIZE)
+    : 0;
+
+  _extB1RenderThumbsPage(session, filtered);
+}
+
+/** v1.23.2: GROUP-7-a サムネ一覧の 1 ページ分を描画 */
+function _extB1RenderThumbsPage(session, filtered) {
+  const grid    = document.getElementById("ext-b1-thumbs-grid");
+  const cnt     = document.getElementById("ext-b1-thumbs-count");
+  const info    = document.getElementById("ext-b1-thumbs-pageinfo");
+  const btnPrev = document.getElementById("ext-b1-thumbs-prev");
+  const btnNext = document.getElementById("ext-b1-thumbs-next");
+  if (!grid) return;
+
+  const total      = filtered.length;
+  const pageSize   = _EXT_B1_THUMB_PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (_extB1ThumbsPage >= totalPages) _extB1ThumbsPage = totalPages - 1;
+  if (_extB1ThumbsPage < 0) _extB1ThumbsPage = 0;
+
+  const page = _extB1ThumbsPage;
+  const from = page * pageSize;
+  const to   = Math.min(total, from + pageSize);
+
+  if (cnt)  cnt.textContent  = `${total} / ${session.queue.length} 件 ｜ 表示 ${total === 0 ? 0 : from + 1}-${to}`;
+  if (info) info.textContent = `${page + 1} / ${totalPages} ページ`;
+  if (btnPrev) btnPrev.disabled = (page <= 0);
+  if (btnNext) btnNext.disabled = (page >= totalPages - 1);
+
   grid.innerHTML = "";
 
-  if (filtered.length === 0) {
+  if (total === 0) {
     grid.innerHTML = `<div style="grid-column:1/-1;padding:30px;text-align:center;color:#888;">絞り込み結果が空です</div>`;
     return;
   }
 
-  const items = filtered.map((qIdx) => ({ qIdx, q: session.queue[qIdx] }));
-  items.forEach(({ qIdx, q }) => {
+  const pageItems = filtered.slice(from, to).map((qIdx) => ({ qIdx, q: session.queue[qIdx] }));
+  pageItems.forEach(({ qIdx, q }) => {
     const color = _EXT_STATUS_COLOR[q.status] || _EXT_STATUS_COLOR.pending;
     const card = document.createElement("div");
     card.style.cssText = `border:3px solid ${color};border-radius:4px;padding:4px;cursor:pointer;background:#fff;display:flex;flex-direction:column;gap:3px;min-width:0;`;
@@ -6460,7 +6507,7 @@ async function _extB1OpenThumbsModal() {
     card.appendChild(name);
 
     card.addEventListener("click", async () => {
-      modal.style.display = "none";
+      document.getElementById("ext-b1-thumbs-modal").style.display = "none";
       session.cursor = qIdx;
       session.updatedAt = new Date().toISOString();
       await browser.storage.local.set({ extImportSessions: _extSessions });
@@ -6469,14 +6516,21 @@ async function _extB1OpenThumbsModal() {
 
     grid.appendChild(card);
 
-    // サムネ遅延取得（簡易: 即時 READ_LOCAL_IMAGE_BASE64 の maxSize=160）
+    // v1.23.2: GROUP-7-c GIF はアニメ付きサムネを使う
+    //          GENERATE_THUMBS_BATCH は background.js で
+    //          thumbChunkPaths（Python 一時ファイル）→ Base64 変換まで
+    //          面倒を見る既存経路を流用。保存時サムネと同品質（600px アニメ GIF / quality=85 JPEG）。
     (async () => {
       try {
         const lc = (q.filePath || "").toLowerCase();
         if (lc.endsWith(".gif")) {
-          // GIF は軽量化のため先頭フレームのみ JPEG にしたサムネを使う（既存 MAKE_GIF_THUMB_FILE は使わず
-          // シンプルに READ_LOCAL_IMAGE_BASE64 にフォールバック）
-          img.src = "";
+          const r = await browser.runtime.sendMessage({
+            type:  "GENERATE_THUMBS_BATCH",
+            paths: [q.filePath],
+          });
+          const b64  = r?.thumbs?.[q.filePath];
+          const mime = r?.thumbMimes?.[q.filePath] || "image/gif";
+          if (b64) img.src = `data:${mime};base64,${b64}`;
           return;
         }
         const res = await browser.runtime.sendMessage({

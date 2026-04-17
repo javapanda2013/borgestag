@@ -1245,6 +1245,22 @@
       <span id="ext-mode-hint" style="font-size:11px;color:#666;margin-left:auto;"></span>
     </div>
 
+    <!-- v1.23.0: GROUP-1-a2 1枚ずつ取り込みの項目別引き継ぎ設定 -->
+    <div id="ext-peritem-carryover-box" style="display:none;padding:8px 12px;background:#fef9ef;border:1px solid #f2d68b;border-radius:6px;margin:0 0 12px;">
+      <div style="font-size:12px;font-weight:600;color:#7a5a00;margin-bottom:6px;">
+        🔁 1枚ずつ形式の引き継ぎ設定
+        <span style="font-size:11px;color:#8a6a00;font-weight:400;margin-left:6px;">
+          （「保存して次へ」で次画像に引き継ぐ項目を選択）
+        </span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:#2c3e50;">
+        <label style="cursor:pointer;"><input type="checkbox" id="ext-carry-tags" /> メインタグ</label>
+        <label style="cursor:pointer;"><input type="checkbox" id="ext-carry-subtags" /> サブタグ</label>
+        <label style="cursor:pointer;"><input type="checkbox" id="ext-carry-authors" /> 権利者</label>
+        <label style="cursor:pointer;"><input type="checkbox" id="ext-carry-savepath" /> 保存先フォルダパス</label>
+      </div>
+    </div>
+
     <!-- ────────── 一括形式（従来） ────────── -->
     <div id="ext-batch-mode">
 
@@ -1454,9 +1470,25 @@
           <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
               <div style="font-size:13px;font-weight:700;color:#2c3e50;">📥 1枚ずつ取り込み</div>
-              <div id="ext-b1-progress" style="font-size:12px;color:#1abc9c;font-weight:600;"></div>
+              <div id="ext-b1-progress" style="font-size:12px;font-weight:600;display:inline-flex;gap:8px;align-items:center;"></div>
             </div>
             <div id="ext-b1-session-name" style="font-size:11px;color:#888;margin-top:2px;"></div>
+
+            <!-- v1.23.0: GROUP-1-a1 ナビゲーション＋ GROUP-4 フィルタ -->
+            <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+              <button id="ext-b1-nav-prev"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="1つ前に戻る">◀</button>
+              <span id="ext-b1-nav-pos" style="font-size:12px;color:#2c3e50;font-weight:600;min-width:64px;text-align:center;">– / –</span>
+              <button id="ext-b1-nav-next"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="絞り込み内で次へ">▶</button>
+              <button id="ext-b1-nav-jump"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="番号を入力してジャンプ">🔢</button>
+              <button id="ext-b1-nav-thumbs" class="backup-btn" style="padding:3px 8px;font-size:12px;" title="サムネ一覧から選択">🖼</button>
+              <div style="flex:1"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px;margin-top:6px;font-size:11px;color:#555;flex-wrap:wrap;">
+              <span style="font-weight:600;">絞り込み:</span>
+              <label id="ext-b1-flt-done-lbl"    style="padding:2px 7px;border:2px solid #2ecc71;color:#2ecc71;border-radius:3px;cursor:pointer;"><input type="checkbox" id="ext-b1-flt-done"    style="margin-right:3px;vertical-align:middle;" /> 完了</label>
+              <label id="ext-b1-flt-skipped-lbl" style="padding:2px 7px;border:2px solid #e67e22;color:#e67e22;border-radius:3px;cursor:pointer;"><input type="checkbox" id="ext-b1-flt-skipped" style="margin-right:3px;vertical-align:middle;" /> スキップ</label>
+              <label id="ext-b1-flt-pending-lbl" style="padding:2px 7px;border:2px solid #3498db;color:#3498db;border-radius:3px;cursor:pointer;background:#e8f1fb;"><input type="checkbox" id="ext-b1-flt-pending" checked style="margin-right:3px;vertical-align:middle;" /> 残り</label>
+            </div>
           </div>
           <div style="flex:1;overflow-y:auto;padding:12px 14px;">
             <div style="font-size:11px;color:#555;margin-bottom:2px;">ファイル名</div>
@@ -1471,7 +1503,12 @@
               <input type="text" id="ext-b1-savepath" style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
               <button id="ext-b1-pick-folder" class="backup-btn" style="padding:3px 10px;font-size:12px;">📁 選ぶ</button>
             </div>
-            <div id="ext-b1-savepath-sugg" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:10px;"></div>
+            <div id="ext-b1-savepath-sugg" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px;"></div>
+            <!-- v1.23.0: GROUP-1-b 指定保存先への画像コピー作成トグル -->
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:#444;margin-bottom:10px;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="ext-b1-copy-file" />
+              保存先に画像をコピー作成（ファイル名＝タグ・権利者含む通常保存と同形式）
+            </label>
 
             <div style="font-size:12px;color:#555;margin-bottom:4px;font-weight:600;">メインタグ</div>
             <div id="ext-b1-tag-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
@@ -1503,6 +1540,20 @@
             <button id="ext-b1-close" class="backup-btn" style="padding:5px 14px;font-size:12px;margin-left:auto;">✕ 中断して閉じる</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- v1.23.0: GROUP-1-a1-サムネ一覧 モーダル -->
+    <div id="ext-b1-thumbs-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1020;align-items:center;justify-content:center;">
+      <div style="display:flex;flex-direction:column;width:80vw;max-width:1100px;height:82vh;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="font-size:13px;font-weight:700;color:#2c3e50;">🖼 サムネ一覧</div>
+          <div id="ext-b1-thumbs-count" style="font-size:11px;color:#666;"></div>
+          <div style="flex:1"></div>
+          <span style="font-size:11px;color:#555;">絞り込み反映済み。クリックでジャンプ。</span>
+          <button id="ext-b1-thumbs-close" class="backup-btn" style="padding:3px 10px;font-size:12px;">✕</button>
+        </div>
+        <div id="ext-b1-thumbs-grid" style="flex:1;overflow-y:auto;padding:10px;display:grid;grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));gap:8px;"></div>
       </div>
     </div>
 

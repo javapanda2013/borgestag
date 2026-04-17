@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.9.8
+version: 1.9.9
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -1182,6 +1182,37 @@ def handle_generate_thumbs_batch(paths):
 # ユーティリティ
 # ---------------------------------------------------------------
 
+def handle_copy_file(src_path, dst_path):
+    """
+    v1.23.0: GROUP-1-b 対応。ローカルファイルを src_path から dst_path へコピーする。
+    - 保存先ディレクトリが存在しない場合はエラー（自動作成しない）
+    - 既存ファイルがある場合は連番を付与してユニーク化（unique_path）
+    - shutil.copy2 で mtime / 権限を維持する（外部取り込みの元ファイル日時を保つため）
+    """
+    import shutil
+
+    try:
+        if not src_path or not os.path.isfile(src_path):
+            return {"ok": False, "error": f"コピー元ファイルが見つかりません: {src_path}"}
+
+        dst_dir = os.path.dirname(dst_path)
+        if not os.path.isdir(dst_dir):
+            return {
+                "ok": False,
+                "error": f"保存先フォルダが存在しません: {dst_dir}",
+                "errorCode": "DIR_NOT_FOUND",
+            }
+
+        final_path = unique_path(dst_path)
+        shutil.copy2(src_path, final_path)
+        return {"ok": True, "savedPath": final_path}
+
+    except PermissionError:
+        return {"ok": False, "error": f"書き込み権限がありません: {dst_path}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def unique_path(path):
     """
     ファイルが既に存在する場合、連番を付与してユニークなパスを返す
@@ -1315,6 +1346,13 @@ def _dispatch_command(message):
 
     elif cmd == "DELETE_CHUNK_FILE":
         return handle_delete_chunk_file(message.get("path", ""))
+
+    # v1.23.0: GROUP-1-b 外部取り込み時に指定保存先へローカルファイルをコピー
+    elif cmd == "COPY_FILE":
+        return handle_copy_file(
+            message.get("srcPath", ""),
+            message.get("dstPath", ""),
+        )
 
     else:
         return {"ok": False, "error": f"不明なコマンド: {cmd}"}

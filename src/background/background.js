@@ -269,6 +269,24 @@ browser.runtime.onMessage.addListener(async (message) => {
         maxSize: message.maxSize || 1200,
       });
     }
+    // v1.23.0: GROUP-1-b 外部取り込み時に指定保存先へローカルファイルをコピー（タグ・権利者を含むファイル名）
+    case "COPY_LOCAL_FILE": {
+      // フロント → buildFilenameWithMeta 相当をここで適用する
+      const { srcPath, dstDir, filename, tags, subTags, authors } = message;
+      if (!srcPath || !dstDir || !filename) {
+        return { ok: false, error: "COPY_LOCAL_FILE: srcPath/dstDir/filename は必須" };
+      }
+      const { filenameIncludeTag, filenameIncludeSubtag, filenameIncludeAuthor } =
+        await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
+      const effectiveFilename = buildFilenameWithMeta(filename, tags || [], subTags || [], authors || [], {
+        filenameIncludeTag:    !!filenameIncludeTag,
+        filenameIncludeSubtag: !!filenameIncludeSubtag,
+        filenameIncludeAuthor: !!filenameIncludeAuthor,
+      });
+      const dstPath = `${normalizePath(dstDir)}\\${effectiveFilename}`;
+      addLog("INFO", `外部取り込みコピー: ${srcPath}`, `→ ${dstPath}`);
+      return sendNative({ cmd: "COPY_FILE", srcPath, dstPath });
+    }
     case "GET_STORAGE_SIZE":
       return getStorageSize();
     // ---- エクスプローラーで開く ----

@@ -4772,11 +4772,19 @@ async function executeExternalImport() {
 async function _setupExtPerItemMode() {
   const stored = await browser.storage.local.get([
     "extImportMode", "extImportSessions", "extImportFolderList", "extImportCompletedRoots",
+    // v1.23.0: GROUP-1-a2 / GROUP-1-b 設定
+    "extImportCarryover", "extImportCopyToDest",
   ]);
   _extMode           = stored.extImportMode       || "batch";
   _extSessions       = stored.extImportSessions   || [];
   _extFolderList     = stored.extImportFolderList || [];
   _extCompletedRoots = stored.extImportCompletedRoots || [];
+  // v1.23.0
+  _extCarryover = Object.assign(
+    { tags: false, subtags: false, authors: false, savepath: false },
+    stored.extImportCarryover || {}
+  );
+  _extB1CopyToDest = !!stored.extImportCopyToDest;
 
   // モード切替の初期反映
   const rBatch = document.getElementById("ext-mode-batch");
@@ -4836,6 +4844,28 @@ async function _setupExtPerItemMode() {
     toggle.appendChild(cntSpan);
   });
 
+  // v1.23.0: GROUP-1-a2 引き継ぎ設定チェックボックス
+  const _wireCarry = (id, key) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = !!_extCarryover[key];
+    el.addEventListener("change", async () => {
+      _extCarryover[key] = el.checked;
+      await browser.storage.local.set({ extImportCarryover: _extCarryover });
+      // 引き継ぎ OFF にしたら蓄積値も破棄（意図しない残留を防ぐ）
+      if (!el.checked) {
+        if (key === "tags")     _extB1LastCarryValues.tags     = [];
+        if (key === "subtags")  _extB1LastCarryValues.subtags  = [];
+        if (key === "authors")  _extB1LastCarryValues.authors  = [];
+        if (key === "savepath") _extB1LastCarryValues.savepath = "";
+      }
+    });
+  };
+  _wireCarry("ext-carry-tags",     "tags");
+  _wireCarry("ext-carry-subtags",  "subtags");
+  _wireCarry("ext-carry-authors",  "authors");
+  _wireCarry("ext-carry-savepath", "savepath");
+
   // b1 オーバーレイのイベント設定
   _extB1SetupEvents();
 
@@ -4849,15 +4879,19 @@ function _applyExtModeUI() {
   const batchEl = document.getElementById("ext-batch-mode");
   const perEl   = document.getElementById("ext-per-item-mode");
   const hintEl  = document.getElementById("ext-mode-hint");
+  // v1.23.0: GROUP-1-a2 引き継ぎ設定ボックスの表示切替
+  const carryBox = document.getElementById("ext-peritem-carryover-box");
   if (!batchEl || !perEl) return;
   if (_extMode === "per_item") {
     batchEl.style.display = "none";
     perEl.style.display   = "";
     if (hintEl) hintEl.textContent = "1枚ずつプレビュー表示しながら取り込みます。中断・再開、複数セッション並行可。";
+    if (carryBox) carryBox.style.display = "";
   } else {
     batchEl.style.display = "";
     perEl.style.display   = "none";
     if (hintEl) hintEl.textContent = "従来の一括取り込み形式です。";
+    if (carryBox) carryBox.style.display = "none";
   }
 }
 
@@ -5738,6 +5772,37 @@ function _extB1SetupEvents() {
   document.getElementById("ext-b1-close")?.addEventListener("click", _extB1Close);
   document.getElementById("ext-b1-pick-folder")?.addEventListener("click", _extB1OpenFolderPicker);
 
+  // v1.23.0: GROUP-1-a1 ナビゲーションボタン群
+  document.getElementById("ext-b1-nav-prev")?.addEventListener("click",   () => _extB1NavMove(-1));
+  document.getElementById("ext-b1-nav-next")?.addEventListener("click",   () => _extB1NavMove(+1));
+  document.getElementById("ext-b1-nav-jump")?.addEventListener("click",   _extB1NavJump);
+  document.getElementById("ext-b1-nav-thumbs")?.addEventListener("click", _extB1OpenThumbsModal);
+  document.getElementById("ext-b1-thumbs-close")?.addEventListener("click", () => {
+    document.getElementById("ext-b1-thumbs-modal").style.display = "none";
+  });
+
+  // v1.23.0: GROUP-4 絞り込みチェックボックス
+  ["done", "skipped", "pending"].forEach((k) => {
+    document.getElementById(`ext-b1-flt-${k}`)?.addEventListener("change", async () => {
+      if (!_extActiveSession) return;
+      _extActiveSession.uiFilter = _extB1ReadFilterFromUI();
+      await browser.storage.local.set({ extImportSessions: _extSessions });
+      // フィルタ変更でカーソルが範囲外になったら最も近い該当項目に寄せる
+      _extB1AdjustCursorToFilter(_extActiveSession);
+      await _extB1LoadCurrent();
+    });
+  });
+
+  // v1.23.0: GROUP-1-b コピー作成トグル
+  const copyEl = document.getElementById("ext-b1-copy-file");
+  if (copyEl) {
+    copyEl.checked = !!_extB1CopyToDest;
+    copyEl.addEventListener("change", async () => {
+      _extB1CopyToDest = !!copyEl.checked;
+      await browser.storage.local.set({ extImportCopyToDest: _extB1CopyToDest });
+    });
+  }
+
   // チップ入力（タグ・サブタグ・権利者）
   _extB1SetupChipInput("tag");
   _extB1SetupChipInput("subtag");
@@ -5795,6 +5860,21 @@ function _extB1SetupResizer() {
 let _extB1MainTags = [];
 let _extB1SubTags  = [];
 let _extB1Authors  = [];
+// v1.23.0: GROUP-1-a2 項目別引き継ぎ設定（storage: extImportCarryover）
+let _extCarryover = { tags: false, subtags: false, authors: false, savepath: false };
+// v1.23.0: GROUP-1-a2 直前保存値（次画像に引き継ぐ値）
+let _extB1LastCarryValues = { tags: [], subtags: [], authors: [], savepath: "" };
+// v1.23.0: GROUP-1-b コピー作成トグル（storage: extImportCopyToDest）
+let _extB1CopyToDest = false;
+// v1.23.0: GROUP-4 絞り込み状態（セッション開始直後は「残り」のみ ON）
+//   session.uiFilter として保持するが、初期値として使用
+const _EXT_B1_FILTER_DEFAULT = { done: false, skipped: false, pending: true };
+// v1.23.0: GROUP-4 ステータス色（パターン 2）
+const _EXT_STATUS_COLOR = {
+  done:    "#2ecc71",
+  skipped: "#e67e22",
+  pending: "#3498db",
+};
 
 function _extB1SetupChipInput(kind) {
   const input   = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-input`);
@@ -5910,11 +5990,19 @@ function _extB1RenderSavepathSugg() {
 
 async function _extOpenB1(session) {
   _extActiveSession = session;
-  // cursor を pending の先頭に合わせる
+  // v1.23.0: 絞り込み設定（なければ初期値）。GROUP-1-a2 引き継ぎキャッシュ初期化
+  if (!session.uiFilter) session.uiFilter = { ..._EXT_B1_FILTER_DEFAULT };
+  _extB1LastCarryValues = { tags: [], subtags: [], authors: [], savepath: "" };
+  // cursor を pending の先頭に合わせる（絞り込み内で）
   if (session.queue[session.cursor]?.status !== "pending") {
     const nextIdx = session.queue.findIndex(q => q.status === "pending");
     session.cursor = nextIdx >= 0 ? nextIdx : session.queue.length;
   }
+  _extB1AdjustCursorToFilter(session);
+  _extB1ApplyFilterToUI(session.uiFilter);
+  // GROUP-1-b コピートグルを反映
+  const copyEl = document.getElementById("ext-b1-copy-file");
+  if (copyEl) copyEl.checked = !!_extB1CopyToDest;
   document.getElementById("ext-b1-overlay").style.display = "flex";
   document.getElementById("ext-b1-session-name").textContent = session.name || session.rootPath;
   await _extB1LoadCurrent();
@@ -5923,27 +6011,58 @@ async function _extOpenB1(session) {
 async function _extB1LoadCurrent() {
   const session = _extActiveSession;
   if (!session) return;
+
+  // v1.23.0: 絞り込み反映・進捗表示更新
+  _extB1RenderNavAndProgress(session);
+
   const cur = session.queue[session.cursor];
 
-  const pending = session.queue.filter(q => q.status === "pending").length;
-  const done    = session.queue.filter(q => q.status === "done").length;
-  const skipped = session.queue.filter(q => q.status === "skipped").length;
-  const total   = session.queue.length;
-  const progressEl = document.getElementById("ext-b1-progress");
-  if (progressEl) {
-    progressEl.textContent = `完了 ${done} / スキップ ${skipped} / 残り ${pending} / 合計 ${total}`;
-  }
-
-  // cursor が終端 or pending なしなら完了処理へ
-  if (!cur || cur.status !== "pending") {
-    await _extB1FinishSessionIfDone();
+  // v1.23.0: 全 pending が完了していれば従来通りセッション完了。
+  // 絞り込みで現在アイテムが非該当の場合は「絞り込み結果内に移動」するが、
+  // pending が残っていれば完了処理にはしない（ユーザーがフィルタ変更で再開できるよう）
+  const pendingRemain = session.queue.filter(q => q.status === "pending").length;
+  if (!cur) {
+    if (pendingRemain === 0) await _extB1FinishSessionIfDone();
     return;
   }
 
-  // 初期値セット
-  _extB1MainTags = [];
-  _extB1SubTags  = [];
-  _extB1Authors  = [];
+  // 絞り込みに現在インデックスが該当しない場合は、該当する位置にカーソル移動
+  const filtered = _extB1GetFilteredIndices(session);
+  if (filtered.length === 0) {
+    // 絞り込みが全 OFF 等で該当なし → プレビュー空表示で待機
+    _extB1RenderEmptyPreview("⚠️ 絞り込み結果が空です。上部のフィルタを変更してください。");
+    return;
+  }
+  if (!filtered.includes(session.cursor)) {
+    _extB1AdjustCursorToFilter(session);
+    await browser.storage.local.set({ extImportSessions: _extSessions });
+    _extB1RenderNavAndProgress(session);
+  }
+  const cur2 = session.queue[session.cursor];
+
+  // pending 以外（完了済・スキップ）の項目でも閲覧可能。編集は pending のみ（下で分岐）
+  const isPending = cur2 && cur2.status === "pending";
+
+  // 初期値セット（v1.23.0: GROUP-1-a2 引き継ぎに応じて前回値を復元）
+  if (isPending && _extCarryover.tags)    _extB1MainTags = [..._extB1LastCarryValues.tags];
+  else                                    _extB1MainTags = [];
+  if (isPending && _extCarryover.subtags) _extB1SubTags  = [..._extB1LastCarryValues.subtags];
+  else                                    _extB1SubTags  = [];
+  if (isPending && _extCarryover.authors) _extB1Authors  = [..._extB1LastCarryValues.authors];
+  else                                    _extB1Authors  = [];
+  // 完了済み表示の場合は保存済みエントリから値を復元
+  if (!isPending && cur2?.entryId) {
+    try {
+      const stored = await browser.storage.local.get("saveHistory");
+      const hist = (stored.saveHistory || []).find(e => e.id === cur2.entryId);
+      if (hist) {
+        _extB1MainTags = [...(hist.tags || [])];
+        _extB1Authors  = [...(hist.authors || [])];
+        _extB1SubTags  = [];
+      }
+    } catch (_) {}
+  }
+
   _extB1RenderChips("tag");
   _extB1RenderChips("subtag");
   _extB1RenderChips("author");
@@ -5953,12 +6072,20 @@ async function _extB1LoadCurrent() {
   const pathEl  = document.getElementById("ext-b1-filepath");
   const mtimeEl = document.getElementById("ext-b1-mtime");
   const saveEl  = document.getElementById("ext-b1-savepath");
-  if (fnameEl) fnameEl.textContent = cur.fileName || "";
-  if (pathEl)  { pathEl.textContent  = cur.filePath || ""; pathEl.title = cur.filePath || ""; }
-  if (mtimeEl) mtimeEl.textContent = (cur.mtime || "").replace("T", " ").slice(0, 19);
-  // デフォルト保存先 = 元ファイルの場所（親フォルダ）
-  const defaultDir = _extDirname(cur.filePath || "");
+  if (fnameEl) fnameEl.textContent = cur2.fileName || "";
+  if (pathEl)  { pathEl.textContent  = cur2.filePath || ""; pathEl.title = cur2.filePath || ""; }
+  if (mtimeEl) mtimeEl.textContent = (cur2.mtime || "").replace("T", " ").slice(0, 19);
+  // デフォルト保存先: 引き継ぎ ON なら前回値、OFF なら元ファイルの場所
+  let defaultDir;
+  if (isPending && _extCarryover.savepath && _extB1LastCarryValues.savepath) {
+    defaultDir = _extB1LastCarryValues.savepath;
+  } else {
+    defaultDir = _extDirname(cur2.filePath || "");
+  }
   if (saveEl) saveEl.value = defaultDir;
+
+  // v1.23.0: 非 pending は保存・スキップボタンを無効化（閲覧専用）
+  _extB1ApplyStatusReadonly(cur2?.status);
 
   // プレビュー取得
   const imgEl  = document.getElementById("ext-b1-preview-img");
@@ -5968,7 +6095,7 @@ async function _extB1LoadCurrent() {
   try {
     const res = await browser.runtime.sendMessage({
       type: "READ_LOCAL_IMAGE_BASE64",
-      path: cur.filePath,
+      path: cur2.filePath,
       maxSize: 1600,
     });
     if (res?.ok && res.dataUrl) {
@@ -6021,9 +6148,10 @@ async function _extB1Skip() {
   const session = _extActiveSession;
   if (!session) return;
   const cur = session.queue[session.cursor];
-  if (cur) {
+  if (cur && cur.status === "pending") {
     cur.status = "skipped";
-    session.cursor = Math.min(session.queue.length, session.cursor + 1);
+    // v1.23.0: 絞り込み結果内で次の pending / 該当アイテムへ進む
+    _extB1AdvanceCursorInFiltered(session);
     session.updatedAt = new Date().toISOString();
     await browser.storage.local.set({ extImportSessions: _extSessions });
   }
@@ -6047,6 +6175,10 @@ async function _extB1SaveAndNext() {
   if (!session) return;
   const cur = session.queue[session.cursor];
   if (!cur) return;
+  if (cur.status !== "pending") {
+    showStatus("⚠️ 完了済み／スキップ済みのため保存できません", true);
+    return;
+  }
 
   const savePathInput = document.getElementById("ext-b1-savepath");
   const savePath = (savePathInput?.value || "").trim() || _extDirname(cur.filePath);
@@ -6055,6 +6187,12 @@ async function _extB1SaveAndNext() {
   const subTags = [..._extB1SubTags];
   const authors = [..._extB1Authors];
   const allTags = [...new Set([...tags, ...subTags])];
+
+  // v1.23.0: GROUP-1-a2 引き継ぎ値を更新
+  _extB1LastCarryValues.tags     = [...tags];
+  _extB1LastCarryValues.subtags  = [...subTags];
+  _extB1LastCarryValues.authors  = [...authors];
+  _extB1LastCarryValues.savepath = savePath;
 
   // ファイル名（ファイル名メタ埋め込みは行わない。外部取り込みはファイル名を変更しない）
   const filename = cur.fileName;
@@ -6124,14 +6262,326 @@ async function _extB1SaveAndNext() {
   // queue を更新
   cur.status  = "done";
   cur.entryId = entry.id;
-  session.cursor = Math.min(session.queue.length, session.cursor + 1);
+  // v1.23.0: 絞り込み結果内で次の該当アイテムへ進む
+  _extB1AdvanceCursorInFiltered(session);
   session.updatedAt = new Date().toISOString();
   await browser.storage.local.set({ extImportSessions: _extSessions });
 
   _extRenderSessionsList();
 
+  // v1.23.0: GROUP-1-b 指定保存先にコピー作成
+  if (_extB1CopyToDest) {
+    try {
+      const copyRes = await browser.runtime.sendMessage({
+        type:    "COPY_LOCAL_FILE",
+        srcPath: cur.filePath,
+        dstDir:  savePath,
+        filename: filename,
+        tags, subTags, authors,
+      });
+      if (!copyRes?.ok) {
+        showStatus(`⚠️ 保存は成功、コピー失敗: ${copyRes?.error || "不明"}`, true);
+      }
+    } catch (e) {
+      showStatus(`⚠️ 保存は成功、コピー送信エラー: ${e.message || ""}`, true);
+    }
+  }
+
   // 次へ
   await _extB1LoadCurrent();
+}
+
+// ---------- v1.23.0: GROUP-4 絞り込み / GROUP-1-a1 ナビ ヘルパー ----------
+
+/** 絞り込み UI の現在値を読み取る */
+function _extB1ReadFilterFromUI() {
+  const rd = (id) => !!document.getElementById(id)?.checked;
+  return {
+    done:    rd("ext-b1-flt-done"),
+    skipped: rd("ext-b1-flt-skipped"),
+    pending: rd("ext-b1-flt-pending"),
+  };
+}
+
+/** セッションの絞り込み設定を UI に反映（チェック状態） */
+function _extB1ApplyFilterToUI(filter) {
+  const f = filter || _EXT_B1_FILTER_DEFAULT;
+  const setChk = (id, on) => { const el = document.getElementById(id); if (el) el.checked = !!on; };
+  setChk("ext-b1-flt-done",    f.done);
+  setChk("ext-b1-flt-skipped", f.skipped);
+  setChk("ext-b1-flt-pending", f.pending);
+  // 「選択中」であることを背景色で強調
+  const decorate = (id, color, on) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.background = on ? _hexToTint(color) : "";
+  };
+  decorate("ext-b1-flt-done-lbl",    _EXT_STATUS_COLOR.done,    f.done);
+  decorate("ext-b1-flt-skipped-lbl", _EXT_STATUS_COLOR.skipped, f.skipped);
+  decorate("ext-b1-flt-pending-lbl", _EXT_STATUS_COLOR.pending, f.pending);
+}
+
+/** ステータス色を淡い背景色に変換（簡易: 15% 透過相当） */
+function _hexToTint(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "";
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  // 15% の色 + 85% の白
+  const mix = (c) => Math.round(c * 0.15 + 255 * 0.85);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}
+
+/** セッションの絞り込み設定を取得（未設定なら初期値） */
+function _extB1GetFilter(session) {
+  if (!session) return { ..._EXT_B1_FILTER_DEFAULT };
+  if (!session.uiFilter) session.uiFilter = { ..._EXT_B1_FILTER_DEFAULT };
+  return session.uiFilter;
+}
+
+/** queue の中で絞り込み条件に合致するインデックス配列を返す */
+function _extB1GetFilteredIndices(session) {
+  if (!session) return [];
+  const f = _extB1GetFilter(session);
+  const out = [];
+  session.queue.forEach((q, i) => {
+    if (q.status === "done"    && f.done)    out.push(i);
+    if (q.status === "skipped" && f.skipped) out.push(i);
+    if (q.status === "pending" && f.pending) out.push(i);
+  });
+  return out;
+}
+
+/** cursor を絞り込み結果内に寄せる（範囲外なら最も近い後方、なければ前方） */
+function _extB1AdjustCursorToFilter(session) {
+  if (!session) return;
+  const filtered = _extB1GetFilteredIndices(session);
+  if (filtered.length === 0) return;
+  if (filtered.includes(session.cursor)) return;
+  // cursor 以上で最小の該当、それがなければ cursor 未満で最大の該当
+  const next = filtered.find(i => i >= session.cursor);
+  const prev = [...filtered].reverse().find(i => i < session.cursor);
+  session.cursor = (next !== undefined) ? next : (prev !== undefined ? prev : filtered[0]);
+}
+
+/** ナビ: 絞り込み結果内で delta 分移動 */
+async function _extB1NavMove(delta) {
+  const session = _extActiveSession;
+  if (!session) return;
+  const filtered = _extB1GetFilteredIndices(session);
+  if (filtered.length === 0) return;
+  const pos = filtered.indexOf(session.cursor);
+  const basePos = pos >= 0 ? pos
+                : (delta > 0 ? -1 : filtered.length);  // 範囲外なら端に寄せる
+  const newPos = Math.max(0, Math.min(filtered.length - 1, basePos + delta));
+  session.cursor = filtered[newPos];
+  session.updatedAt = new Date().toISOString();
+  await browser.storage.local.set({ extImportSessions: _extSessions });
+  await _extB1LoadCurrent();
+}
+
+/** ナビ: 番号ジャンプ（絞り込み結果内 1 オリジン） */
+async function _extB1NavJump() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const filtered = _extB1GetFilteredIndices(session);
+  if (filtered.length === 0) {
+    showStatus("⚠️ 絞り込み結果が空です", true);
+    return;
+  }
+  const cur = filtered.indexOf(session.cursor);
+  const curPos = cur >= 0 ? (cur + 1) : 1;
+  const input = prompt(`何枚目へジャンプ？（1 – ${filtered.length}、現在 ${curPos}）`, String(curPos));
+  if (input === null) return;
+  const n = parseInt(input, 10);
+  if (!Number.isFinite(n) || n < 1 || n > filtered.length) {
+    showStatus(`⚠️ 1 – ${filtered.length} の範囲で入力してください`, true);
+    return;
+  }
+  session.cursor = filtered[n - 1];
+  session.updatedAt = new Date().toISOString();
+  await browser.storage.local.set({ extImportSessions: _extSessions });
+  await _extB1LoadCurrent();
+}
+
+/** サムネ一覧モーダルを開く */
+async function _extB1OpenThumbsModal() {
+  const session = _extActiveSession;
+  if (!session) return;
+  const filtered = _extB1GetFilteredIndices(session);
+  const modal = document.getElementById("ext-b1-thumbs-modal");
+  const grid  = document.getElementById("ext-b1-thumbs-grid");
+  const cnt   = document.getElementById("ext-b1-thumbs-count");
+  if (!modal || !grid) return;
+  modal.style.display = "flex";
+  if (cnt) cnt.textContent = `${filtered.length} / ${session.queue.length} 件`;
+  grid.innerHTML = "";
+
+  if (filtered.length === 0) {
+    grid.innerHTML = `<div style="grid-column:1/-1;padding:30px;text-align:center;color:#888;">絞り込み結果が空です</div>`;
+    return;
+  }
+
+  const items = filtered.map((qIdx) => ({ qIdx, q: session.queue[qIdx] }));
+  items.forEach(({ qIdx, q }) => {
+    const color = _EXT_STATUS_COLOR[q.status] || _EXT_STATUS_COLOR.pending;
+    const card = document.createElement("div");
+    card.style.cssText = `border:3px solid ${color};border-radius:4px;padding:4px;cursor:pointer;background:#fff;display:flex;flex-direction:column;gap:3px;min-width:0;`;
+    if (qIdx === session.cursor) {
+      card.style.outline = "2px dashed #2c3e50";
+      card.style.outlineOffset = "2px";
+    }
+
+    const thumbWrap = document.createElement("div");
+    thumbWrap.style.cssText = "width:100%;aspect-ratio:1/1;background:#222;border-radius:3px;overflow:hidden;display:flex;align-items:center;justify-content:center;position:relative;";
+    const img = document.createElement("img");
+    img.style.cssText = "max-width:100%;max-height:100%;object-fit:contain;";
+    img.alt = q.fileName || "";
+    thumbWrap.appendChild(img);
+
+    // インデックスバッジ
+    const idxBadge = document.createElement("div");
+    idxBadge.style.cssText = "position:absolute;top:2px;left:2px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;padding:1px 5px;border-radius:2px;";
+    idxBadge.textContent = `#${qIdx + 1}`;
+    thumbWrap.appendChild(idxBadge);
+
+    // ステータスバッジ
+    const statBadge = document.createElement("div");
+    statBadge.style.cssText = `position:absolute;bottom:2px;right:2px;background:${color};color:#fff;font-size:10px;padding:1px 5px;border-radius:2px;font-weight:600;`;
+    statBadge.textContent = q.status === "done" ? "完了" : (q.status === "skipped" ? "スキップ" : "残り");
+    thumbWrap.appendChild(statBadge);
+
+    card.appendChild(thumbWrap);
+
+    const name = document.createElement("div");
+    name.style.cssText = "font-size:10px;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    name.textContent = q.fileName || "";
+    name.title = q.fileName || "";
+    card.appendChild(name);
+
+    card.addEventListener("click", async () => {
+      modal.style.display = "none";
+      session.cursor = qIdx;
+      session.updatedAt = new Date().toISOString();
+      await browser.storage.local.set({ extImportSessions: _extSessions });
+      await _extB1LoadCurrent();
+    });
+
+    grid.appendChild(card);
+
+    // サムネ遅延取得（簡易: 即時 READ_LOCAL_IMAGE_BASE64 の maxSize=160）
+    (async () => {
+      try {
+        const lc = (q.filePath || "").toLowerCase();
+        if (lc.endsWith(".gif")) {
+          // GIF は軽量化のため先頭フレームのみ JPEG にしたサムネを使う（既存 MAKE_GIF_THUMB_FILE は使わず
+          // シンプルに READ_LOCAL_IMAGE_BASE64 にフォールバック）
+          img.src = "";
+          return;
+        }
+        const res = await browser.runtime.sendMessage({
+          type:    "READ_LOCAL_IMAGE_BASE64",
+          path:    q.filePath,
+          maxSize: 180,
+        });
+        if (res?.ok && res.dataUrl) img.src = res.dataUrl;
+      } catch (_) { /* 無視 */ }
+    })();
+  });
+}
+
+/** 進捗カウンタ・ナビ表示を更新（ステータス色統一） */
+function _extB1RenderNavAndProgress(session) {
+  if (!session) return;
+  const total   = session.queue.length;
+  const done    = session.queue.filter(q => q.status === "done").length;
+  const skipped = session.queue.filter(q => q.status === "skipped").length;
+  const pending = session.queue.filter(q => q.status === "pending").length;
+
+  const prog = document.getElementById("ext-b1-progress");
+  if (prog) {
+    prog.innerHTML = "";
+    const mk = (label, n, color) => {
+      const span = document.createElement("span");
+      span.innerHTML = `${label} <b style="color:${color};">${n}</b>`;
+      span.style.color = "#555";
+      return span;
+    };
+    prog.appendChild(mk("完了",    done,    _EXT_STATUS_COLOR.done));
+    prog.appendChild(mk("スキップ", skipped, _EXT_STATUS_COLOR.skipped));
+    prog.appendChild(mk("残り",    pending, _EXT_STATUS_COLOR.pending));
+    const tot = document.createElement("span");
+    tot.style.color = "#888";
+    tot.textContent = `合計 ${total}`;
+    prog.appendChild(tot);
+  }
+
+  // 絞り込み内での位置表示
+  const filtered = _extB1GetFilteredIndices(session);
+  const pos = filtered.indexOf(session.cursor);
+  const posEl = document.getElementById("ext-b1-nav-pos");
+  if (posEl) {
+    if (filtered.length === 0) {
+      posEl.textContent = "– / –";
+      posEl.style.color = "#999";
+    } else if (pos < 0) {
+      posEl.textContent = `– / ${filtered.length}`;
+      posEl.style.color = "#999";
+    } else {
+      posEl.textContent = `${pos + 1} / ${filtered.length}`;
+      posEl.style.color = "#2c3e50";
+    }
+  }
+
+  // ◀/▶ ボタンの有効化
+  const prevBtn = document.getElementById("ext-b1-nav-prev");
+  const nextBtn = document.getElementById("ext-b1-nav-next");
+  if (prevBtn) prevBtn.disabled = filtered.length === 0 || (pos <= 0 && pos !== -1);
+  if (nextBtn) nextBtn.disabled = filtered.length === 0 || (pos >= filtered.length - 1 && pos !== -1);
+}
+
+/** 絞り込み結果が空 / 非 pending 時の空表示 */
+function _extB1RenderEmptyPreview(msg) {
+  const imgEl  = document.getElementById("ext-b1-preview-img");
+  const infoEl = document.getElementById("ext-b1-preview-info");
+  if (imgEl)  imgEl.src = "";
+  if (infoEl) infoEl.textContent = msg || "";
+  ["ext-b1-filename", "ext-b1-filepath", "ext-b1-mtime"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  });
+}
+
+/** ステータスに応じて「保存して次へ」「スキップ」を有効/無効化 */
+function _extB1ApplyStatusReadonly(status) {
+  const saveBtn = document.getElementById("ext-b1-save-next");
+  const skipBtn = document.getElementById("ext-b1-skip");
+  const readonly = (status === "done" || status === "skipped");
+  if (saveBtn) {
+    saveBtn.disabled = readonly;
+    saveBtn.title = readonly ? `${status === "done" ? "完了済み" : "スキップ済み"}のため保存できません` : "";
+  }
+  if (skipBtn) {
+    skipBtn.disabled = readonly;
+    skipBtn.title = readonly ? `${status === "done" ? "完了済み" : "スキップ済み"}のため操作できません` : "";
+  }
+}
+
+/** 次の絞り込み該当位置へカーソルを進める（cursor 後にいなければ先頭へ巻き戻し。すべて処理済みで終了判定は呼び出し元で） */
+function _extB1AdvanceCursorInFiltered(session) {
+  const filtered = _extB1GetFilteredIndices(session);
+  if (filtered.length === 0) {
+    session.cursor = session.queue.length;
+    return;
+  }
+  // 現在 cursor より大きい最小の該当インデックスへ
+  const next = filtered.find(i => i > session.cursor);
+  if (next !== undefined) {
+    session.cursor = next;
+  } else {
+    // 後方に該当なし → 先頭の該当へ巻き戻し（飛ばした pending を拾えるように）
+    session.cursor = filtered[0];
+  }
 }
 
 async function _extB1FinishSessionIfDone() {

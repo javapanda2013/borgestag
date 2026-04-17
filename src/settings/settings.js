@@ -5792,6 +5792,12 @@ function _extB1SetupEvents() {
     _extB1RenderThumbsPage(_extActiveSession, _extB1GetFilteredIndices(_extActiveSession));
   });
 
+  // v1.23.3: GROUP-8-kbd ← / → キーナビゲーション
+  //   - 1 枚ずつオーバーレイ表示中：前後画像へ移動
+  //   - サムネ一覧モーダル表示中：前後ページへ送り（キーリピート負荷回避のため 250ms スロットル）
+  //   - 無効条件：IME 変換中／入力要素フォーカス中／フォルダピッカー開放中／セッション無し
+  document.addEventListener("keydown", _extB1HandleArrowKey);
+
   // v1.23.0: GROUP-4 絞り込みチェックボックス
   ["done", "skipped", "pending"].forEach((k) => {
     document.getElementById(`ext-b1-flt-${k}`)?.addEventListener("change", async () => {
@@ -6542,6 +6548,61 @@ function _extB1RenderThumbsPage(session, filtered) {
       } catch (_) { /* 無視 */ }
     })();
   });
+}
+
+// v1.23.3: GROUP-8-kbd ← / → キーナビゲーション用スロットル時刻（サムネ一覧モーダル時のみ適用）
+let _extB1ThumbsKbdLastAt = 0;
+const _EXT_B1_THUMBS_KBD_THROTTLE_MS = 250;
+
+/**
+ * v1.23.3: GROUP-8-kbd ← / → キーハンドラ
+ *   - 1 枚ずつオーバーレイ表示中：_extB1NavMove(-1/+1) で前後画像
+ *   - サムネ一覧モーダル表示中：250ms スロットルで前後ページ
+ *   - IME 変換中／入力要素フォーカス中／フォルダピッカー開放中／セッション無しは無効
+ */
+function _extB1HandleArrowKey(event) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.isComposing) return;
+  if (!_extActiveSession) return;
+
+  // オーバーレイ自体が表示されていなければ無効（他タブ表示中の誤爆防止）
+  const overlay = document.getElementById("ext-b1-overlay");
+  if (!overlay || overlay.style.display !== "flex") return;
+
+  // フォルダピッカーが開いている間は無効
+  const fp = document.getElementById("ext-b1-folder-picker");
+  if (fp && fp.style.display === "flex") return;
+
+  // 入力系要素にフォーカスがある場合は無効（チップ入力・検索欄など）
+  const t = event.target;
+  if (t && t instanceof HTMLElement) {
+    const tag = (t.tagName || "").toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (t.isContentEditable) return;
+  }
+
+  const delta = (event.key === "ArrowLeft") ? -1 : +1;
+
+  // サムネ一覧モーダル表示中：前後ページ送り（スロットル 250ms）
+  const thumbsModal = document.getElementById("ext-b1-thumbs-modal");
+  if (thumbsModal && thumbsModal.style.display === "flex") {
+    const now = Date.now();
+    if (now - _extB1ThumbsKbdLastAt < _EXT_B1_THUMBS_KBD_THROTTLE_MS) {
+      event.preventDefault();
+      return;
+    }
+    _extB1ThumbsKbdLastAt = now;
+    event.preventDefault();
+    _extB1ThumbsPage += delta;
+    _extB1RenderThumbsPage(_extActiveSession, _extB1GetFilteredIndices(_extActiveSession));
+    return;
+  }
+
+  // 1 枚ずつオーバーレイ表示中：前後画像へ移動
+  // （オーバーレイが閉じている間は `_extActiveSession === null` となるため、
+  //   セッション有＆他モーダル無しで到達した時点でオーバーレイ表示中と判定できる）
+  event.preventDefault();
+  _extB1NavMove(delta);
 }
 
 /** 進捗カウンタ・ナビ表示を更新（ステータス色統一） */

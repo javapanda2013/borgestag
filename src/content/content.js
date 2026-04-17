@@ -222,29 +222,31 @@ document.addEventListener("mouseover", (e) => {
 
     if (found && found.tagName === "IMG") img = found;
 
-    // ③ <img> も見つからないが <a href> が画像URLを持つケース（bluesky等）
-    //    → <a> の href を src 代わりに使う仮想 img オブジェクトで対応
+    // ③ <img> も見つからないが <a> 内に画像を持つケース（X / bluesky 等）
     if (!img) {
       const anchor = e.target.closest("a[href]");
       if (anchor) {
-        const href = anchor.href || "";
-        // 画像拡張子または画像CDNパターンを持つURLのみ対象
-        if (/\.(jpe?g|png|gif|webp|avif|bmp)(\?|$)/i.test(href) ||
-            /\/img\/feed_(fullsize|thumbnail)|\/images?\/|\/media\//i.test(href)) {
-          // <a> の占有領域が MIN_SIZE 以上かチェック
-          const rect = anchor.getBoundingClientRect();
-          if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE) {
-            // <a> を疑似的に img として扱うプロキシオブジェクト
-            const proxy = {
-              _isProxy: true,
-              _imageUrl: href,
-              tagName: "IMG",
-              src: href,
-              currentSrc: href,
-              getBoundingClientRect: () => anchor.getBoundingClientRect(),
-            };
-            // showAt・isValidImg が proxy を受け取れるよう img に代入
-            img = proxy;
+        // 優先: <a> 内の実 <img> を採用（X photo ページ等：href は /photo/1 形式で画像URLでない）
+        const innerImg = anchor.querySelector("img");
+        if (innerImg && isValidImg(innerImg)) {
+          img = innerImg;
+        } else {
+          // フォールバック: href が画像URL パターン（bluesky 等）→ 仮想 img プロキシ
+          const href = anchor.href || "";
+          if (/\.(jpe?g|png|gif|webp|avif|bmp)(\?|$)/i.test(href) ||
+              /\/img\/feed_(fullsize|thumbnail)|\/images?\/|\/media\//i.test(href)) {
+            const rect = anchor.getBoundingClientRect();
+            if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE) {
+              const proxy = {
+                _isProxy: true,
+                _imageUrl: href,
+                tagName: "IMG",
+                src: href,
+                currentSrc: href,
+                getBoundingClientRect: () => anchor.getBoundingClientRect(),
+              };
+              img = proxy;
+            }
           }
         }
       }

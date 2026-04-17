@@ -5,6 +5,18 @@
 
 ---
 
+## [1.23.5] - 2026-04-18
+
+### Fixed
+- **X（旧 Twitter）の画像拡大表示で保存ボタンが出なくなった問題を修正**（BUG-x-photo）
+  - `src/content/content.js` の `mouseover` フォールバック③ を拡張。従来は「`<a href>` が画像URL パターンを持つ場合のみ proxy で扱う」ロジックだったが、X の `/status/.../photo/N` ページでは href が photo ページ URL のため画像拡張子・`/media/` 等にマッチせず失敗していた。
+  - 修正: `<a>` 内に実 `<img>` があればそれを優先的に採用する分岐を追加。href ベースの proxy は `<img>` が無い場合のフォールバックに降格（bluesky 等の既存挙動は維持）。
+  - 透明オーバーレイで mouseover が `<img>` に直接届かない構造（X / 類似 SPA）でも拾えるようになった。
+- manifest.json: 1.23.4 → 1.23.5
+- **native/image_saver.py は変更なし**（version 1.9.9 据え置き）
+
+---
+
 ## [1.23.4] - 2026-04-18
 
 ### Changed

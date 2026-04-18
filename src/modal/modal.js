@@ -3767,9 +3767,12 @@ function setupModalEvents(
   }
 
   function showSubSuggestions(q) {
+    // 入力中（q あり）：全タグプール existingTags から前方一致サジェスト（メインタグ欄に準拠）
+    // 空入力（フォーカス時）：直近サブタグ 20 件を表示（近道用）
+    // どちらの経路でも、既選択メイン／サブの重複語は除外（同一語を両系統に入れる操作は通常意図しない）
     const matches = q
-      ? (recentSubTagsList).filter(t => tagMatches(t, q) && !selectedSubTags.includes(t))
-      : (recentSubTagsList).filter(t => !selectedSubTags.includes(t));
+      ? existingTags.filter(t => tagMatches(t, q) && !selectedSubTags.includes(t) && !selectedTags.includes(t))
+      : (recentSubTagsList).filter(t => !selectedSubTags.includes(t) && !selectedTags.includes(t));
     if (!matches.length) { hideSubSuggestions(); return; }
     subSuggestEl["innerHTML"] = matches.slice(0, 8)
       .map((t, i) => `<div class="suggestion-item" data-index="${i}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)

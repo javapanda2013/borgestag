@@ -5520,7 +5520,16 @@ function _extBuildRowActions(item, targetPath, subfolderPath, statusInfo) {
     btnView.style.cssText = "padding:2px 6px;font-size:10px;background:#e8f5e9;border-color:#a5d6a7;";
     btnView.title = "完了セッションを閲覧モードで開く";
     btnView.textContent = "👁 閲覧";
-    btnView.addEventListener("click", () => _extOpenB1(session));
+    btnView.addEventListener("click", () => {
+      // v1.25.2 BUG-ext-view-autoclose:
+      //   完了セッションは cursor が queue 末尾にあり cur=undefined かつ pendingRemain=0 で
+      //   _extB1LoadCurrent が _extB1FinishSessionIfDone() を呼んでオーバーレイ自動クローズする。
+      //   閲覧モードではまず cursor を先頭にリセットし、フィルタを全種 ON にして
+      //   cur が有効な queue[0] を指すようにする（自動 Finish を回避）。
+      session.cursor = 0;
+      session.uiFilter = { done: true, skipped: true, pending: true };
+      _extOpenB1(session);
+    });
     wrap.appendChild(btnView);
   }
 
@@ -5757,6 +5766,10 @@ async function _extStartSessionFromFolderList(folderListItem, rootPath, subfolde
       mtime: e.savedAt,
       status: "pending",
       entryId: null,
+      // v1.25.2 BUG-ext-thumb-cache-miss: サムネ一覧モーダルで Native fetch 成功後に
+      // SAVE_EXT_THUMB へ渡すルートパス。v1.25.0 までは未付与で ext-persist 永続化が
+      // 空振りしていたため、1 枚ずつ形式の queue 作成時点で付与する
+      sourceRoot: e.sourceRoot || rootPath,
     })),
     folderListRef: folderListItem ? {
       folderListId: folderListItem.id,
@@ -6961,8 +6974,10 @@ async function _extB1FireThumbFetch(img, q) {
     img.src = dataUrl;
 
     // ④ Q3=A: モーダル閲覧時の Native fetch 成功時のみ ext-persist に put
-    //    rootPath はキュー項目の sourceRoot（v1.22.0 以降、スキャン結果に付与）から解決
-    const rootPath = q.sourceRoot || "";
+    //    rootPath はキュー項目の sourceRoot（v1.22.0 以降、スキャン結果に付与）から解決。
+    //    v1.25.2: 1 枚ずつ形式の既存セッション（sourceRoot 未付与）は _extActiveSession.rootPath で
+    //    フォールバックし、ext-persist 永続化が空振りする問題を回避
+    const rootPath = q.sourceRoot || (_extActiveSession && _extActiveSession.rootPath) || "";
     if (rootPath) {
       browser.runtime.sendMessage({
         type:     "SAVE_EXT_THUMB",

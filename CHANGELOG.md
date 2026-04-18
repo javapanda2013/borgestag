@@ -5,6 +5,28 @@
 
 ---
 
+## [1.25.2] - 2026-04-18
+
+### Fixed
+- **完了セッションの〔👁 閲覧〕がクリック直後にオーバーレイが自動クローズする不具合を修正**（BUG-ext-view-autoclose）
+  - 完了セッションは `session.cursor` が queue 末尾にあり、`_extB1LoadCurrent` 内で `cur = session.queue[session.cursor]` が `undefined`、かつ `pendingRemain === 0` のため `_extB1FinishSessionIfDone()` が発火してオーバーレイが閉じられていた。
+  - 対策：閲覧クリック時に `session.cursor = 0` と `session.uiFilter = { done: true, skipped: true, pending: true }` を設定してから `_extOpenB1(session)` を呼び、`cur` が有効な `queue[0]` を指すようにして自動 Finish を回避。
+
+- **外部取り込みサムネキャッシュ（ext-persist）の populate 空振り修正**（BUG-ext-thumb-cache-miss）
+  - v1.25.0 実装時、1 枚ずつ形式のセッション `queue` 作成で `sourceRoot` を付与し忘れていたため（`_extStartSessionFromFolderList` 内）、サムネ一覧モーダルの `_extB1FireThumbFetch` が Native fetch 成功時に `SAVE_EXT_THUMB` を送信する際の `rootPath` が空になり、`externalImportThumbs` への永続化も `externalImportThumbStats` への加算も行われていなかった。
+  - 結果：2 回目以降のモーダル開閉でも ext-persist ヒットが発生せず Native fetch が再実行され、統合テーブルの「サムネ」列も常に「—」表示のまま（報告症状 2 / 3）。
+  - 対策：
+    - `_extStartSessionFromFolderList` の `queue.map(...)` に `sourceRoot: e.sourceRoot || rootPath` を追加。
+    - `_extB1FireThumbFetch` で `rootPath` を解決する際、`q.sourceRoot` が無ければ `_extActiveSession.rootPath` を使うフォールバックを追加（v1.25.0 以前の既存セッションも救済）。
+
+- **統合テーブルの「サムネ」列ヘッダに説明 tooltip を追加**
+  - `externalImportThumbs` IDB の件数・合計サイズを表示している（saveHistory 保存済みアイテムの thumbnails IDB は別ストアで別カウント）ことを `title` 属性で明示し、ユーザーの誤解を防ぐ。
+
+- manifest.json: 1.25.1 → 1.25.2
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.25.1] - 2026-04-18
 
 ### Fixed

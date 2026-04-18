@@ -4732,6 +4732,10 @@ async function executeExternalImport() {
     _extRenderCompletedRoots();
   }
 
+  // v1.25.4 IMPROVE-ext-bulk-refresh: 一括取込完了後に統合テーブル（状態バッジ・進捗・サムネ統計）を再描画
+  //   ページ全体リロード不要で完了状態を即反映
+  _extRenderFolderList();
+
   resultEl.className = "import-result success";
   resultEl.innerHTML = "";
   log(`✅ ${pendingEntries.length} 件をインポートしました`);
@@ -4769,6 +4773,8 @@ async function executeExternalImport() {
     resultEl.innerHTML   = escHtml("↩ インポートを取り消しました") + "\n";
     showStatus("↩ インポートを取り消しました");
     renderAll();
+    // v1.25.4 IMPROVE-ext-bulk-refresh: undo 後も統合テーブルを再描画（取消で「完了」が巻き戻った状態を反映）
+    _extRenderFolderList();
   });
   actionsEl.appendChild(undoBtn);
   actionsEl.style.display = "";
@@ -5933,6 +5939,16 @@ function _extB1SetupEvents() {
   document.getElementById("ext-b1-thumbs-close")?.addEventListener("click", () => {
     document.getElementById("ext-b1-thumbs-modal").style.display = "none";
   });
+  // v1.25.4 BUG-ext-thumbs-scroll-paging (真因対応):
+  //   サムネ一覧モーダル内では水平方向の wheel/scroll イベントでブラウザが
+  //   横スクロールや戻る/進むジェスチャを発火し、一部環境で OS 側が矢印キー化して
+  //   ページ送りが発生する報告があった。モーダル表示中の水平 wheel は preventDefault で
+  //   抑制する（垂直スクロールは通常のコンテンツ閲覧に必要なので残す）
+  document.getElementById("ext-b1-thumbs-modal")?.addEventListener("wheel", (e) => {
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault();
+    }
+  }, { passive: false });
   // v1.23.2: GROUP-7-a ページング前後ボタン
   // v1.25.3: ユーザー要望でループ構造化（最終ページから「次」で先頭、先頭から「前」で最終ページへ）
   document.getElementById("ext-b1-thumbs-prev")?.addEventListener("click", () => {
@@ -6696,10 +6712,12 @@ async function _extB1NavMove(delta) {
   if (!session) return;
   const filtered = _extB1GetFilteredIndices(session);
   if (filtered.length === 0) return;
+  const len = filtered.length;
   const pos = filtered.indexOf(session.cursor);
-  const basePos = pos >= 0 ? pos
-                : (delta > 0 ? -1 : filtered.length);  // 範囲外なら端に寄せる
-  const newPos = Math.max(0, Math.min(filtered.length - 1, basePos + delta));
+  // v1.25.4: 前後ナビもループ構造（最後の次 → 先頭、先頭の前 → 最後）
+  //   範囲外 cursor は、前進なら最後の次＝先頭、後退なら先頭の前＝最後 となるよう基準位置を選ぶ
+  const basePos = pos >= 0 ? pos : (delta > 0 ? len - 1 : 0);
+  const newPos = ((basePos + delta) % len + len) % len;
   session.cursor = filtered[newPos];
   session.updatedAt = new Date().toISOString();
   await browser.storage.local.set({ extImportSessions: _extSessions });
@@ -7042,11 +7060,14 @@ function _extB1HandleArrowKey(event) {
       return;
     }
     _extB1ThumbsKbdLastAt = now;
-    // v1.25.3 BUG-ext-thumbs-scroll-paging: サムネ一覧モーダル表示中の ← / → キーは
-    //   トラックパッドの横スワイプ／tilt-wheel のマウス環境で意図しないページ送りを誘発する
-    //   との報告があり、v1.23.3 の設計を変更してページ送りを無効化。
-    //   フォーカスを下層（1 枚ずつオーバーレイ）へ伝播させないため、event だけ consume する。
     event.preventDefault();
+    // v1.25.4: v1.23.3 の挙動に戻し、サムネ一覧モーダル中の ← / → でページ送りを行う
+    //   （v1.25.3 で誤って全面無効化していた。本来の要望はスクロールイベント側の抑制）
+    //   ページャーはループ構造（v1.25.3 で実装済）と整合
+    const filtered = _extB1GetFilteredIndices(_extActiveSession);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / _EXT_B1_THUMB_PAGE_SIZE));
+    _extB1ThumbsPage = (_extB1ThumbsPage + delta + totalPages) % totalPages;
+    _extB1RenderThumbsPage(_extActiveSession, filtered);
     return;
   }
 

@@ -1436,20 +1436,33 @@ async function _blobToDataUrl(blob) {
   return `data:${type};base64,` + btoa(binary);
 }
 
-/** storage.local.externalImportThumbStats を {count, bytes} で差分更新 */
-async function _updateExtStats(rootPath, deltaCount, deltaBytes) {
-  if (!rootPath) return;
-  const { externalImportThumbStats } = await browser.storage.local.get("externalImportThumbStats");
-  const stats = externalImportThumbStats || {};
-  const cur   = stats[rootPath] || { count: 0, bytes: 0 };
-  cur.count = Math.max(0, cur.count + deltaCount);
-  cur.bytes = Math.max(0, cur.bytes + deltaBytes);
-  if (cur.count === 0 && cur.bytes === 0) {
-    delete stats[rootPath];
-  } else {
-    stats[rootPath] = cur;
-  }
-  await browser.storage.local.set({ externalImportThumbStats: stats });
+// v1.25.4 BUG-ext-thumb-stats-race: 並列 SAVE_EXT_THUMB で storage.local の
+//   read-modify-write が競合し、lost update で件数が実際より少なく表示される
+//   事象が発生していた（100 アイテム閲覧で 368/413 のようなズレ）。
+//   mutex（Promise チェーン）で serialize することで解消する。
+let _extStatsMutex = Promise.resolve();
+
+/** storage.local.externalImportThumbStats を {count, bytes} で差分更新（mutex で serialize） */
+function _updateExtStats(rootPath, deltaCount, deltaBytes) {
+  if (!rootPath) return Promise.resolve();
+  const next = _extStatsMutex.then(async () => {
+    const { externalImportThumbStats } = await browser.storage.local.get("externalImportThumbStats");
+    const stats = externalImportThumbStats || {};
+    const cur   = stats[rootPath] || { count: 0, bytes: 0 };
+    cur.count = Math.max(0, cur.count + deltaCount);
+    cur.bytes = Math.max(0, cur.bytes + deltaBytes);
+    if (cur.count === 0 && cur.bytes === 0) {
+      delete stats[rootPath];
+    } else {
+      stats[rootPath] = cur;
+    }
+    await browser.storage.local.set({ externalImportThumbStats: stats });
+  }).catch((err) => {
+    // チェーンを切らないようエラーは呑む（個別ログは出さない、呼び出し側の起動タイミングに影響しない）
+    try { addLog("WARN", "_updateExtStats 失敗", err?.message || String(err)); } catch (_) {}
+  });
+  _extStatsMutex = next;
+  return next;
 }
 
 /**

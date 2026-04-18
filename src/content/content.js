@@ -251,6 +251,29 @@ document.addEventListener("mouseover", (e) => {
         }
       }
     }
+
+    // ④ v1.24.1 BUG-x-photo-2: ①②③ がすべて失敗した場合の最終フォールバック
+    //    発動例：X の /status/.../photo/N 拡大ページは <a> ラッパーが撤廃され、
+    //    <div aria-label="画像"> の子に「背景画像 <div>」と「実 <img>」が兄弟配置される
+    //    blur-up パターンを採用しているため、従来③（<a> 経由）では捕捉できない。
+    //    ①②③で捕まらない＝祖先に <a> も <img> も無い構造に限定されるため、
+    //    誤爆リスクは小さい（通常ページの画像は <a> でラップされ③が先に捕まえる）。
+    if (!img) {
+      // ④a: aria-label の画像マーカー優先（X の日英ローカライズ両対応、将来の構造変更にも追従しやすい）
+      const xPicContainer = e.target.closest('[aria-label="画像"], [aria-label="Image"]');
+      if (xPicContainer) {
+        const cand = xPicContainer.querySelector("img");
+        if (cand && isValidImg(cand)) img = cand;
+      }
+      // ④b: 汎用 depth walk（5 階層まで祖先を遡り、子孫の有効 <img> を探す）
+      if (!img) {
+        let ancestor = e.target.parentElement;
+        for (let depth = 0; ancestor && depth < 5; depth++, ancestor = ancestor.parentElement) {
+          const cand = ancestor.querySelector("img");
+          if (cand && isValidImg(cand)) { img = cand; break; }
+        }
+      }
+    }
   }
 
   if (!img || !isValidImg(img)) return;

@@ -5,6 +5,23 @@
 
 ---
 
+## [1.26.9] - 2026-04-20
+
+### Changed
+- **保存ウィンドウのタグ・サブタグ・権利者入力欄のレイアウト再調整**（GROUP-22 改）
+  - v1.26.6〜v1.26.8 で実装したリサイズ＋ chip 後置き設計が、v1.26.7 でリサイズを撤回した結果「サブタグ欄の chip が画面右端付近で input から遠い」UX 低下を引き起こした問題への対応。
+  - 対策：
+    - `#tag-toolbar` を `flex-direction: column` に変更し、タグ行とサブタグ行を独立した 2 行に分離
+    - 両 wrap を全幅ストレッチ（flex: 0 1 auto、max-width: 100%）
+    - CSS `order` でタグ・サブタグ・権利者の全 3 欄で chip を input の前に配置（`.dest-tabbar-tag-input { order: 1; }`、`#author-input-clear { order: 2; }`）
+  - 権利者 box も chip 前置きに統一（main-tabbar 内で幅の余裕は限定的だが統一性優先）。
+
+### Changed
+- manifest.json: 1.26.8 → 1.26.9
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.26.8] - 2026-04-20
 
 ### Fixed

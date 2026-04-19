@@ -346,19 +346,36 @@ function buildModalHTML(defaultFilename) {
     .suggestion-item { padding: 6px 10px; cursor: pointer; font-size: 12px; }
     .suggestion-item:hover, .suggestion-item.active { background: #f0f4ff; }
 
-    /* suggestions の位置基準 */
+    /* v1.26.6 (GROUP-22): suggestions の位置基準＋ユーザーリサイズ可能化
+       旧：tag/subtag/author は固定幅（340/240px）＋ max-width キャップ
+       新：main:sub = 1:2 デフォルトの flex-basis、CSS resize: horizontal でユーザー調整可 */
     .dest-tabbar-tag-wrap {
-      position: relative; display: flex; flex-direction: column; flex: 0 0 auto; max-width: 340px; width: 340px;
+      position: relative; display: flex; flex-direction: column;
+      flex: 0 1 33%; min-width: 100px; max-width: 100%;
+      resize: horizontal; overflow: auto;
     }
-    /* サブタグ入力欄：タグ入力欄より少し幅狭 */
     .dest-tabbar-subtag-wrap {
-      position: relative; display: flex; flex-direction: column; flex: 0 0 auto; max-width: 240px; width: 240px;
+      position: relative; display: flex; flex-direction: column;
+      flex: 0 1 66%; min-width: 100px; max-width: 100%;
+      resize: horizontal; overflow: auto;
     }
     .dest-tabbar-subtag-wrap .dest-tabbar-tag-area {
       border-color: #d0c8f0; /* 薄紫でタグ欄と区別 */
     }
     .dest-tabbar-subtag-wrap .dest-tabbar-tag-area:focus-within {
       border-color: #7c5cbf;
+    }
+    /* 権利者 box（main-tabbar 内）もタグ入力と同スタイル＋リサイズ可能 */
+    .author-wrap {
+      position: relative; display: flex; flex-direction: column;
+      flex: 0 1 180px; min-width: 100px; max-width: 100%;
+      resize: horizontal; overflow: auto;
+    }
+    .author-wrap .dest-tabbar-tag-area {
+      border-color: #e9d5ff; /* 薄紫寄りで権利者を表現 */
+    }
+    .author-wrap .dest-tabbar-tag-area:focus-within {
+      border-color: #7c3aed;
     }
 
     /* ================================================================
@@ -597,15 +614,17 @@ function buildModalHTML(defaultFilename) {
     .dest-tabbar-tag-area {
       display: flex; align-items: center; flex-wrap: wrap; gap: 3px;
       background: #fff; border: 1px solid #d0d8f0; border-radius: 5px;
-      padding: 2px 6px; min-width: 0; flex: 1; max-width: 340px;
+      padding: 2px 6px; min-width: 0; flex: 1;
       cursor: text;
     }
     .dest-tabbar-tag-area .tag-chip {
       font-size: 10px; padding: 1px 4px;
     }
+    /* v1.26.6: input の min-width を 120px に拡大（初期表示時の input 幅を確保）。
+       box 内の並び順は DOM 順で [input][chip1][chip2]... / [input][×][chips container] に。 */
     .dest-tabbar-tag-input {
       border: none; outline: none; font-size: 11px;
-      background: transparent; min-width: 60px; flex: 1; font-family: inherit;
+      background: transparent; min-width: 120px; flex: 1; font-family: inherit;
     }
 
     .dest-tab {
@@ -1344,24 +1363,27 @@ function buildModalHTML(defaultFilename) {
             <button class="main-tab active" id="main-tab-dest">保存先</button>
             <button class="main-tab"        id="main-tab-history">保存履歴</button>
 
-            <!-- a3: 権利者入力（保存先タブ表示中のみ visible） -->
-            <div id="main-tabbar-author-area" style="display:none; align-items:center; gap:3px; flex-shrink:0; position:relative;">
+            <!-- a3: 権利者入力（保存先タブ表示中のみ visible）
+                 v1.26.6 (GROUP-22): タグ入力と同スタイルのボックス化／label 削除／chip 後置／ユーザーリサイズ可能 -->
+            <div id="main-tabbar-author-area" style="display:none; align-items:center; gap:4px; flex-shrink:0;">
               <span style="width:1px; height:20px; background:#d0d8e8; margin:0 8px; flex-shrink:0;"></span>
-              <span style="font-size:10px; color:#888; white-space:nowrap;">✏️ 権利者:</span>
-              <div id="author-chips" style="display:flex; flex-wrap:wrap; gap:2px; align-items:center;"></div>
-              <input type="text" id="author-input" placeholder="追加(Enter)…" autocomplete="off"
-                style="width:90px; border:1px solid #d0d0d0; border-radius:4px; padding:2px 7px;
-                font-size:11px; outline:none; font-family:inherit;" />
-              <button id="author-input-clear" style="background:none; border:none; cursor:pointer;
-                color:#aaa; font-size:13px; padding:0 2px; display:none; line-height:1;" title="入力クリア">✕</button>
-              <div id="author-suggestions" style="position:absolute; top:calc(100% + 2px); left:0;
-                background:#fff; border:1px solid #d0d8f0; border-radius:5px;
-                box-shadow:0 4px 12px rgba(0,0,0,.15); max-height:120px; overflow-y:auto;
-                display:none; z-index:200; min-width:120px; font-size:11px;"></div>
+              <div class="author-wrap">
+                <div class="dest-tabbar-tag-area" id="author-box">
+                  <input type="text" id="author-input" class="dest-tabbar-tag-input"
+                    placeholder="✏️ 権利者を入力（Enter）…" autocomplete="off" />
+                  <button id="author-input-clear" style="background:none; border:none; cursor:pointer;
+                    color:#aaa; font-size:13px; padding:0 2px; display:none; line-height:1;" title="入力クリア">✕</button>
+                  <div id="author-chips" style="display:inline-flex; flex-wrap:wrap; gap:2px; align-items:center;"></div>
+                </div>
+                <div id="author-suggestions" style="position:absolute; top:calc(100% + 2px); left:0;
+                  background:#fff; border:1px solid #d0d8f0; border-radius:5px;
+                  box-shadow:0 4px 12px rgba(0,0,0,.15); max-height:120px; overflow-y:auto;
+                  display:none; z-index:200; min-width:120px; font-size:11px;"></div>
+              </div>
             </div>
-
-            <!-- a3: 確定チップ表示エリア（保存先タブ表示中のみ visible） -->
-            <div id="main-chip-area" style="display:none; align-items:center; gap:4px; flex-wrap:wrap; justify-content:flex-start; flex-shrink:0;"></div>
+            <!-- v1.26.6: 旧 main-chip-area は削除（chip は各 box 内に配置） -->
+            <!-- 残置：旧コード参照箇所を移行完了後に完全削除 -->
+            <div id="main-chip-area" style="display:none;"></div>
 
             <!-- 保存履歴フィルター（変更なし） -->
             <div class="history-filter-wrap" id="history-filter-wrap">
@@ -3451,8 +3473,8 @@ function setupModalEvents(
           // 追加済みなら削除
           const idx = selectedTags.indexOf(tag);
           selectedTags.splice(idx, 1);
-          // チップも削除
-          document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach((chip) => {
+          // チップも削除（v1.26.6: chip は tag-area 内に配置）
+          document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach((chip) => {
             if (chip.textContent.replace("×", "").trim() === tag) chip.remove();
           });
           refreshCandidatePanel();
@@ -3778,12 +3800,13 @@ function setupModalEvents(
     const tag = value.trim();
     if (!tag || selectedTags.includes(tag)) return;
     selectedTags.push(tag);
-    const mainChipArea = document.getElementById("main-chip-area");
+    // v1.26.6 (GROUP-22): chip を tag 入力 box 内の input 後ろに配置
+    const chipArea = document.getElementById("dest-tabbar-tag-area");
     const chip = document.createElement("span");
     chip.className = "tag-chip";
     chip.dataset.type = "main";
     chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
-    mainChipArea.appendChild(chip);
+    chipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
       selectedTags.splice(selectedTags.indexOf(tag), 1);
@@ -3811,13 +3834,14 @@ function setupModalEvents(
     const tag = value.trim();
     if (!tag || selectedSubTags.includes(tag)) return;
     selectedSubTags.push(tag);
-    const mainChipArea = document.getElementById("main-chip-area");
+    // v1.26.6 (GROUP-22): chip を subtag 入力 box 内の input 後ろに配置
+    const chipArea = document.getElementById("dest-tabbar-subtag-area");
     const chip = document.createElement("span");
     chip.className = "tag-chip";
     chip.dataset.type = "sub";
     chip.style.cssText = "background:#ede9f9;border-color:#c3b1e1;color:#5a3fa0;";
     chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
-    mainChipArea.appendChild(chip);
+    chipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
       selectedSubTags.splice(selectedSubTags.indexOf(tag), 1);
@@ -3875,7 +3899,8 @@ function setupModalEvents(
       }
     } else if (e.key === "Backspace" && !subTagInput.value) {
       // 入力が空の状態でバックスペース → 末尾のサブタグを削除（タグ入力欄と同仕様）
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      // v1.26.6: chip は subtag-area 内に配置
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
       selectedSubTags.pop();
     }
     if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
@@ -3921,12 +3946,10 @@ function setupModalEvents(
     const qFK = toFullWidth(toKatakana(qL));
     const tHalf = toHalfWidth(tL);
     const qHalf = toHalfWidth(qL);
-    if (q.length >= 2) {
-      return tHalf.includes(qHalf) || tH.includes(qH) || tK.includes(qK) ||
-             tFH.includes(qFH)     || tFK.includes(qFK);
-    } else {
-      return tHalf.startsWith(qHalf) || tH.startsWith(qH) || tK.startsWith(qK);
-    }
+    // v1.26.6 (BUG-modal-suggest-match): 部分一致（2 文字以上）分岐を廃止、常に前方一致に統一。
+    // 設定画面の保存履歴タグ絞り込み（v1.21.2）と整合。
+    return tHalf.startsWith(qHalf) || tH.startsWith(qH) || tK.startsWith(qK) ||
+           tFH.startsWith(qFH)     || tFK.startsWith(qFK);
   }
 
   function showSuggestions(q) {
@@ -4000,7 +4023,8 @@ function setupModalEvents(
         if (!btnTagFilter.disabled) btnTagFilter.click();
       }
     } else if (e.key === "Backspace" && !tagInput.value) {
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      // v1.26.6: chip は tag-area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
       selectedTags.pop();
     } else if (e.key === "ArrowDown") { e.preventDefault(); moveSuggestionActive(1); }
       else if (e.key === "ArrowUp")   { e.preventDefault(); moveSuggestionActive(-1); }
@@ -4036,14 +4060,15 @@ function setupModalEvents(
     // タグをリセット（引き継ぎOFFのみ）
     if (!retainTag) {
       selectedTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
+      // v1.26.6: chip は各 area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
     // サブタグをリセット（引き継ぎOFFのみ）
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -4084,7 +4109,8 @@ function setupModalEvents(
     // タグをリセット（引き継ぎOFFのみ）
     if (!retainTag) {
       selectedTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
+      // v1.26.6: chip は各 area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
@@ -4092,7 +4118,7 @@ function setupModalEvents(
     // サブタグをリセット（引き継ぎOFFのみ）
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -4238,10 +4264,10 @@ function setupModalEvents(
   chkRetainTag.addEventListener("change", () => {
     retainTag = chkRetainTag.checked;
     browser.storage.local.set({ retainTag });
-    // OFF にした瞬間に入力欄をクリア
+    // OFF にした瞬間に入力欄をクリア（v1.26.6: chip は各 area 内に配置）
     if (!retainTag) {
       selectedTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
       tagInput.value = "";
       hideSuggestions();
     }
@@ -4251,7 +4277,7 @@ function setupModalEvents(
     browser.storage.local.set({ retainSubTag });
     if (!retainSubTag) {
       selectedSubTags.length = 0;
-      document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
       subTagInput.value = "";
       hideSubSuggestions();
     }
@@ -4273,13 +4299,13 @@ function setupModalEvents(
     chkRetainTag.checked    = false;
     chkRetainSubtag.checked = false;
     chkRetainAuthor.checked = false;
-    // フォームクリア
+    // フォームクリア（v1.26.6: chip は各 area 内に配置）
     selectedTags.length = 0;
-    document.getElementById("main-chip-area").querySelectorAll('[data-type="main"]').forEach(c => c.remove());
+    document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
     tagInput.value = "";
     hideSuggestions();
     selectedSubTags.length = 0;
-    document.getElementById("main-chip-area").querySelectorAll('[data-type="sub"]').forEach(c => c.remove());
+    document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
     subTagInput.value = "";
     hideSubSuggestions();
     selectedAuthors = [];
@@ -4664,10 +4690,11 @@ function setupModalEvents(
   }
 
   function showAuthorSuggestions(q) {
-    const matches = (q
-      ? allAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
-      : allAuthors
-    ).filter(a => !selectedAuthors.includes(a));
+    // v1.26.6 (BUG-modal-suggest-match): 未入力時は非表示、1 文字以上で前方一致（タグ入力と整合）
+    if (!q) { hideAuthorSuggestions(); return; }
+    const matches = allAuthors
+      .filter(a => tagMatches(a, q))
+      .filter(a => !selectedAuthors.includes(a));
     if (!matches.length) { hideAuthorSuggestions(); return; }
     authorSuggestEl.innerHTML = matches.slice(0, 8).map(a =>
       `<div style="padding:5px 9px;cursor:pointer;color:#1a1a1a;" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
@@ -4707,6 +4734,49 @@ function setupModalEvents(
       authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
     });
   }
+
+  // ================================================================
+  // v1.26.6 (GROUP-22): タグ／サブタグ／権利者 box のリサイズ永続化
+  // storage.local.modalBoxWidths = { tagBox, subtagBox, authorBox } in px
+  // ================================================================
+  (async () => {
+    const tagWrap    = document.querySelector(".dest-tabbar-tag-wrap");
+    const subtagWrap = document.querySelector(".dest-tabbar-subtag-wrap");
+    const authorWrap = document.querySelector(".author-wrap");
+    if (!tagWrap || !subtagWrap || !authorWrap) return;
+
+    // 保存済み幅を復元（inline style で適用、flex-basis を上書き）
+    try {
+      const { modalBoxWidths } = await browser.storage.local.get("modalBoxWidths");
+      if (modalBoxWidths?.tagBox)    tagWrap.style.width    = modalBoxWidths.tagBox + "px";
+      if (modalBoxWidths?.subtagBox) subtagWrap.style.width = modalBoxWidths.subtagBox + "px";
+      if (modalBoxWidths?.authorBox) authorWrap.style.width = modalBoxWidths.authorBox + "px";
+    } catch {}
+
+    // ResizeObserver でユーザーリサイズ検知 → debounce 500ms で保存
+    let saveTimer = null;
+    const scheduleSave = () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(async () => {
+        try {
+          const cur = await browser.storage.local.get("modalBoxWidths");
+          const prev = cur.modalBoxWidths || {};
+          await browser.storage.local.set({
+            modalBoxWidths: {
+              ...prev,
+              tagBox:    Math.round(tagWrap.offsetWidth),
+              subtagBox: Math.round(subtagWrap.offsetWidth),
+              authorBox: Math.round(authorWrap.offsetWidth),
+            }
+          });
+        } catch {}
+      }, 500);
+    };
+    const ro = new ResizeObserver(scheduleSave);
+    ro.observe(tagWrap);
+    ro.observe(subtagWrap);
+    ro.observe(authorWrap);
+  })();
 
   // ================================================================
   const colLeft    = document.getElementById("col-left");

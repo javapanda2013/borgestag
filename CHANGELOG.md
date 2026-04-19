@@ -5,6 +5,27 @@
 
 ---
 
+## [1.26.6] - 2026-04-20
+
+### Fixed
+- **保存ウィンドウのタグ・サブタグ・権利者サジェストを前方一致に統一**（BUG-modal-suggest-match）
+  - 旧実装では 1 文字時は前方一致・2 文字以上で部分一致（`tagMatches` 関数内の分岐）、権利者は常に部分一致という不整合があった。
+  - 対策：`tagMatches` を常に前方一致（5 variants：半角／ひらがな／カタカナ／全半角変換）に統一。権利者サジェストも `tagMatches` を流用し、未入力時は非表示（v1.21.2 ルールと整合）。
+  - 設定画面の保存履歴タグ絞り込み（v1.21.2〜v1.21.3）と同等の挙動に揃えた。
+
+### Changed
+- **保存ウィンドウのタグ／サブタグ／権利者入力欄をリニューアル**（GROUP-22）
+  - **chip 配置変更**：chip 表示位置を「input 前」→「input 後ろ」へ変更。chip 追加で input 位置が右にズレる問題を解消。
+  - **権利者欄の大サイズ化**：`✏️ 権利者:` ラベルを削除し placeholder「✏️ 権利者を入力（Enter）…」で代替。タグ入力と同じボックススタイル（border rounded box、紫系 border）に統一。
+  - **デフォルト幅比率の変更**：タグ：サブタグ = 1:2（旧 340px:240px ≒ 1.4:1）。`main-tabbar` 内の権利者 box はデフォルト 180px。
+  - **ユーザーリサイズ可能化**：3 ボックスすべてに CSS `resize: horizontal` 適用。右下ハンドルドラッグで幅調整可能。
+  - **リサイズ永続化**：`ResizeObserver` ＋ debounce 500ms で `storage.local.modalBoxWidths` に保存、次回起動時復元。
+  - **chip 格納位置の変更（内部）**：旧 `#main-chip-area`（タグ・サブタグが混在していた単一 div）を廃止し、各 chip は対応する box 内に配置。`addTag` → `#dest-tabbar-tag-area`、`addSubTag` → `#dest-tabbar-subtag-area` にターゲット変更。
+- manifest.json: 1.26.5 → 1.26.6
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.26.5] - 2026-04-19
 
 ### Changed

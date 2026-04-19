@@ -4905,7 +4905,10 @@ async function _extFlAddSingle() {
   const inputEl = document.getElementById("ext-fl-path");
   const path    = (inputEl?.value || "").trim();
   if (!path) { showStatus("⚠️ フォルダパスを入力してください", true); return; }
-  if (_extFolderList.some(f => (f.rootPath || "").toLowerCase() === path.toLowerCase() && f.mode === "single")) {
+  // v1.26.3 (BUG-tyfl-dup-import): mode 問わず同一 rootPath を弾く。
+  // 旧実装は `f.mode === "single"` に限定しており、既にサブフォルダ選択で登録済みの
+  // 親フォルダを単体登録でも追加できてしまう片方向のチェック漏れがあった。
+  if (_extFolderList.some(f => (f.rootPath || "").toLowerCase() === path.toLowerCase())) {
     showStatus("⚠️ 既に登録されています", true);
     return;
   }
@@ -5100,6 +5103,13 @@ async function _extFlApplySubfolders() {
     return;
   }
   const parent = document.getElementById("ext-fl-picker-parent")?.textContent || "";
+  // v1.26.3 (BUG-tyfl-dup-import): 親フォルダが既に登録済み（mode 問わず）なら弾く。
+  // 旧実装は本関数に重複チェック自体が無く、単体登録済みの親フォルダに対して
+  // サブフォルダ選択から再登録できてしまう片方向のチェック漏れがあった。
+  if (_extFolderList.some(f => (f.rootPath || "").toLowerCase() === parent.toLowerCase())) {
+    showStatus("⚠️ この親フォルダは既に登録されています", true);
+    return;
+  }
   // 1行で subfolders を持つ形で登録（mode="subfolders"）
   _extFolderList.push({
     id: crypto.randomUUID(),

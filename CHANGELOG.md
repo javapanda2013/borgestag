@@ -5,6 +5,20 @@
 
 ---
 
+## [1.26.3] - 2026-04-19
+
+### Fixed
+- **取り込み予定フォルダリストの二重登録チェック漏れを修正**（BUG-tyfl-dup-import）
+  - 旧実装では `_extFlAddSingle`（単体登録）の重複チェックが `&& f.mode === "single"` に限定されており、既にサブフォルダ選択で登録済みの親フォルダでも単体登録できてしまう片方向のチェック漏れがあった。逆方向（単体登録済み→サブフォルダ選択）については `_extFlApplySubfolders` に重複チェック自体が無く、同じく二重登録できていた。
+  - 対策：両関数とも mode 指定を外して `rootPath` だけで判定するよう修正。single↔single / single↔subfolders / subfolders↔single / subfolders↔subfolders の 4 組合せすべてで同一親フォルダの二重登録をブロックする。
+  - 実害：ステータスは保持されるため上書き事故はなかったが、統合テーブルに同一パスが 2 行並ぶ不整合が発生していた。
+
+### Changed
+- manifest.json: 1.26.2 → 1.26.3
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.26.2] - 2026-04-19
 
 ### Changed

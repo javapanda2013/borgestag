@@ -4913,18 +4913,25 @@ async function _extFlAddSingle() {
   const inputEl = document.getElementById("ext-fl-path");
   const path    = (inputEl?.value || "").trim();
   if (!path) { showStatus("⚠️ フォルダパスを入力してください", true); return; }
-  // v1.26.4 (BUG-tyfl-dup-import): 正規化比較で重複を検出。以下すべてを弾く：
-  //   - any mode の既存 rootPath と一致（single↔single / single↔subfolders 親）
-  //   - subfolders モードの子パス（`subfolders[].path`）と一致（P2: 子パス重複）
-  // 旧 v1.26.3 は toLowerCase のみの比較で、末尾 `\` 等の差異を吸収しておらず
-  // 同じフォルダが別文字列扱いですり抜けるケースがあった。
+  // v1.26.4: 正規化比較＋子パスも走査。v1.26.5: ハード拒否 → 確認ダイアログに変更
   const np = _normalizeExtPath(path);
-  if (_extFolderList.some(f =>
+  const conflicts = _extFolderList.filter(f =>
     _normalizeExtPath(f.rootPath) === np ||
     (f.mode === "subfolders" && (f.subfolders || []).some(sub => _normalizeExtPath(sub.path) === np))
-  )) {
-    showStatus("⚠️ 既に登録されています", true);
-    return;
+  );
+  if (conflicts.length > 0) {
+    if (!confirm(`⚠️ 「${path}」は既に登録されています。\n既存のエントリを削除して登録し直しますか？`)) return;
+    // 既存を削除。subfolders エントリは該当子パスのみ除去（他の子は保持）
+    for (const f of conflicts) {
+      if (f.mode === "subfolders") {
+        f.subfolders = (f.subfolders || []).filter(sub => _normalizeExtPath(sub.path) !== np);
+        if (f.subfolders.length === 0) {
+          _extFolderList = _extFolderList.filter(x => x.id !== f.id);
+        }
+      } else {
+        _extFolderList = _extFolderList.filter(x => x.id !== f.id);
+      }
+    }
   }
   _extFolderList.push({
     id: crypto.randomUUID(),
@@ -5117,31 +5124,62 @@ async function _extFlApplySubfolders() {
     return;
   }
   const parent = document.getElementById("ext-fl-picker-parent")?.textContent || "";
-  // v1.26.4 (BUG-tyfl-dup-import): 正規化比較で 2 段チェック：
-  //   (1) 親フォルダが any mode の既存 rootPath と一致 → 弾く
-  //   (2) 選択した子パスが既存 rootPath（single）または他 subfolders の子と一致 → 弾く
   const nparent = _normalizeExtPath(parent);
-  if (_extFolderList.some(f => _normalizeExtPath(f.rootPath) === nparent)) {
-    showStatus("⚠️ この親フォルダは既に登録されています", true);
-    return;
+  // v1.26.5: 親重複 → 確認ダイアログ（置き換え / キャンセル）
+  const parentConflict = _extFolderList.find(f => _normalizeExtPath(f.rootPath) === nparent);
+  if (parentConflict) {
+    if (!confirm(`⚠️ 親フォルダ「${parent}」は既に登録されています。\n既存エントリを削除して再登録しますか？`)) return;
+    _extFolderList = _extFolderList.filter(f => f.id !== parentConflict.id);
   }
-  const nSelected = selected.map(s => _normalizeExtPath(s.path));
-  const hit = nSelected.find(sp =>
-    _extFolderList.some(f =>
-      _normalizeExtPath(f.rootPath) === sp ||
-      (f.mode === "subfolders" && (f.subfolders || []).some(sub => _normalizeExtPath(sub.path) === sp))
-    )
-  );
-  if (hit) {
-    showStatus("⚠️ 選択したサブフォルダの一部が既に登録されています", true);
-    return;
+  // v1.26.5: 子パス重複 → 3 択ダイアログ（スキップ / 置き換え / キャンセル）
+  // childConflicts: { selectedPath, entry, type: "single"|"subfolder", subPath? } の配列
+  const childConflicts = [];
+  for (const sel of selected) {
+    const sp = _normalizeExtPath(sel.path);
+    for (const f of _extFolderList) {
+      if (f.mode === "single" && _normalizeExtPath(f.rootPath) === sp) {
+        childConflicts.push({ selectedPath: sel.path, entry: f, type: "single" });
+      } else if (f.mode === "subfolders") {
+        for (const sub of (f.subfolders || [])) {
+          if (_normalizeExtPath(sub.path) === sp) {
+            childConflicts.push({ selectedPath: sel.path, entry: f, subPath: sub.path, type: "subfolder" });
+          }
+        }
+      }
+    }
   }
-  // 1行で subfolders を持つ形で登録（mode="subfolders"）
+  let finalSelected = selected;
+  if (childConflicts.length > 0) {
+    const action = await _showBulkConflictDialog(selected.length, childConflicts);
+    if (action === "cancel") return;
+    if (action === "skip") {
+      const conflictSet = new Set(childConflicts.map(c => _normalizeExtPath(c.selectedPath)));
+      finalSelected = selected.filter(s => !conflictSet.has(_normalizeExtPath(s.path)));
+      if (finalSelected.length === 0) {
+        showStatus("⚠️ 登録可能なサブフォルダがありません（すべて重複）", true);
+        return;
+      }
+    } else if (action === "replace") {
+      // 重複分を既存側から除去。subfolders エントリの子は該当 path のみ除去
+      for (const c of childConflicts) {
+        if (c.type === "single") {
+          _extFolderList = _extFolderList.filter(f => f.id !== c.entry.id);
+        } else if (c.type === "subfolder") {
+          c.entry.subfolders = (c.entry.subfolders || []).filter(
+            sub => _normalizeExtPath(sub.path) !== _normalizeExtPath(c.subPath)
+          );
+          if (c.entry.subfolders.length === 0) {
+            _extFolderList = _extFolderList.filter(f => f.id !== c.entry.id);
+          }
+        }
+      }
+    }
+  }
   _extFolderList.push({
     id: crypto.randomUUID(),
     rootPath: parent,
     mode: "subfolders",
-    subfolders: selected.map(s => ({ path: s.path, done: false })),
+    subfolders: finalSelected.map(s => ({ path: s.path, done: false })),
     done: false,
     createdAt: new Date().toISOString(),
   });
@@ -5149,7 +5187,53 @@ async function _extFlApplySubfolders() {
   document.getElementById("ext-fl-subfolder-picker").style.display = "none";
   _extSubfolderCands = [];
   _extRenderFolderList();
-  showStatus(`✅ ${selected.length} 件のサブフォルダを登録しました`);
+  showStatus(`✅ ${finalSelected.length} 件のサブフォルダを登録しました`);
+}
+
+/**
+ * v1.26.5 (BUG-tyfl-dup-import UX): 一括サブフォルダ登録時に子パス重複が検出された場合のダイアログ。
+ * Promise<"skip" | "replace" | "cancel"> を返す。
+ * childConflicts: { selectedPath, entry, type: "single"|"subfolder", subPath? }[]
+ */
+function _showBulkConflictDialog(totalSelected, childConflicts) {
+  return new Promise((resolve) => {
+    const existing = document.querySelector(".bulk-conflict-overlay");
+    if (existing) existing.remove();
+
+    // 重複パス一覧（表示用、重複除去）
+    const uniquePaths = [...new Set(childConflicts.map(c => c.selectedPath))];
+    const sample = uniquePaths.slice(0, 5);
+    const more = uniquePaths.length - sample.length;
+    const sampleHtml = sample.map(p => `<li style="font-family:monospace;font-size:11px;word-break:break-all;">${escHtml(p)}</li>`).join("");
+    const moreHtml = more > 0 ? `<li style="color:#888;font-size:11px;">…他 ${more} 件</li>` : "";
+
+    const canRegisterAfterSkip = totalSelected - uniquePaths.length;
+
+    const overlay = document.createElement("div");
+    overlay.className = "bulk-conflict-overlay period-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="period-dialog" style="max-width:520px">
+        <h3>⚠️ サブフォルダの一部が既に登録されています</h3>
+        <div style="font-size:13px;color:#444;line-height:1.7;margin-bottom:10px">
+          選択中 <b>${totalSelected} 件</b> のうち <b>${uniquePaths.length} 件</b> が既存エントリ（単体登録 or 他のサブフォルダグループ）と重複しています：
+        </div>
+        <ul style="margin:0 0 14px 16px;padding:0;max-height:180px;overflow:auto;border:1px solid #eee;padding:6px 12px;border-radius:4px;">
+          ${sampleHtml}${moreHtml}
+        </ul>
+        <div class="pd-footer" style="gap:6px;flex-wrap:wrap;justify-content:flex-end">
+          <button class="pd-cancel">キャンセル</button>
+          <button class="btn-skip pd-ok" style="background:#3498db"
+            ${canRegisterAfterSkip === 0 ? "disabled" : ""}>重複をスキップして ${canRegisterAfterSkip} 件登録</button>
+          <button class="btn-replace pd-ok" style="background:#e67e22">重複を置き換えて ${totalSelected} 件登録</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector(".btn-skip").addEventListener("click", () => { overlay.remove(); resolve("skip"); });
+    overlay.querySelector(".btn-replace").addEventListener("click", () => { overlay.remove(); resolve("replace"); });
+    overlay.querySelector(".pd-cancel").addEventListener("click", () => { overlay.remove(); resolve("cancel"); });
+    overlay.addEventListener("click", e => { if (e.target === overlay) { overlay.remove(); resolve("cancel"); } });
+  });
 }
 
 /**

@@ -93,6 +93,26 @@ jobs:
             --overwrite-dest
 
       # ---------------------------------------------------------------
+      # 6b. 成果物ファイル名を `borgestag-v<version>.xpi/.zip` に統一
+      #     AMO 側 slug 由来のファイル名（例：image_tag-1.28.1.xpi）を、
+      #     配布物としてユニーク性のある `borgestag-v1.28.1.xpi` に揃える。
+      #     tag push / workflow_dispatch どちらでも manifest.json の
+      #     version を直接読むので確実。jq は ubuntu-latest 既定搭載。
+      # ---------------------------------------------------------------
+      - name: Rename artifacts for distribution
+        if: always()
+        run: |
+          VERSION=$(jq -r '.version' manifest.json)
+          cd dist
+          for f in *.xpi *.zip; do
+            if [ -f "$f" ]; then
+              ext="${f##*.}"
+              mv "$f" "borgestag-v${VERSION}.${ext}"
+            fi
+          done 2>/dev/null || true
+          ls -la
+
+      # ---------------------------------------------------------------
       # 7. 成果物（署名済 .xpi or unsigned .zip）を Actions Artifacts に保存
       #    成功・失敗問わず必ず保存。デフォルト保持 90 日。
       # ---------------------------------------------------------------

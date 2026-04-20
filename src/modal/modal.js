@@ -348,13 +348,14 @@ function buildModalHTML(defaultFilename) {
 
     /* v1.26.9 (GROUP-22 改): 各 wrap はデフォルト固定幅（狭い画面では max-width:100% で縮む）。
        v1.26.7 で撤回したリサイズ機能は overflow を使わない方式で後続版に持ち越し。 */
+    /* v1.27.0: 各 wrap をデフォルト固定幅で設定（狭い画面では max-width:100% で縮む） */
     .dest-tabbar-tag-wrap {
       position: relative; display: flex; flex-direction: column;
-      flex: 0 1 auto; max-width: 100%;
+      width: 400px; max-width: 100%;
     }
     .dest-tabbar-subtag-wrap {
       position: relative; display: flex; flex-direction: column;
-      flex: 0 1 auto; max-width: 100%;
+      width: 500px; max-width: 100%;
     }
     .dest-tabbar-subtag-wrap .dest-tabbar-tag-area {
       border-color: #d0c8f0; /* 薄紫でタグ欄と区別 */
@@ -603,9 +604,10 @@ function buildModalHTML(defaultFilename) {
 
     /* tag-toolbar：タグ入力欄（dest-tabbar の直前に常時表示）
        v1.26.9 (GROUP-22 改): タグ行・サブタグ行を独立した 2 行に分割。
-       chip 位置は input 前置き（画面右端飛ばし回避）。 */
+       chip 位置は input 前置き（画面右端飛ばし回避）。
+       v1.27.0: align-items: flex-start で全幅ストレッチを抑制（入力欄広がりっぱなし回避） */
     #tag-toolbar {
-      display: flex; flex-direction: column; gap: 4px;
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
       background: #f4f7ff; border-bottom: 1px solid #d8e6f8;
       padding: 4px 8px; flex-shrink: 0;
     }

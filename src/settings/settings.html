@@ -301,6 +301,22 @@
     .backup-btn:hover { opacity: .85; }
     .backup-btn.export { background: #4a90e2; color: #fff; }
     .backup-btn.import { background: #f0f0f0; color: #444; border-color: #d0d0d0; }
+
+    /* v1.27.0 GROUP-19 Phase A: 取り込み予定フォルダリストのタブバー */
+    .ext-fl-tab {
+      background: #eef2f7; border: 1px solid #c0cee0; border-bottom: none;
+      border-radius: 5px 5px 0 0;
+      padding: 4px 12px; font-size: 12px; font-family: inherit;
+      color: #5b6a80; cursor: pointer;
+      position: relative; top: 1px;
+      max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ext-fl-tab:hover { background: #f5f8fc; color: #2c3e50; }
+    .ext-fl-tab.active {
+      background: #fff; color: #1a56db; font-weight: 600;
+      border-bottom: 1px solid #fff;
+      z-index: 1;
+    }
     .import-result {
       font-size: 11px; padding: 8px 12px; border-radius: 5px;
       display: none; line-height: 1.8; white-space: pre-wrap; font-family: "Consolas", monospace;
@@ -1222,6 +1238,8 @@
           <button id="ext-fl-bulk-delete"   class="backup-btn" style="padding:2px 10px;font-size:11px;">🗑 選択を削除</button>
           <span id="ext-fl-bulk-count" style="font-size:11px;color:#666;margin-left:auto;"></span>
         </div>
+        <!-- v1.27.0 GROUP-19 Phase A: タブバー（単体 / ルート別）-->
+        <div id="ext-fl-tabbar" style="display:flex;gap:2px;margin-bottom:0;flex-wrap:wrap;border-bottom:1px solid #c0cee0;"></div>
         <!-- v1.25.0 GROUP-12-merge: 取り込み予定フォルダリストとセッション一覧を統合
              列順：☐ / 状態 / フォルダパス / 操作 / 進捗 / サムネ
              v1.25.1 BUG-ext-table-narrow: 狭 viewport（720px body）対策で列幅を引き締め、

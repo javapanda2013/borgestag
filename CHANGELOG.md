@@ -5,6 +5,28 @@
 
 ---
 
+## [1.27.0] - 2026-04-20
+
+### Added
+- **取り込み予定フォルダリストのタブ化**（GROUP-19 Phase A MVP）
+  - 単体登録エントリとサブフォルダ登録エントリが混在して表示されていた `ext-fl-table` を、**単体タブ ＋ ルート別タブ**（N+1 個）の構成に再編。
+  - タブ名は末尾フォルダ名、ツールチップでフルパス表示。単体タブは左端固定、ルート別タブは追加順。
+  - `storage.local.extImportFlActiveTab` でアクティブタブを永続化し、次回起動時に復元。
+  - タブ切替時の選択状態（`_extFlSelectedKeys`）は保持（他タブのチェックは切替で消えない）。
+  - 一括操作（全選択／反転／削除／一括取込／1 枚ずつ取込）は**表示中のタブ内のみ**対象。
+  - Phase A ではタブ骨格のみ実装。ソート機能（Phase B）、リサイズ＋D&D 並び替え（Phase C）、完了ルートフォルダ履歴のタブ化（Phase D）は後続バージョンへ持ち越し。
+
+### Changed
+- **保存ウィンドウ入力欄の広がりっぱなし解消**
+  - v1.26.9 で `#tag-toolbar` を `flex-direction: column` に変更した際、`align-items: stretch` デフォルトで各 wrap が全幅ストレッチし、画面が広いと入力欄が不必要に広い状態になっていた。
+  - 対策：`#tag-toolbar` に `align-items: flex-start` を追加、`.dest-tabbar-tag-wrap` を `width: 400px; max-width: 100%`、`.dest-tabbar-subtag-wrap` を `width: 500px; max-width: 100%` に固定幅化（狭い viewport では親幅に縮む）。
+
+### Changed
+- manifest.json: 1.26.9 → 1.27.0
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.26.9] - 2026-04-20
 
 ### Changed

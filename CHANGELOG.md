@@ -5,6 +5,26 @@
 
 ---
 
+## [1.28.2] - 2026-04-21
+
+### Changed
+- **[CI] GitHub Actions workflow の各 action を Node 24 対応メジャーにアップデート**（L5-node20-deadline 対応）
+  - 2026-06-02 に GitHub Actions ランナーが Node 24 デフォルト化される予定（2026-09-16 に Node 20 ランナー完全除去）への予防的対応。
+  - `.github/workflows/ffext_build.yml` 変更：
+    - `actions/checkout@v4` → `@v6`
+    - `actions/setup-node@v4`（`node-version: '20'`）→ `@v6`（`node-version: '24'`）
+    - `actions/upload-artifact@v4` → `@v6`
+    - `softprops/action-gh-release@v2` → `@v3`
+  - いずれもメジャー version up だが API 互換（runtime Node 20→24 の切替のみ）。破壊的変更なし。
+  - 参考：[Deprecation of Node 20 on GitHub Actions runners](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)
+  - WebExtension 本体コード・Python Native ホストは変更なし。タグ push 時の署名・Release 作成動作は従来通り。
+
+### Changed
+- manifest.json: 1.28.1 → 1.28.2
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+---
+
 ## [1.28.1] - 2026-04-20
 
 ### Changed

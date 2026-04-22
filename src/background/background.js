@@ -401,7 +401,24 @@ function sendNative(payload) {
     }
     let payloadJson;
     try {
-      payloadJson = JSON.stringify(payload);
+      // GROUP-26-I (v1.29.1): WRITE_FILE の大容量 content は 2 重 JSON 化を避ける手動組立経路
+      // 通常の JSON.stringify(payload) は content を 2 重エスケープし
+      // V8 string limit（~512MB）を踏みやすい（例：367MB エクスポート → 825MB 超過）
+      // WRITE_FILE 以外の全コマンドと、WRITE_FILE + content < 1MB は従来経路を使用（影響ゼロ）
+      if (
+        payload.cmd === "WRITE_FILE" &&
+        typeof payload.content === "string" &&
+        payload.content.length > 1_000_000
+      ) {
+        const { cmd, path, content, ...rest } = payload;
+        const headerObj = { cmd, path, ...rest };
+        const headerJson = JSON.stringify(headerObj);         // ヘッダ部（常に小さい）
+        const headerWithoutClose = headerJson.slice(0, -1);   // 末尾 `}` 除去
+        const contentJson = JSON.stringify(content);          // content 単独 JSON 化（1 回のみ）
+        payloadJson = `${headerWithoutClose},"content":${contentJson}}`;
+      } else {
+        payloadJson = JSON.stringify(payload);                // 既存経路
+      }
     } catch (e) {
       addLog("ERROR", `sendNative: JSON化失敗 ${payload.cmd}`, e.message);
       reject(new Error(`payload を JSON 化できません: ${e.message}`));

@@ -142,6 +142,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupMinimizeAfterSave();
   setupFilenameSettings();
   setupDiffExport();
+  setupExportThumbsOption();
   setupExternalImportTab();
   setupBookmarks();
   setupLogs();
@@ -697,17 +698,23 @@ async function exportData() {
     "recentTagDisplayCount",
     "bookmarkDisplayCount",
     "diffExportEnabled",
+    "exportThumbsEnabled",
     "lastExportedAt",
   ]);
   log("📦 設定データ取得完了");
 
-  // IndexedDB のサムネイルも取得
+  // IndexedDB のサムネイルも取得（GROUP-26-III / v1.29.1: サムネ埋込 OFF なら空配列固定、JSON サイズ大幅削減）
   let idbThumbs = [];
-  try {
-    const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
-    if (res?.ok) idbThumbs = res.thumbs;
-  } catch {}
-  log(`🖼 サムネイル取得完了（${idbThumbs.length} 件）`);
+  const exportThumbsEnabled = stored.exportThumbsEnabled !== false; // デフォルト ON（既存挙動維持）
+  if (exportThumbsEnabled) {
+    try {
+      const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
+      if (res?.ok) idbThumbs = res.thumbs;
+    } catch {}
+    log(`🖼 サムネイル取得完了（${idbThumbs.length} 件）`);
+  } else {
+    log(`🖼 サムネイル埋込は OFF（_idbThumbs=[] で JSON サイズを大幅削減、thumbId 参照は保持）`);
+  }
 
   // ---- 差分エクスポート処理 ----
   const isDiff = !!stored.diffExportEnabled && !!stored.lastExportedAt;
@@ -1106,6 +1113,13 @@ async function importData(e) {
       log(`🔀 diffExportEnabled: ${parsed.diffExportEnabled}`);
     } catch (err) { logError(`diffExportEnabled の保存に失敗: ${err.message}`); return; }
   }
+  // ---- exportThumbsEnabled ----（GROUP-26-III / v1.29.1）
+  if (parsed.exportThumbsEnabled !== undefined) {
+    try {
+      await browser.storage.local.set({ exportThumbsEnabled: !!parsed.exportThumbsEnabled });
+      log(`🖼 exportThumbsEnabled: ${!!parsed.exportThumbsEnabled}`);
+    } catch (err) { logError(`exportThumbsEnabled の保存に失敗: ${err.message}`); return; }
+  }
   // ---- lastExportedAt ----
   if (parsed.lastExportedAt !== undefined) {
     try {
@@ -1210,6 +1224,7 @@ async function importData(e) {
   setupInstantSave();
   setupFilenameSettings();
   setupDiffExport();
+  setupExportThumbsOption();
   // エクスポートパス
   const { exportPath, exportAutoSave } = await browser.storage.local.get(["exportPath", "exportAutoSave"]);
   const pathInput = document.getElementById("export-path-input");
@@ -1306,6 +1321,35 @@ async function setupDiffExport() {
   chk.addEventListener("change", async () => {
     await browser.storage.local.set({ diffExportEnabled: chk.checked });
   });
+}
+
+// ----------------------------------------------------------------
+// GROUP-26-III (v1.29.1): サムネ埋込オプション設定
+// チェックボックス初期化＋ onChange 永続化＋ OFF で削減されるサイズ推定表示
+// ----------------------------------------------------------------
+async function setupExportThumbsOption() {
+  const chk = document.getElementById("chk-export-thumbs");
+  const hint = document.getElementById("export-thumbs-size-hint");
+  if (!chk) return;
+  const { exportThumbsEnabled } = await browser.storage.local.get("exportThumbsEnabled");
+  chk.checked = exportThumbsEnabled !== false; // デフォルト ON（既存挙動維持）
+  chk.addEventListener("change", async () => {
+    await browser.storage.local.set({ exportThumbsEnabled: chk.checked });
+  });
+  // サイズ推定（非同期、UI ブロックせず）
+  // 3000 件規模の IDB 走査は数秒かかる可能性があるため setTimeout で遅延実行
+  if (hint) {
+    setTimeout(async () => {
+      try {
+        const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
+        if (res?.ok && Array.isArray(res.thumbs) && res.thumbs.length > 0) {
+          const bytes = JSON.stringify(res.thumbs).length;
+          const mb = (bytes / 1024 / 1024).toFixed(1);
+          hint.textContent = `（${res.thumbs.length} 件、OFF で約 ${mb} MB 削減）`;
+        }
+      } catch (_) { /* サイズ推定失敗は非致命、hint 空のまま */ }
+    }, 500);
+  }
 }
 
 // ----------------------------------------------------------------

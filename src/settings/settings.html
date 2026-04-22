@@ -871,6 +871,13 @@
           差分エクスポートモード（前回エクスポート以降の新規エントリのみを対象にする）
         </label>
 
+        <!-- サムネイル埋込オプション（GROUP-26-III / v1.29.1） -->
+        <label class="export-auto-label" style="margin-top:4px;">
+          <input type="checkbox" id="chk-export-thumbs" checked />
+          サムネイル画像をエクスポートに含める
+          <span id="export-thumbs-size-hint" style="color:#888;font-size:.85em;margin-left:8px;"></span>
+        </label>
+
         <div class="backup-actions">
           <button class="backup-btn export" id="btn-export">⬇ エクスポート（JSONファイル保存）</button>
           <label class="backup-btn import" id="label-import">

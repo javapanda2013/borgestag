@@ -5,6 +5,35 @@
 
 ---
 
+## [1.29.1] - 2026-04-22
+
+### Fixed
+- **巨大エクスポート（300MB+）での失敗を修正**（GROUP-26-I）
+  - `background.js` の `sendNative` 内で発生していた **2 重 JSON 化問題** を解消。従来は `JSON.stringify(payload)` で WRITE_FILE の `content`（367MB 級のエクスポート JSON 文字列）を外側から再 JSON 化 → エスケープ膨張で V8 string limit（~512MB）を超過し「payload を JSON 化できません: undefined」エラーが発生していた。
+  - WRITE_FILE + `content` 長さ ≥ 1MB の場合のみ**手動で JSON を組立**（ヘッダは既存通り `JSON.stringify(headerObj)`、content は単独 `JSON.stringify(string)` で 1 回のみエスケープ）。WRITE_FILE 以外のコマンドと content < 1MB の WRITE_FILE は**従来経路そのまま**で影響ゼロ。
+  - この修正単独では 550MB 超（1 重化後）までは救済できないため、併せて下記 GROUP-26-III でサムネ埋込 OFF 時の根本削減手段を提供。
+
+### Added
+- **エクスポート時のサムネイル埋込オプション**（GROUP-26-III）
+  - 設定画面「エクスポート」エリアに `☑ サムネイル画像をエクスポートに含める` チェックボックスを新設（**デフォルト ON** で既存挙動維持）。OFF にすると `_idbThumbs: []` で書き出し、サムネ埋込分のサイズが JSON から除外される（実例：367MB → 10MB 級）。
+  - チェックボックス横に `（N 件、OFF で約 X MB 削減）` の動的ヒントを表示（初回ロード時に非同期計算、UI ブロックなし）。
+  - `saveHistory[i].thumbId` 参照は残すため、OFF エクスポート → 他端末インポート時は「サムネなしエントリ」として既存の『サムネ生成失敗』プレースホルダで表示される（サムネ本体は別途 IDB を持つ端末でのみ復元可能）。
+  - `storage.local.exportThumbsEnabled`（boolean、デフォルト true）に永続化。エクスポート対象配列とインポート復元ブロックにも組込み（既存 `instantSaveEnabled` / `minimizeAfterSave` と同パターン）。
+
+### Changed
+- manifest.json: 1.29.0 → 1.29.1
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+### Known Limitations（本 hotfix では未対応、v1.30.0 予定）
+- GROUP-26-split（エクスポート分割出力＋ zip まとめ）：サムネ埋込 ON のまま巨大化するケース（500MB 超）や、元から大量の saveHistory のみのケースへの完全対応。
+- GROUP-26-unzip（zip からインポート）：分割 zip の復元。
+
+### 影響調査
+- `sendNative` は `background.js:389` 単一関数で全 30+ コマンドが通る共通経路（04 G1）。過去事故例：v1.18.0→v1.18.1（WRITE_FILE ブロック）、v1.18.4→v1.19.3（SAVE_IMAGE_BASE64 ブロック）、v1.20.0→v1.20.1（タイムアウト不足）。
+- 本修正は WRITE_FILE + content ≥ 1MB の特例分岐のみで、WRITE_FILE 以外／content < 1MB ケースは従来経路そのまま → **他コマンドへの影響ゼロを担保**。
+
+---
+
 ## [1.29.0] - 2026-04-22
 
 ### Added

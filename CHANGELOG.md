@@ -5,6 +5,37 @@
 
 ---
 
+## [1.29.2] - 2026-04-22
+
+### Fixed
+- **大量データ処理の中間変数メモリ保持を徹底解放（GROUP-26-mem）**
+  - v1.29.1 の GROUP-26-I（sendNative 2 重 JSON 化防止）適用後も 367MB エクスポート環境で `allocation size overflow` が発生する事象への追加対応。
+  - 原因：`settings.js exportData()` 内で `stored` / `idbThumbs` / `exportHistory` / `exportThumbs` / `payload` / `json` の全てが関数末尾まで参照保持され、`sendNative` 内で content を単独 JSON 化する際の ~550MB 新規 string allocation 要求と合わせて実効ピーク ~1GB に達していた。
+  - 広範囲に他機能でも同様のメモリ保持不足を調査（Explore agent 監査）、上位 5 箇所を本リリースで修正：
+
+#### 改修した 5 箇所
+
+- **①** `settings.js:exportData()` — `json` 生成直後に `payload` / `stored` / `idbThumbs` / `exportHistory` / `exportThumbs` を即 `null` 化（`const` → `let` に変更、`exportThumbs.length` は事前退避した `thumbCount` を参照）。削減見込み ~500MB
+- **②** `background.js:importIdbThumbs()` — ループ内の `bin` / `buf` / `blob` を `const` → `let` に変更し、IDB put 完了後に即 `null` 化。ピークメモリ ~50% 削減
+- **③** `background.js:generateMissingThumbs()` — 非 GIF サムネ生成経路で `bitmap.close()` 後に元画像 `blob = null`、`thumbBlob` も IDB put 後に `null` 化。ループ内ピーク ~50MB → ~5MB
+- **④** `background.js:_fetchThumbB64FromChunkPath()` — `btoa` 結果を別変数に退避後、`binStr = null` で蓄積文字列を即解放
+- **⑤** `settings.js:exportData()` 差分モード内 — `exportThumbs = idbThumbs.filter(...)` 直後に `idbThumbs = null`（差分時は元の全サムネ配列 ~350MB が不要）
+
+### Changed
+- manifest.json: 1.29.1 → 1.29.2
+- **native/image_saver.py は変更なし**（version 1.10.0 据え置き）
+
+### Known Limitations（本 hotfix でも未対応、v1.30.0 予定）
+- GROUP-26-split（エクスポート分割出力＋ zip まとめ）：V8 string max（~512MB）を単発で超える要求には依然対応不可。完全解決は chunk 送信が必要。
+- GROUP-26-unzip（zip からインポート）
+- 残り 5 箇所（外部取り込み／XHR+Canvas／複数保存先／1 枚ずつセッション／履歴フィルター）は中〜低リスクのため v1.30.0 で -split 実装と同時改修予定。
+
+### 影響調査
+- Explore agent で機能単位 10 箇所を調査、本リリースでは**高リスク上位 5 箇所のみ先行修正**。
+- 全改修で他コマンド／他機能への影響ゼロを担保（`null` 代入のみで I/O 挙動は不変）。
+
+---
+
 ## [1.29.1] - 2026-04-22
 
 ### Fixed

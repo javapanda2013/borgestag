@@ -1244,7 +1244,11 @@ async function _fetchThumbB64FromChunkPath(tempPath) {
     for (let i = 0; i < bytes.length; i += STEP) {
       binStr += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
     }
-    return { ok: true, b64: btoa(binStr) };
+    // GROUP-26-mem (v1.29.2): btoa 実行で結果文字列を作った時点で binStr は不要
+    // btoa 中も binStr が生存していると allocation ピークが高まるため、結果を別変数で受けて binStr 解放
+    const b64Result = btoa(binStr);
+    binStr = null;
+    return { ok: true, b64: b64Result };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
   }
@@ -1432,10 +1436,13 @@ async function importIdbThumbs(thumbs) {
       // DataURL → Blob
       const [meta, b64] = thumb.dataUrl.split(",");
       const mime  = (meta.match(/:(.*?);/) || [])[1] || "image/jpeg";
-      const bin   = atob(b64);
-      const buf   = new Uint8Array(bin.length);
+      // GROUP-26-mem (v1.29.2): const → let、IDB put 後に即 null 化でループ内ピークメモリ削減
+      let bin   = atob(b64);
+      let buf   = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-      const blob  = new Blob([buf], { type: mime });
+      let blob  = new Blob([buf], { type: mime });
+      bin = null; // 中間バイナリ文字列は Blob 化後不要
+      buf = null; // Uint8Array も Blob 内部で保持されるので外側参照不要
 
       await new Promise((resolve, reject) => {
         const tx    = db.transaction(IDB_STORE, "readwrite");
@@ -1444,6 +1451,8 @@ async function importIdbThumbs(thumbs) {
         tx.oncomplete = () => resolve();
         tx.onerror    = (e) => reject(e.target.error);
       });
+      blob = null; // IDB put 完了後、外側参照不要（IDB 側に保持）
+      // thumb.dataUrl は呼出元 thumbs 配列の一部、ここでは解放できない（呼出元で対応）
       added++;
     }
     return { ok: true, added };
@@ -1721,10 +1730,13 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
       const [meta, b64] = res.dataUrl.split(",");
       const mimeMatch   = meta.match(/:(.*?);/);
       const mimeType    = mimeMatch ? mimeMatch[1] : "image/jpeg";
-      const bin  = atob(b64);
-      const buf  = new Uint8Array(bin.length);
+      // GROUP-26-mem (v1.29.2): const → let、bitmap.close 後に blob = null でピークメモリ削減
+      let bin  = atob(b64);
+      let buf  = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-      const blob = new Blob([buf], { type: mimeType });
+      let blob = new Blob([buf], { type: mimeType });
+      bin = null;
+      buf = null;
 
       // OffscreenCanvas でさらに 600px サムネイルサイズにリサイズ（保存時と同サイズ）
       const bitmap = await createImageBitmap(blob);
@@ -1735,9 +1747,11 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
       const canvas = new OffscreenCanvas(tw, th);
       canvas.getContext("2d").drawImage(bitmap, 0, 0, tw, th);
       bitmap.close();
-      const thumbBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+      blob = null; // 元画像 Blob（最大数十 MB）を解放、サムネ Blob は独立
+      let thumbBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
 
       const thumbId = await saveThumbToIDB(thumbBlob);
+      thumbBlob = null; // IDB put 完了後、外側参照不要
       entry.thumbId     = thumbId;
       entry.thumbWidth  = tw;
       entry.thumbHeight = th;

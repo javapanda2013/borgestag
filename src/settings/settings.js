@@ -668,7 +668,8 @@ async function exportData() {
   log("⏳ エクスポート準備中...");
 
   // storage.local のバックアップ対象キー
-  const stored = await browser.storage.local.get([
+  // GROUP-26-mem (v1.29.2): const → let、json 作成後に null 化で V8 allocation 余地確保
+  let stored = await browser.storage.local.get([
     "tagDestinations",
     "globalTags",
     "lastSaveDir",
@@ -728,6 +729,7 @@ async function exportData() {
     // 差分エントリで参照されるサムネイルのみに絞る
     const thumbIdSet = new Set(exportHistory.map(e => e.thumbId).filter(Boolean));
     exportThumbs = idbThumbs.filter(t => thumbIdSet.has(t.id));
+    idbThumbs = null; // GROUP-26-mem (v1.29.2): 差分フィルタ後は元の全配列（~350MB）不要
     log(`🔍 差分: ${exportHistory.length} 件 / 全 ${fullCount} 件（前回エクスポート: ${stored.lastExportedAt.slice(0, 19).replace("T", " ")}）`);
     if (exportHistory.length === 0) {
       log("ℹ️ 差分なし（前回エクスポート以降の新規エントリはありません）");
@@ -738,7 +740,8 @@ async function exportData() {
   // ---- ペイロード生成 ----
   // 差分モード時は saveHistory・_idbThumbs を差分のみに置き換える
   const exportedAt = new Date().toISOString();
-  const payload = {
+  // GROUP-26-mem (v1.29.2): const → let、json 作成後に null 化
+  let payload = {
     _meta: {
       exportedAt,
       version:  "1.11.0",
@@ -754,6 +757,15 @@ async function exportData() {
   const json    = JSON.stringify(payload, null, 2);
   const sizeKB  = (json.length / 1024).toFixed(1);
   log(`📝 JSON 生成完了（${sizeKB} KB）`);
+
+  // GROUP-26-mem (v1.29.2): json 作成後、中間変数を即 null 化して V8 allocation 余地確保
+  // （sendNative 内の content JSON 化で ~550MB 要求されるため、~500MB 以上の解放が有効）
+  const thumbCount = exportThumbs.length;
+  payload = null;
+  stored = null;
+  idbThumbs = null;
+  exportHistory = null;
+  exportThumbs = null;
 
   const prefix = isDiff ? "image-saver-diff" : "image-saver-backup";
   const ts     = exportedAt.slice(0, 19).replace(/[T:]/g, "-");
@@ -773,24 +785,24 @@ async function exportData() {
     if (res?.ok) {
       // 差分エクスポート完了時のみ lastExportedAt を更新（全エクスポートでは更新しない）
       if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
-      log(`✅ エクスポート完了: ${savePath}（サムネイル ${exportThumbs.length} 件含む）`);
-      showCenterToast(`✅ エクスポートしました\n${savePath}\n（サムネイル ${exportThumbs.length} 件含む）`);
+      log(`✅ エクスポート完了: ${savePath}（サムネイル ${thumbCount} 件含む）`);
+      showCenterToast(`✅ エクスポートしました\n${savePath}\n（サムネイル ${thumbCount} 件含む）`);
     } else {
       const msg = res?.errorCode === "DIR_NOT_FOUND"
         ? `⚠️ フォルダが存在しません: ${exportPath}\n設定画面でエクスポート先を確認してください`
         : `⚠️ 直接保存に失敗しました。ダウンロードに切り替えます: ${res?.error || ""}`;
       logError(msg);
       showStatus(msg, true);
-      _downloadJson(json, name, exportThumbs.length);
+      _downloadJson(json, name, thumbCount);
       if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
     }
     return;
   }
 
-  _downloadJson(json, name, exportThumbs.length);
+  _downloadJson(json, name, thumbCount);
   // 差分エクスポート完了時のみ lastExportedAt を更新（全エクスポートでは更新しない）
   if (isDiff) await browser.storage.local.set({ lastExportedAt: exportedAt });
-  log(`✅ ダウンロード開始（サムネイル ${exportThumbs.length} 件含む）`);
+  log(`✅ ダウンロード開始（サムネイル ${thumbCount} 件含む）`);
 }
 
 function _downloadJson(json, name, thumbCount) {

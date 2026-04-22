@@ -9,6 +9,44 @@
 
 const NATIVE_APP_ID = "image_saver_host";
 
+// ================================================================
+// v1.30.6 診断コード：sendNative 時の payload / payloadJson 生存追跡
+// （GROUP-26-slice-5、仮説 E 検証用、次リリース v1.30.7 で removal 予定）
+// ================================================================
+// 目的：エクスポート後の 50-62MB 級文字列 × 7 個が background zone で残留する
+// 原因の切り分け。仮説 E：sendNative の payload / payloadJson が Promise executor
+// の closure に capture され、listener/timer を経由して port 切断後も保持される。
+//
+// 手法：WeakRef + FinalizationRegistry
+// - payload に marker を attach → WeakRef(marker).deref() で payload 生存を検知
+// - sendNative scope に jsonProbe closure を置き payloadJson を capture →
+//   closure whole-scope capture が起きるなら jsonProbe も retain → jsonMarker 生存
+//
+// 使用法（設定画面の F12 console）：
+//   const bg = await browser.runtime.getBackgroundPage();
+//   console.table(bg.__exportDebugReport());
+//
+// 判定：payload_alive / json_probe_alive の true/false で保持経路を切り分け
+if (!globalThis.__exportDebug) {
+  globalThis.__exportDebug = {
+    refs: [],
+    registry: new FinalizationRegistry(tag => {
+      try { console.log(`[GC] ${tag} released`); } catch (_) {}
+    }),
+  };
+  globalThis.__exportDebugReport = () => globalThis.__exportDebug.refs.map(r => ({
+    tag: r.tag,
+    content_MB: (r.contentLen / 1024 / 1024).toFixed(1),
+    json_MB: (r.jsonLen / 1024 / 1024).toFixed(1),
+    payload_alive: !!r.payloadRef.deref(),
+    json_probe_alive: !!r.jsonRef.deref(),
+  }));
+  globalThis.__exportDebugReset = () => {
+    globalThis.__exportDebug.refs.length = 0;
+    return "refs cleared";
+  };
+}
+
 // ----------------------------------------------------------------
 // 動作ログ（最大200件・新しい順）
 // ----------------------------------------------------------------
@@ -568,6 +606,31 @@ function sendNative(payload) {
       addLog("ERROR", `Native切断: ${cmdName}`, err);
       reject(new Error(err));
     });
+
+    // v1.30.6 診断：payload / payloadJson の生存を WeakRef で追跡（v1.30.7 で removal 予定）
+    if (cmdName === "WRITE_FILE" &&
+        typeof payload?.content === "string" &&
+        payload.content.length > 1_000_000) {
+      const __debugTag = `chunk-${Date.now()}-L${payload.content.length}`;
+      const __payloadMarker = { tag: `${__debugTag}:payload`, contentLen: payload.content.length };
+      const __jsonMarker = { tag: `${__debugTag}:json`, jsonLen: payloadJson.length };
+      payload.__exportDebugMarker = __payloadMarker;
+      // jsonProbe は sendNative scope の local 変数。listener closure が whole-scope
+      // capture するならこの probe も retain され、probe が payloadJson を capture
+      // しているため payloadJson の道連れ生存を jsonMarker 経由で検知できる。
+      const __jsonProbe = function __jsonProbe__() { return payloadJson; };
+      __jsonProbe.__marker = __jsonMarker;
+      globalThis.__exportDebug.registry.register(__payloadMarker, __payloadMarker.tag);
+      globalThis.__exportDebug.registry.register(__jsonMarker, __jsonMarker.tag);
+      globalThis.__exportDebug.refs.push({
+        tag: __debugTag,
+        contentLen: payload.content.length,
+        jsonLen: payloadJson.length,
+        payloadRef: new WeakRef(__payloadMarker),
+        jsonRef: new WeakRef(__jsonMarker),
+      });
+      console.log(`[DEBUG] probes registered: ${__debugTag}`);
+    }
 
     port.postMessage(payload);
   });

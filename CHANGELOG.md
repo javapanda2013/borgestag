@@ -5,6 +5,47 @@
 
 ---
 
+## [1.30.6] - 2026-04-23（診断リリース、修正なし）
+
+### Added — 診断コード：WeakRef による payload / payloadJson 生存追跡（GROUP-26-slice-5）
+
+#### 背景
+v1.30.5 でも **background zone に 50-62MB × 7 個 = 735MB の残留が不変**。仮説 D（async handler の message 引数保持）は誤りと判明。Firefox Browser Toolbox Memory タブは親プロセスのみ snapshot 可能で、extension プロセスの retaining paths は取得不可。`about:memory` は zone 別集計までで誰が保持しているか分からない。
+
+推測で fix 実装を繰り返すのを止め、**決定的な生存判定情報を得るための診断版**。
+
+#### 仮説 E
+sendNative 内の `payload`（引数オブジェクト、content 50MB を含む）と `payloadJson`（手動組立 rope、contentJson 50MB を子として持つ）が Promise executor の closure に capture され、listener/timer の closure 経由で port 切断後も retain されている。
+
+#### 診断コード（本リリースのみ）
+`background.js` 先頭に `globalThis.__exportDebug` を追加。sendNative の WRITE_FILE × 1MB 超の payload について：
+
+- `payload.__exportDebugMarker` にマーカーを attach（payload 生存を WeakRef で検知）
+- sendNative scope 内に `__jsonProbe` closure を定義し payloadJson を capture。SpiderMonkey が closure で whole-scope capture するならこの probe も retain され、probe 経由で payloadJson 道連れ生存を検知（jsonMarker）
+
+#### 使用法
+エクスポート完了 → `about:memory` で Minimize memory usage → 設定画面の F12 console で：
+
+```js
+const bg = await browser.runtime.getBackgroundPage();
+console.table(bg.__exportDebugReport());
+```
+
+#### 判定パターン
+| payload_alive | json_probe_alive | 診断 |
+|---|---|---|
+| true | true | payload が closure capture で保持。v1.30.7 で payload = null 代入 |
+| false | true | payload 自体は GC 済だが、sendNative scope の other 変数が closure で保持され payloadJson を道連れ → v1.30.7 で payloadJson = null 代入 |
+| false | false | どちらも GC 済 → 50MB 文字列は**別経路**で保持されている（appLogs、port 内部バッファ、structured-clone holder 等）。次仮説へ |
+| true | false | 通常発生しない |
+
+#### 注意
+本リリースは**診断専用、効果なし**。WeakRef/FinalizationRegistry の計測コードが background.js に入っているだけで、payload にマーカー属性（`__exportDebugMarker`）が追加される副作用あり（Native 側には無害、ignore される）。計測結果が得られたら v1.30.7 で診断コード削除＋本来の fix を実装。
+
+Native 変更なし（native v1.11.1 維持）。
+
+---
+
 ## [1.30.5] - 2026-04-23
 
 ### Fixed — v1.30.4 の WRITE_FILE listener race を修正（GROUP-26-slice-4、hotfix）

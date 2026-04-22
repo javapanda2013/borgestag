@@ -443,14 +443,20 @@ function sendNative(payload) {
       reject(new Error("payload.cmd が不正です"));
       return;
     }
+
+    // GROUP-26-slice-2 (v1.30.3): listener / timeout closure が payload object 全体を
+    // capture することで content 50MB 級文字列が Promise 完了後も GC されない問題の対策。
+    // cmd を独立 linear string として退避し、以降の log / 判定は全て cmdName のみを参照する。
+    // ※ payload 自体は port.postMessage(payload) に最後に渡すのみで、それ以外の closure 経路で
+    //   payload を参照しないことで、Promise 解決後に payload.content を GC 可能にする。
+    // 詳細：設計書類 07 §8
+    const cmdName = JSON.parse(JSON.stringify(payload.cmd));
+
     let payloadJson;
     try {
       // GROUP-26-I (v1.29.1): WRITE_FILE の大容量 content は 2 重 JSON 化を避ける手動組立経路
-      // 通常の JSON.stringify(payload) は content を 2 重エスケープし
-      // V8 string limit（~512MB）を踏みやすい（例：367MB エクスポート → 825MB 超過）
-      // WRITE_FILE 以外の全コマンドと、WRITE_FILE + content < 1MB は従来経路を使用（影響ゼロ）
       if (
-        payload.cmd === "WRITE_FILE" &&
+        cmdName === "WRITE_FILE" &&
         typeof payload.content === "string" &&
         payload.content.length > 1_000_000
       ) {
@@ -464,7 +470,7 @@ function sendNative(payload) {
         payloadJson = JSON.stringify(payload);                // 既存経路
       }
     } catch (e) {
-      addLog("ERROR", `sendNative: JSON化失敗 ${payload.cmd}`, e.message);
+      addLog("ERROR", `sendNative: JSON化失敗 ${cmdName}`, e.message);
       reject(new Error(`payload を JSON 化できません: ${e.message}`));
       return;
     }
@@ -476,9 +482,9 @@ function sendNative(payload) {
     //   ・ネイティブ → 拡張方向は大容量（プレビュー画像 Base64）
     // それ以外のコマンドは想定外の巨大ペイロードを早期に弾いて Native 切断事故を防ぐ。
     const exemptCmds = ["WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
-    if (!exemptCmds.includes(payload.cmd) && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
+    if (!exemptCmds.includes(cmdName) && payloadJson.length > NATIVE_PAYLOAD_MAX_BYTES) {
       const kb = (payloadJson.length / 1024).toFixed(0);
-      addLog("ERROR", `sendNative: payload 過大 ${payload.cmd}`, `${kb} KB`);
+      addLog("ERROR", `sendNative: payload 過大 ${cmdName}`, `${kb} KB`);
       reject(new Error(`payload が大きすぎます: ${kb} KB（上限 ${NATIVE_PAYLOAD_MAX_BYTES / 1024 / 1024} MB）`));
       return;
     }
@@ -492,7 +498,7 @@ function sendNative(payload) {
       return;
     }
 
-    addLog("INFO", `Native送信: ${payload.cmd}`, payloadJson.slice(0, 200));
+    addLog("INFO", `Native送信: ${cmdName}`, payloadJson.slice(0, 200));
 
     // v1.20.2: コマンド別タイムアウト（v1.20.1 の対象をさらに拡大）。
     // 長時間処理の可能性があるコマンドは 300 秒に延長。瞬時操作は従来どおり 10 秒でハング検知。
@@ -513,19 +519,22 @@ function sendNative(payload) {
       // v1.30.0 GROUP-26-split: 大容量 zip 化（数百 MB の deflate 処理で数十秒かかる可能性）
       "ZIP_DIRECTORY",
     ];
-    const timeoutMs = LONG_TIMEOUT_CMDS.includes(payload.cmd) ? 300000 : 10000;
+    const timeoutMs = LONG_TIMEOUT_CMDS.includes(cmdName) ? 300000 : 10000;
 
     const timer = setTimeout(() => {
       port.disconnect();
-      addLog("ERROR", `Native タイムアウト: ${payload.cmd}`, `${timeoutMs / 1000}s`);
+      addLog("ERROR", `Native タイムアウト: ${cmdName}`, `${timeoutMs / 1000}s`);
       reject(new Error("ネイティブアプリからの応答がタイムアウトしました"));
     }, timeoutMs);
 
+    // GROUP-26-slice-2 (v1.30.3): listener 内では payload ではなく退避済 cmdName のみ参照。
+    // こうすることで listener の closure が payload object 全体（及び content 50MB）を
+    // capture しなくなり、Promise resolve 後に payload が GC 対象になる。
     port.onMessage.addListener((response) => {
       clearTimeout(timer);
       port.disconnect();
       addLog(response.ok === false ? "WARN" : "INFO",
-        `Native応答: ${payload.cmd}`,
+        `Native応答: ${cmdName}`,
         JSON.stringify(response).slice(0, 200));
       resolve(response);
     });
@@ -533,7 +542,7 @@ function sendNative(payload) {
     port.onDisconnect.addListener(() => {
       clearTimeout(timer);
       const err = browser.runtime.lastError?.message || "ネイティブアプリが切断されました";
-      addLog("ERROR", `Native切断: ${payload.cmd}`, err);
+      addLog("ERROR", `Native切断: ${cmdName}`, err);
       reject(new Error(err));
     });
 

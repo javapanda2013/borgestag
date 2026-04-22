@@ -5,6 +5,65 @@
 
 ---
 
+## [1.30.3] - 2026-04-23
+
+### Fixed — sendNative の Promise listener closure が payload 全体を capture する GC 阻害（GROUP-26-slice-2）
+
+#### 症状
+v1.30.2 までの実装でエクスポート成功後、**Firefox の「Minimize memory usage」で強制 GC + CC を走らせてもなお 50-62MB 級の文字列 7 個（計 734MB）が解放されない**問題が継続。GC 強制でも解放されないということは、JS 側で **reachable な強参照**が存在している。
+
+#### 原因（真犯人）
+`background.js sendNative()` 内部の `port.onMessage.addListener` / `port.onDisconnect.addListener` / `setTimeout` callback が `payload.cmd` を参照している：
+
+```js
+port.onMessage.addListener((response) => {
+  // ...
+  addLog(..., `Native応答: ${payload.cmd}`, ...);  // ← payload 全体を closure capture
+  resolve(response);
+});
+```
+
+これら listener / timeout の **closure が `payload` オブジェクト全体を capture** し、結果として `payload.content`（WRITE_FILE の 50-62MB JSON 文字列）も Promise 解決後も GC 阻害される。`port.postMessage(payload)` 送信の Firefox 内部 structured clone は正しく解放されていたが、JS 側のクロージャが強参照を維持していた。
+
+#### 対策
+`sendNative()` 先頭で `payload.cmd` を独立した linear string として退避し、以降の log / 判定は**すべて退避値のみ参照**する形に変更：
+
+```js
+const cmdName = JSON.parse(JSON.stringify(payload.cmd));
+// 以降 payload.cmd を参照する全箇所を cmdName に置換
+// listener 内も cmdName のみ参照
+port.onMessage.addListener((response) => {
+  addLog(..., `Native応答: ${cmdName}`, ...);  // payload object 全体は参照しない
+});
+```
+
+置換箇所：sendNative 内 8 箇所（JSON 化失敗ログ／sendNative payload 過大ログ／Native 送信ログ／timeout 判定／timeout ログ／onMessage ログ／onDisconnect ログ）。`port.postMessage(payload)` のみが引数 payload を参照（送信で必須、ここは変更不可）。
+
+#### 調査・実測結果（実装前）
+- v1.30.1 実行後：7 個、380MB 残留
+- v1.30.2 実行後（addLog slice 対策のみ）：7 個、734MB 残留（改善なし）
+- v1.30.2 + GC 強制後：7 個、734MB 残留（自然 GC/強制 GC いずれも効かず）
+- → reachable な強参照の存在が確定、仮説 C（listener closure 経由）で決着
+
+#### 効果見込み（仮反映、実測検証は次回エクスポート後）
+- 実行後残留 **734MB → ほぼゼロ**（payload が closure capture されなくなるため）
+- 実行中ピーク（~5GB）は本リリースで**未対応**（Phase A' = EXPORT_IDB_THUMBS の chunk 化で別途対応予定）
+
+### 記録
+- 設計書類 07 §8 に**誤診連鎖の記録**（仮説 A → B → C、約 2 リリースかけて真因特定）を追記。future reference として類似ケースで「listener closure の object capture」を早期疑う判断材料に
+- `memory/feedback_memory_debug.md` に同パターンを追記
+
+### Changed
+- `src/background/background.js`: `sendNative()` の payload.cmd 参照 8 箇所を退避済 cmdName に置換
+- manifest.json: 1.30.2 → 1.30.3
+- **native/image_saver.py は変更なし**（version 1.11.1 据え置き）
+
+### Known Limitations（v1.31.0 で対応候補）
+- 実行中ピーク ~5GB（exportIdbThumbs の全件配列構築由来）は本リリースで未対応
+- v1.31.0 で Phase A'（EXPORT_IDB_THUMBS の chunk 化）＋ Phase B（structured-clone-holder 削減）実装予定
+
+---
+
 ## [1.30.2] - 2026-04-23
 
 ### Fixed — エクスポート実行後の拡張機能プロセスメモリ残留（GROUP-26-slice、仮反映）

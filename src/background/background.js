@@ -15,6 +15,23 @@ const NATIVE_APP_ID = "image_saver_host";
 const LOG_MAX = 200;
 
 async function addLog(level, message, detail = null) {
+  // GROUP-26-slice (v1.30.2): SpiderMonkey の dependent string 対策
+  // 呼出側で largeString.slice(0, N) されたプレビュー文字列は、親文字列への参照を
+  // 内部的に保持（JSDependentString）するため、appLogs / storage に短い文字列として
+  // 格納しても親の数十 MB 級文字列が GC されずに残り続ける。
+  // JSON.parse(JSON.stringify(...)) で明示的に新規 linear string を生成し、
+  // 親文字列への参照を切ることで GC 可能にする。詳細：設計書類 07 §8
+  if (typeof detail === "string" && detail.length > 0) {
+    try {
+      detail = JSON.parse(JSON.stringify(detail));
+    } catch (_) { /* JSON 化失敗は極めて稀、元のまま続行 */ }
+  } else if (typeof message === "string" && message.length > 0) {
+    // message も同様の経路で dependent になり得るため念のため
+    try {
+      message = JSON.parse(JSON.stringify(message));
+    } catch (_) {}
+  }
+
   const entry = {
     time:    new Date().toISOString(),
     level,   // "INFO" | "WARN" | "ERROR"

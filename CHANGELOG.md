@@ -5,6 +5,50 @@
 
 ---
 
+## [1.30.2] - 2026-04-23
+
+### Fixed — エクスポート実行後の拡張機能プロセスメモリ残留（GROUP-26-slice、仮反映）
+
+#### 症状
+v1.30.1 までの実装でエクスポート成功後、Firefox の**拡張機能プロセスが 1GB 残留**（実行前 141MB → 実行中 3GB → 実行後 1GB）。`about:memory` の memory-report.json.gz をユーザーに出力してもらい Python で解析したところ、`extension (pid)` の `explicit/window-objects/top(.../_generated_background_page.html)/js-zone/strings/string(length=N)` パスに **50-62MB 級の文字列が 7 個残留**（合計 ~380MB）が判明。
+
+#### 原因
+Firefox SpiderMonkey の `String.prototype.slice()` は **dependent string（JSDependentString）** を返し、短いプレビュー文字列が内部的に親文字列へのポインタ＋ offset/length を保持する。`background.js sendNative()` 内：
+```js
+addLog("INFO", `Native送信: ${payload.cmd}`, payloadJson.slice(0, 200));
+```
+この `payloadJson.slice(0, 200)` が `addLog` 経由で `storage.local.appLogs`（最大 200 件保持）に格納されると、**200 文字のプレビュー経由で親の 50-60MB JSON payload が GC されずに残り続ける**。thumbs-NNN.json を 7 chunk 書いた後の 7 個の親文字列が合計 380MB 残留していた。
+
+#### 対策
+`background.js addLog()` の冒頭で、string type の `detail` / `message` を **`JSON.parse(JSON.stringify(str))` で明示的に新規 linear string として deep copy**。dependent string 化による親文字列参照を切って GC 可能にする。
+
+```js
+if (typeof detail === "string" && detail.length > 0) {
+  detail = JSON.parse(JSON.stringify(detail));
+}
+```
+
+呼出側（sendNative 等 20+ 箇所）は一切変更せず、addLog の入口で吸収することで副作用最小。
+
+### 効果見込み（仮反映、実測検証は次回エクスポート後）
+- 実行後残留 **880MB → ~150MB**（730MB 削減見込み、ただしピーク 3GB とは別問題）
+- 実行中ピーク：**間接的に部分改善**（dependent string 経由の GC 阻害が早期解消される可能性あり）
+
+### 実測検証のための新知見
+- 調査手法（`about:processes` + `about:memory` → Python 解析 6 ステップ）を `設計書類/07_事故・地雷ペア事例.md §8` に収録
+- Firefox 拡張機能プロジェクト全般で流用可能な知見として `memory/feedback_memory_debug.md` に定型化
+
+### Changed
+- `src/background/background.js`: `addLog()` の入口で detail/message の deep copy を追加（7 行）
+- manifest.json: 1.30.1 → 1.30.2
+- **native/image_saver.py は変更なし**（version 1.11.1 据え置き）
+
+### Known Limitations（v1.31.0 で対応候補）
+- 実行中ピーク ~3GB（exportIdbThumbs の全件配列構築由来）は本リリースでは未対応
+- v1.31.0 で Phase A'（EXPORT_IDB_THUMBS の chunk 化）実装予定
+
+---
+
 ## [1.30.1] - 2026-04-23
 
 ### Fixed — エクスポート後の一時ディレクトリ残留（GROUP-26-cleanup）

@@ -5,6 +5,68 @@
 
 ---
 
+## [1.30.4] - 2026-04-23
+
+### Fixed — WRITE_FILE を非-async handler に切り離し（GROUP-26-slice-3、仮説 D）
+
+#### 症状
+v1.30.3 で sendNative の listener closure 対策を適用後、**実行中ピークは 5GB→2GB に大幅改善**（60% 削減）されたが、**実行後残留は 734MB で不変**。Firefox の「Minimize memory usage」強制 GC+CC 後も 7 個 × 50-62MB の文字列がそっくり残る（reachable な強参照）。
+
+memory-report.json の path 解析で保持 zone が `_generated_background_page.html` の js-zone と判明。sendNative の closure は v1.30.3 で修正済のため別経路が原因と推測。
+
+#### 仮説 D（本リリースで検証）
+`browser.runtime.onMessage.addListener(async (message) => {...})` の **`async` キーワード**により：
+- handler 関数は Promise を返すラッパー化
+- Firefox の message dispatcher は Promise 解決まで handler 関数を保持
+- 結果として handler frame（= 引数 message）が生存
+- `message.content`（WRITE_FILE の 50-62MB 文字列）も GC 阻害
+
+#### 対策
+WRITE_FILE 専用の**非-async handler を先頭に追加**し、async handler からは WRITE_FILE case を削除：
+
+```js
+// v1.30.4: WRITE_FILE 専用 非-async handler（message 引数を即解放）
+browser.runtime.onMessage.addListener((message) => {
+  if (message && message.type === "WRITE_FILE") {
+    return writeFile(message.path, message.content);
+  }
+  // 他は undefined return → 下記 async handler に委譲
+});
+
+// 既存 async handler から WRITE_FILE case を削除
+browser.runtime.onMessage.addListener(async (message) => {
+  switch (message.type) {
+    // ...（WRITE_FILE 以外）
+  }
+});
+```
+
+非-async handler は handler 関数が**同期的に抜ける**ため、`return writeFile(...)` した時点で handler frame が解放、引数 message への参照が即 GC 対象になる（仮説 D が正しければ）。
+
+Firefox の `browser.runtime.onMessage` 仕様では、複数 listener を登録した場合、各 listener が独立に呼び出されて truthy（Promise 含む）を return した listener の値が sender に返される。非-async handler が WRITE_FILE を拾った時点で Promise return するため、async handler は同じ message を受けても case 節に該当せず undefined return、重複処理にはならない。
+
+### 効果見込み（仮反映、実測検証は次回エクスポート後）
+- 実行後残留 **734MB → 0 〜 100MB**（仮説 D が正解なら）
+- 仮説 D が外れなら：別仮説（D の次）を追加調査する必要
+
+### 誤診連鎖の記録（07 §8 に追記予定）
+- 仮説 A（v1.30.2）：addLog slice dependent string → 効果不十分
+- 仮説 B：structured-clone-holder → 実測で 0MB、無関係
+- 仮説 C（v1.30.3）：sendNative listener closure → 実行中ピーク大幅削減、実行後残留は不変
+- **仮説 D（v1.30.4）**：onMessage async handler の暗黙 capture → 本リリースで検証中
+
+### Changed
+- `src/background/background.js`: onMessage listener を 2 つに分割、WRITE_FILE だけ非-async handler で処理
+- manifest.json: 1.30.3 → 1.30.4
+- **native/image_saver.py は変更なし**（version 1.11.1 据え置き）
+
+### 実装記録（設計書類）
+- `07_事故・地雷ペア事例.md §8`：仮説 A-D の誤診連鎖詳細
+- `08_データライフサイクル.md §2.4 Step 8`：「v1.30.4 で対応」にマーク更新
+- `memory/feedback_memory_debug.md §(a-2)`：async handler の暗黙 capture をチェック項目に
+
+---
+
 ## [1.30.3] - 2026-04-23
 
 ### Fixed — sendNative の Promise listener closure が payload 全体を capture する GC 阻害（GROUP-26-slice-2）

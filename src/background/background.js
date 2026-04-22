@@ -178,6 +178,24 @@ browser.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
 });
 
 // ----------------------------------------------------------------
+// WRITE_FILE 専用 handler（v1.30.4 GROUP-26-slice-3）
+// ----------------------------------------------------------------
+// 下記の async onMessage handler に WRITE_FILE case を置くと、
+// async 関数の仕様上 Promise 解決まで message 引数（= message.content の 50-62MB）が
+// 保持される。エクスポート時に chunk 数分だけ文字列が GC 阻害されるため、
+// WRITE_FILE だけ**非-async handler** に切り離して handler 関数は同期で抜けるようにする。
+// こうすることで Firefox の listener dispatcher が handler を呼び出した直後に
+// handler frame を解放、引数 message も即 GC 対象となる（仮説 D、07 §8）。
+// 他の handler は undefined を return するため、Firefox の runtime.onMessage 仕様上
+// 次の async handler に委譲される。
+browser.runtime.onMessage.addListener((message) => {
+  if (message && message.type === "WRITE_FILE") {
+    return writeFile(message.path, message.content);
+  }
+  // WRITE_FILE 以外は undefined を return → 下記の async handler に委譲
+});
+
+// ----------------------------------------------------------------
 // Content Script からのメッセージを受信
 // ----------------------------------------------------------------
 browser.runtime.onMessage.addListener(async (message) => {
@@ -197,8 +215,8 @@ browser.runtime.onMessage.addListener(async (message) => {
       return getLastSaveDir();
     case "MKDIR":
       return makeDir(message.path, message.contextPath);
-    case "WRITE_FILE":
-      return writeFile(message.path, message.content);
+    // v1.30.4 GROUP-26-slice-3: WRITE_FILE は上記の非-async handler で処理済み
+    // ここに case を残すと async 暗黙 capture が再発するため case 自体を削除
     // ---- タグ別保存先 ----
     case "GET_TAG_DESTINATIONS":
       return getTagDestinations();

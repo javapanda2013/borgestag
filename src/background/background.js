@@ -708,7 +708,7 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
 // 保存処理
 // ----------------------------------------------------------------
 async function handleSave(payload) {
-  const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・saveTagRecord用（サブタグ含む）
   const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
@@ -723,6 +723,11 @@ async function handleSave(payload) {
   });
 
   const fullPath = `${savePath}\\${effectiveFilename}`;
+
+  // v1.31.4 GROUP-28 mvdl：関連音声ファイル名（GIF と同じ basename + .webm 等）
+  const audioFilename = (associatedAudio && associatedAudio.dataUrl && associatedAudio.extension)
+    ? effectiveFilename.replace(/\.[^.]*$/, "") + "." + associatedAudio.extension
+    : null;
 
   addLog("INFO", `保存開始: ${filename}`, `→ ${savePath}`);
 
@@ -740,6 +745,25 @@ async function handleSave(payload) {
 
     addLog("INFO", `保存成功: ${fullPath}`);
     await browser.storage.local.set({ lastSaveDir: savePath });
+
+    // v1.31.4 GROUP-28 mvdl：関連音声ファイルを同フォルダに書き出す
+    if (audioFilename && associatedAudio && associatedAudio.dataUrl) {
+      const audioFullPath = `${savePath}\\${audioFilename}`;
+      try {
+        const audioRes = await sendNative({
+          cmd: "SAVE_IMAGE_BASE64",
+          dataUrl: associatedAudio.dataUrl,
+          savePath: audioFullPath,
+        });
+        if (audioRes.ok) {
+          addLog("INFO", `関連音声保存成功: ${audioFullPath}`);
+        } else {
+          addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "");
+        }
+      } catch (audioErr) {
+        addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message);
+      }
+    }
 
     if (allTags.length > 0) {
       await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
@@ -770,6 +794,10 @@ async function handleSave(payload) {
       thumbHeight:  effectiveThumbH,
       sessionId:    sessionId    || null,
       sessionIndex: sessionIndex || null,
+      // v1.31.4 GROUP-28 mvdl：関連音声メタ
+      audioFilename,
+      audioMimeType:    (associatedAudio && associatedAudio.mimeType) || null,
+      audioDurationSec: (associatedAudio && associatedAudio.durationSec) || null,
     });
 
     return { success: true };
@@ -2004,7 +2032,7 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 // ----------------------------------------------------------------
 
 async function handleSaveMulti(payload) {
-  const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex } = payload;
+  const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -2019,6 +2047,11 @@ async function handleSaveMulti(payload) {
     filenameIncludeSubtag: !!filenameIncludeSubtag,
     filenameIncludeAuthor: !!filenameIncludeAuthor,
   });
+
+  // v1.31.4 GROUP-28 mvdl：関連音声ファイル名（GIF と同じ basename + .webm 等）
+  const audioFilenameMulti = (associatedAudio && associatedAudio.dataUrl && associatedAudio.extension)
+    ? effectiveFilenameMulti.replace(/\.[^.]*$/, "") + "." + associatedAudio.extension
+    : null;
 
   addLog("INFO", `一括保存開始: ${effectiveFilenameMulti}`, `${savePaths.length} 件`);
 
@@ -2057,6 +2090,26 @@ async function handleSaveMulti(payload) {
       if (res.thumbError && !pyThumbData) {
         addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
       }
+
+      // v1.31.4 GROUP-28 mvdl：関連音声ファイルをこの保存先にも書き出す
+      if (audioFilenameMulti && associatedAudio && associatedAudio.dataUrl) {
+        const audioFullPath = `${savePath}\\${audioFilenameMulti}`;
+        try {
+          const audioRes = await sendNative({
+            cmd: "SAVE_IMAGE_BASE64",
+            dataUrl: associatedAudio.dataUrl,
+            savePath: audioFullPath,
+          });
+          if (audioRes.ok) {
+            addLog("INFO", `関連音声保存成功: ${audioFullPath}`);
+          } else {
+            addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "");
+          }
+        } catch (audioErr) {
+          addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message);
+        }
+      }
+
       results.push({ savePath, ok: true });
     } catch (err) {
       addLog("ERROR", `一括保存失敗: ${fullPath}`, err.message);
@@ -2079,6 +2132,10 @@ async function handleSaveMulti(payload) {
       thumbHeight:  effectiveThumbH,
       sessionId:    sessionId    || null,
       sessionIndex: sessionIndex || null,
+      // v1.31.4 GROUP-28 mvdl：関連音声メタ（ファイル名・MIME・秒数）
+      audioFilename:    audioFilenameMulti,
+      audioMimeType:    (associatedAudio && associatedAudio.mimeType) || null,
+      audioDurationSec: (associatedAudio && associatedAudio.durationSec) || null,
     });
   }
 
@@ -2129,12 +2186,12 @@ async function getStorageSize() {
 }
 
 /** 単一保存先の履歴登録 */
-async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
-  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex });
+async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec }) {
+  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec });
 }
 
 /** 複数保存先対応の履歴登録 */
-async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex }) {
+async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec }) {
   const stored  = await browser.storage.local.get("saveHistory");
   const history = stored.saveHistory || [];
 
@@ -2220,6 +2277,10 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     savedAt:      new Date().toISOString(),
     sessionId:    sessionId     || null,
     sessionIndex: sessionIndex  || null,
+    // v1.31.4 GROUP-28 mvdl：関連音声メタ（無ければ null）
+    audioFilename:    audioFilename    || null,
+    audioMimeType:    audioMimeType    || null,
+    audioDurationSec: audioDurationSec || null,
   });
 
   for (const a of (Array.isArray(authors) ? authors.filter(Boolean) : [])) {

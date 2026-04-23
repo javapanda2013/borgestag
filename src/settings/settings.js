@@ -3421,6 +3421,113 @@ function _updateHistCount() {
   _currentFilteredHistory = isFiltering ? filtered : null;
 }
 
+// ================================================================
+// v1.31.4 GROUP-28 mvdl：保存履歴カードの音声再生制御
+// ================================================================
+// - entry.id をキーに <audio> / Blob URL をキャッシュ（複数回再生の高速化）
+// - 同時再生は 1 エントリのみ（別アイコンをクリックしたら前の再生は停止）
+// - クリックで toggle（停止中 → 再生、再生中 → 停止）
+// - アイコン状態は data-muted 属性で切替（CSS 側で背景色変更）
+// ================================================================
+const _histAudioCache = new Map(); // entry.id → {audio: HTMLAudioElement, blobUrl: string}
+let _histAudioPlayingId = null;
+
+function _histAudioStopCurrent() {
+  if (!_histAudioPlayingId) return;
+  const cached = _histAudioCache.get(_histAudioPlayingId);
+  if (cached && cached.audio) {
+    try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+  }
+  // アイコン表示を🔇に戻す
+  document.querySelectorAll(`.hist-card[data-entry-id="${_histAudioPlayingId}"] .hist-card-audio-icon`).forEach(btn => {
+    btn.dataset.muted = "1";
+    btn.textContent = "🔇";
+  });
+  _histAudioPlayingId = null;
+}
+
+async function _toggleHistAudio(entry, btn) {
+  // 既に同エントリが再生中なら停止
+  if (_histAudioPlayingId === entry.id) {
+    _histAudioStopCurrent();
+    return;
+  }
+  // 別エントリが再生中なら先に停止
+  _histAudioStopCurrent();
+
+  // 必要データ
+  const paths = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
+  const primary = paths[0];
+  if (!primary || !entry.audioFilename) {
+    log(`⚠ 音声ファイルのパス情報がありません`, "warn");
+    return;
+  }
+  const audioPath = `${primary.replace(/[\\/]+$/, "")}\\${entry.audioFilename}`;
+
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "⏳";
+
+  try {
+    let cached = _histAudioCache.get(entry.id);
+    if (!cached) {
+      const res = await browser.runtime.sendMessage({
+        type: "FETCH_FILE_AS_DATAURL",
+        path: audioPath,
+      });
+      if (!res || !res.ok) {
+        log(`⚠ 音声読込失敗: ${res?.error || "不明"}`, "warn");
+        btn.disabled = false;
+        btn.textContent = originalText;
+        return;
+      }
+      let blob;
+      if (res.dataUrl) {
+        // dataURL → Blob
+        const [, b64] = res.dataUrl.split(",");
+        const bin = atob(b64);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        blob = new Blob([buf], { type: entry.audioMimeType || "audio/webm" });
+      } else if (Array.isArray(res.chunksB64)) {
+        // chunk 配列 → Blob
+        const arrays = [];
+        for (const b64 of res.chunksB64) {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          arrays.push(arr);
+        }
+        blob = new Blob(arrays, { type: res.mime || entry.audioMimeType || "audio/webm" });
+      } else {
+        log(`⚠ 音声レスポンス形式が不明です`, "warn");
+        btn.disabled = false;
+        btn.textContent = originalText;
+        return;
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      const audio = new Audio(blobUrl);
+      audio.loop = true; // GIF は自動ループなのでそれに合わせる
+      audio.addEventListener("ended", () => {
+        // loop=true なので基本 ended は発火しないが保険で
+        if (_histAudioPlayingId === entry.id) _histAudioStopCurrent();
+      });
+      cached = { audio, blobUrl };
+      _histAudioCache.set(entry.id, cached);
+    }
+
+    await cached.audio.play();
+    _histAudioPlayingId = entry.id;
+    btn.dataset.muted = "0";
+    btn.textContent = "🔊";
+  } catch (err) {
+    log(`⚠ 音声再生エラー: ${err.message}`, "warn");
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function _buildHistCardInner(card, entry, onThumbClick) {
   card.dataset.entryId = entry.id;
   const paths   = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
@@ -3433,7 +3540,16 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     `<span class="hist-card-author" data-author="${escHtml(a)}">✏️ ${escHtml(a)}</span>`
   ).join("");
 
-  let thumbHtml = `<div class="hist-card-thumb-placeholder">🖼</div>`;
+  // v1.31.4 GROUP-28 mvdl：関連音声あり時は wrap 内にスピーカーアイコンを重ねる
+  const audioIconHtml = entry.audioFilename
+    ? `<button class="hist-card-audio-icon" data-muted="1" title="音声再生: ${escHtml(entry.audioFilename)}">🔇</button>`
+    : "";
+  let thumbHtml = `
+    <div class="hist-card-thumb-wrap">
+      <div class="hist-card-thumb-placeholder">🖼</div>
+      ${audioIconHtml}
+    </div>
+  `;
   if (entry.thumbId) {
     browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
       .then(r => {
@@ -3460,6 +3576,19 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           }
         }
       }).catch(() => {});
+  }
+  // v1.31.4 GROUP-28 mvdl：音声アイコンのクリックハンドラ
+  if (entry.audioFilename) {
+    setTimeout(() => {
+      const audioBtn = card.querySelector(".hist-card-audio-icon");
+      if (audioBtn && !audioBtn.dataset.handlerAttached) {
+        audioBtn.dataset.handlerAttached = "1";
+        audioBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          _toggleHistAudio(entry, audioBtn);
+        });
+      }
+    }, 0);
   }
 
   const pageUrlHtml = entry.pageUrl

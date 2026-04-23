@@ -36,6 +36,9 @@ const PHASE1_PARAMS = {
   MAX_WIDTH: 480,
   SAMPLE_INTERVAL: 10,
   NUM_WORKERS: 2,
+  // Phase 1.5 GROUP-28 mvdl：音声録音パラメータ
+  AUDIO_MIME: "audio/webm; codecs=opus",
+  AUDIO_EXT: "webm",
 };
 
 // ================================================================
@@ -73,6 +76,113 @@ function computeGifSize(origWidth, origHeight) {
     w: Math.round(targetW),
     h: Math.max(1, Math.round(origHeight * scale)),
   };
+}
+
+// ================================================================
+// Phase 1.5 GROUP-28 mvdl：音声録音（MediaRecorder + captureStream）
+// ================================================================
+/**
+ * 動画 URL から指定秒数の音声を MediaRecorder で録音して Blob を返す。
+ * 成功時：Blob（audio/webm）
+ * 失敗時：null（audio track なし / MIME 非サポート / CORS NG / 再生失敗等）
+ */
+async function recordAudio(videoUrl, durationSec) {
+  return new Promise((resolve) => {
+    const vid = document.createElement("video");
+    vid.src = videoUrl;
+    vid.crossOrigin = "anonymous";
+    vid.muted = false;
+    vid.playsInline = true;
+    // 画面外に配置（音声キャプチャは必要だが映像は見せない）
+    vid.style.position = "fixed";
+    vid.style.left = "-9999px";
+    vid.style.top = "0";
+    vid.style.width = "1px";
+    vid.style.height = "1px";
+    document.body.appendChild(vid);
+
+    let recorder = null;
+    let resolved = false;
+    const cleanup = () => {
+      try { vid.pause(); } catch (_) {}
+      try { vid.remove(); } catch (_) {}
+    };
+    const resolveOnce = (value) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onReady = async () => {
+      try {
+        if (typeof vid.captureStream !== "function") {
+          console.warn("[video_convert] captureStream not supported");
+          return resolveOnce(null);
+        }
+        const stream = vid.captureStream();
+        const audioTracks = stream.getAudioTracks();
+        if (!audioTracks || audioTracks.length === 0) {
+          console.info("[video_convert] no audio track");
+          return resolveOnce(null);
+        }
+
+        if (!MediaRecorder.isTypeSupported(PHASE1_PARAMS.AUDIO_MIME)) {
+          console.warn("[video_convert] MIME not supported:", PHASE1_PARAMS.AUDIO_MIME);
+          return resolveOnce(null);
+        }
+
+        const audioStream = new MediaStream(audioTracks);
+        recorder = new MediaRecorder(audioStream, { mimeType: PHASE1_PARAMS.AUDIO_MIME });
+        const chunks = [];
+        recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: "audio/webm" });
+          resolveOnce(blob);
+        };
+        recorder.onerror = (e) => {
+          console.error("[video_convert] recorder error:", e);
+          resolveOnce(null);
+        };
+
+        recorder.start();
+        try { vid.currentTime = 0; } catch (_) {}
+        await vid.play();
+        setTimeout(() => {
+          try {
+            if (recorder && recorder.state === "recording") recorder.stop();
+          } catch (_) {}
+        }, durationSec * 1000);
+      } catch (err) {
+        console.error("[video_convert] audio recording setup failed:", err);
+        resolveOnce(null);
+      }
+    };
+
+    vid.oncanplaythrough = onReady;
+    vid.onerror = () => {
+      console.warn("[video_convert] video load failed for audio");
+      resolveOnce(null);
+    };
+    // 読込タイムアウト
+    setTimeout(() => {
+      if (!resolved) {
+        console.warn("[video_convert] audio recording load timeout");
+        resolveOnce(null);
+      }
+    }, 10_000);
+
+    try { vid.load(); } catch (_) {}
+  });
+}
+
+async function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("FileReader error"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 // ================================================================
@@ -144,7 +254,7 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
-  log("動画を読込中…");
+  log("動画＋音声を読込中…");
   updateProgress(0);
 
   const size = computeGifSize(origWidth, origHeight);
@@ -153,6 +263,12 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   const startTime = Date.now();
   let lastProgressAt = Date.now();
   let reached100 = false;
+
+  // Phase 1.5 GROUP-28 mvdl：音声録音を並列開始
+  // gifshot が動画を内部的に処理する傍で、別 video 要素で audio を MediaRecorder 録音。
+  // 両方完了を待ってから保存モーダルへ受け渡す。
+  // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
+  const audioPromise = recordAudio(videoUrl, PHASE1_PARAMS.DURATION_SEC);
 
   // v1.31.1 診断：100% に達してからのタイムアウト（GIF エンコードが無限に待たないよう）。
   // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
@@ -203,8 +319,31 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const approxSize = (obj.image.length * 0.75 / 1024 / 1024).toFixed(1);
-    log(`✅ 変換完了（${elapsed} 秒、約 ${approxSize} MB）。保存モーダルを起動しています…`, "success");
+
+    // Phase 1.5 GROUP-28 mvdl：音声録音完了を待つ
+    log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。音声録音完了待ち…`, "success");
     updateProgress(1);
+
+    let associatedAudio = null;
+    try {
+      const audioBlob = await audioPromise;
+      if (audioBlob && audioBlob.size > 0) {
+        const audioDataUrl = await blobToDataUrl(audioBlob);
+        const audioSizeMB = (audioBlob.size / 1024 / 1024).toFixed(2);
+        associatedAudio = {
+          dataUrl: audioDataUrl,
+          mimeType: "audio/webm",
+          extension: PHASE1_PARAMS.AUDIO_EXT,
+          durationSec: PHASE1_PARAMS.DURATION_SEC,
+        };
+        log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB + 音声 ${audioSizeMB} MB）。保存モーダルを起動しています…`, "success");
+      } else {
+        log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声なし）。保存モーダルを起動しています…`, "success");
+      }
+    } catch (audioErr) {
+      console.warn("[video_convert] audio promise rejected:", audioErr);
+      log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声取得失敗）。保存モーダルを起動しています…`, "success");
+    }
 
     try {
       // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
@@ -227,12 +366,13 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
         suggestedFilename = `video-${ts}.gif`;
       }
 
-      // 既存の保存フロー起動：_pendingModal に GIF dataURL + 推奨ファイル名をセットして OPEN_MODAL_WINDOW
+      // 既存の保存フロー起動：_pendingModal に GIF dataURL + 推奨ファイル名 + 関連音声をセットして OPEN_MODAL_WINDOW
       await browser.storage.local.set({
         _pendingModal: {
           imageUrl: obj.image,
           pageUrl: pageUrl || "",
           suggestedFilename, // v1.31.2：modal.js 側で優先採用
+          associatedAudio,   // v1.31.4 Phase 1.5：null or {dataUrl, mimeType, extension, durationSec}
         },
       });
       await browser.runtime.sendMessage({

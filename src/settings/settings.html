@@ -485,6 +485,24 @@
       width: 100%; height: 100%; display: flex; align-items: center;
       justify-content: center; font-size: 40px; background: #f0f2f5; color: #ccc;
     }
+    /* v1.31.4 GROUP-28 mvdl：動画→GIF 変換エントリ用の音声アイコン */
+    .hist-card-thumb-wrap {
+      width: 100%; height: 100%; position: relative;
+    }
+    .hist-card-audio-icon {
+      position: absolute; left: 6px; bottom: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 2;
+      transition: background 0.15s;
+    }
+    .hist-card-audio-icon:hover { background: rgba(40,90,180,0.85); }
+    .hist-card-audio-icon[data-muted="0"] { background: rgba(40,120,60,0.85); }
     .hist-card-overlay {
       position: absolute; inset: 0;
       background: linear-gradient(transparent 30%, rgba(0,0,0,0.78));

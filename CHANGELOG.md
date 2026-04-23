@@ -5,6 +5,79 @@
 
 ---
 
+## [1.31.4] - 2026-04-24
+
+### Added — 動画→GIF 変換時に音声も保存（GROUP-28 mvdl、Phase 1.5）
+
+#### 要望（mvdl1 〜 mvdl3）
+- **mvdl1**：動画を変換する際に、音声も同じ秒数で取得して保存履歴に紐付け
+- **mvdl2**：保存履歴でサムネイルにスピーカーアイコンを常時表示、クリックで音声再生・停止
+- **mvdl3**：プレビュー時に音声を再生
+
+#### 設計方針（2026-04-24 ユーザー確認済み）
+- Q28-1：**(a) GIF + 別音声ファイル**。アニメは GIF 形式で扱うシンプル設計を維持
+- Q28-2：**音声は `.webm` (Opus codec)**（Firefox MediaRecorder で確実に動作、推奨形式）
+- Q28-3：音声秒数は **GIF 変換秒数と同期**（Phase 1 固定 20 秒、将来設定値可変化で追随）
+- Q28-4：サムネに**常時スピーカーアイコン表示**、クリックで再生トグル
+- Q28-5：Phase 1.5 として本セッションで即実装
+
+#### 実装
+**video_convert.js**（音声録音）：
+- `MediaRecorder` + `video.captureStream()` で音声録音（`audio/webm; codecs=opus`）
+- gifshot（GIF フレーム抽出）と並列実行、両方完了を待って保存モーダルへ受け渡し
+- 音声トラックなし / CORS NG / MIME 非サポート時は null で GIF のみ保存にフォールバック
+- 10 秒読込タイムアウト、エラー時は log 出力
+
+**modal.js**（音声中継）：
+- `_pendingModal.associatedAudio` を受け取り、`EXECUTE_SAVE` / `EXECUTE_SAVE_MULTI` の payload に中継
+- 既存保存 UI は無変更
+
+**background.js**（ファイル保存 + 履歴記録）：
+- `handleSave` / `handleSaveMulti` に `associatedAudio` 処理を追加
+- GIF 保存成功後に同フォルダへ `.webm` を `SAVE_IMAGE_BASE64` 経由で保存
+  - Native Python はファイル書込自体は正常完走、thumbnail 生成は PIL 失敗で thumbError 返却（警告のみ）
+- `saveHistory` エントリに `audioFilename` / `audioMimeType` / `audioDurationSec` 追加
+
+**settings.js**（UI + 再生）：
+- `_buildHistCardInner`：entry.audioFilename 有りの場合、サムネ左下に🔇アイコンを常時表示
+- `_toggleHistAudio` ヘルパー：FETCH_FILE_AS_DATAURL で音声ファイル取得 → Blob URL → HTMLAudioElement で再生
+- 同時再生は 1 エントリのみ（別アイコンをクリックすれば前の再生は停止）
+- 音声は loop 有効（GIF の自動ループに同期）
+- Blob URL / Audio インスタンスをキャッシュ（リピート再生の高速化）
+
+**settings.html**（CSS）：
+- `.hist-card-thumb-wrap`（サムネラッパー）
+- `.hist-card-audio-icon`（左下 24×24 丸アイコン、hover で青、再生中は data-muted="0" で緑背景）
+
+#### saveHistory スキーマ変更
+```js
+{
+  ...従来フィールド,
+  audioFilename: "video-xxx.webm",   // 音声ファイル名（同フォルダ）、無ければ null
+  audioMimeType: "audio/webm",
+  audioDurationSec: 20,
+}
+```
+
+#### Phase 1.5 既知制約（Phase 2+ で対応）
+- エクスポート / インポートの音声ファイル扱い（現状はファイル名のみ記録、実ファイルは含まれず）
+- 履歴絞り込みで「音声あり」フィルタ未対応
+- 編集パネルで音声の再録音・削除 UI 未対応
+- GIF プレビュー（拡大表示）との音声同期（現状は履歴カードの音声アイコンのみで再生、Lightbox プレビューは無音）
+- viewer.html での音声再生は未対応
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 動画→GIF 変換後、保存フォルダに GIF + .webm の 2 ファイルが保存される
+- 保存履歴タブで動画変換エントリに🔇アイコンが表示される
+- アイコンクリックで音声再生開始、🔊に変化（緑背景）
+- 再度クリックで停止、🔇に戻る
+- 別エントリのアイコンをクリックすると前の再生は自動停止
+- 音声なし動画（無音 mp4）では🔇アイコンが出ない（null の場合 UI 非表示）
+- 既存画像保存フローへの影響なし（saveHistory の他フィールドは不変）
+
+---
+
 ## [1.31.3] - 2026-04-24
 
 ### Fixed — 動画→GIF 変換後のサムネアニメーション維持（GROUP-15-impl-A-phase1 hotfix 3rd）

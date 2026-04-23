@@ -87,7 +87,12 @@ async function initModal() {
   // 画像情報を storage から取得
   const { _pendingModal } = await browser.storage.local.get("_pendingModal");
   if (!_pendingModal) { window.close(); return; }
-  const { imageUrl, pageUrl, suggestedFilename } = _pendingModal;
+  const { imageUrl, pageUrl, suggestedFilename, associatedAudio } = _pendingModal;
+  // v1.31.4 GROUP-28 mvdl：動画→GIF 変換で音声を同時取得した場合、
+  // associatedAudio = {dataUrl, mimeType, extension, durationSec} を受け取る。
+  // EXECUTE_SAVE_MULTI の payload に中継して保存時にファイル保存＋履歴紐付け。
+  // 音声なし時は null。
+  window.__pendingAssociatedAudio = associatedAudio || null;
   // 使用済みフラグをクリア（別ウィンドウ開くときの再初期化用に残す）
 
   // 必要なデータを並列取得
@@ -4510,6 +4515,8 @@ function setupModalEvents(
         skipTagRecord: destMode === "suggest",
         sessionId:    csSession?.id    || null,
         sessionIndex: csSession ? (csSession.count + 1) : null,
+        // v1.31.4 GROUP-28 mvdl：動画→GIF 変換由来の音声 data URL を中継
+        associatedAudio: window.__pendingAssociatedAudio || null,
       },
     });
 
@@ -4610,6 +4617,8 @@ function setupModalEvents(
         skipTagRecord: destMode === "suggest",
         sessionId:    csSession?.id    || null,
         sessionIndex: csSession ? (csSession.count + 1) : null,
+        // v1.31.4 GROUP-28 mvdl：動画→GIF 変換由来の音声 data URL を中継
+        associatedAudio: window.__pendingAssociatedAudio || null,
       },
     });
 

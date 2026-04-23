@@ -5,6 +5,54 @@
 
 ---
 
+## [1.30.9] - 2026-04-23
+
+### Fixed — v1.30.8 の IDB トランザクション寿命エラーを hotfix（GROUP-26-mem-2 hotfix）
+
+#### 症状
+v1.30.8 でエクスポート実行したところ、最初の thumbs-001.json 取得時点でエラー：
+
+```
+❌ thumbs-001.json 取得失敗: A request was placed against a transaction which is currently not active, or which is finished.
+```
+
+history-001.json 書出は成功、thumbs 側だけ失敗する。
+
+#### 原因
+`getIdbThumbsByIds` で各 id ごとに `store.get()` → `await rec.blob.arrayBuffer()` の順で逐次処理していたため、**`blob.arrayBuffer()` の await で event loop に制御が戻り、IDB トランザクションが自動 commit されて closed**。次 iteration の `store.get(id)` で「transaction not active」エラー発生。
+
+IDB の仕様：読取トランザクションは「アクティブな request が 1 つも pending していない状態で event loop に戻る」と即 commit される。`blob.arrayBuffer()` の await でこの条件を満たすため連続 get ができない。
+
+#### 対策（既存 exportIdbThumbs と同じ 2 段階方式に揃える）
+
+**Step 1**：全 `store.get(id)` 要求を**同一トランザクション内で一括発行**してレコードを収集（この間 await しない）
+**Step 2**：トランザクションが閉じた後に blob → base64 変換の await に入る
+
+```js
+// Step 1: トランザクション内で全 get を発行、await せず results 配列に蓄積
+const records = await new Promise((resolve, reject) => {
+  const tx = db.transaction(IDB_STORE, "readonly");
+  const store = tx.objectStore(IDB_STORE);
+  const results = new Array(validIds.length);
+  let pending = validIds.length;
+  for (let i = 0; i < validIds.length; i++) {
+    const req = store.get(validIds[i]);
+    req.onsuccess = (e) => { results[i] = e.target.result; if (--pending === 0) resolve(results); };
+    req.onerror = (e) => reject(e.target.error);
+  }
+});
+// Step 2: トランザクション閉了後に base64 変換
+for (const rec of records) { ... await rec.blob.arrayBuffer() ... }
+```
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- エクスポート正常完走（thumbs-001 以降もすべて書出成功）
+- 実行中ピーク測定（v1.30.8 同等の目標 1-2GB）
+- 実行後残留測定（v1.30.7 同等の 42MB 前後）
+
+---
+
 ## [1.30.8] - 2026-04-23
 
 ### Changed — エクスポート実行中ピーク削減（GROUP-26-mem-2 Phase A'）

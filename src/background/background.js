@@ -1508,25 +1508,50 @@ async function exportIdbThumbs() {
 
 /**
  * 指定された ID 配列に対応する IDB サムネイルだけを Base64 DataURL 化して返す。
- * GROUP-26-mem-2 (v1.31.0 Phase A'): エクスポート実行中ピーク削減のため、
+ * GROUP-26-mem-2 (v1.30.8 Phase A'): エクスポート実行中ピーク削減のため、
  * 全サムネ一括取得 (`EXPORT_IDB_THUMBS`, 〜350MB) を避けて chunk 単位で都度取得する経路。
  * 想定呼出単位は CHUNK_SIZE = 500 件相当（応答 〜50MB）。
+ *
+ * v1.30.9 hotfix：IDB トランザクション寿命対策
+ * - blob.arrayBuffer() の await は event loop へ戻るためトランザクションが closed
+ * - 各 store.get() を await で順次処理すると 2 件目以降が「transaction not active」で失敗
+ * - 既存 exportIdbThumbs と同じく「全 get() を同一トランザクション内で一括発行
+ *   → 全レコード収集後に blob→base64 変換の await に入る」2 段階方式に変更
  */
 async function getIdbThumbsByIds(ids) {
   if (!Array.isArray(ids) || ids.length === 0) return { ok: true, thumbs: [] };
   try {
     const db = await openThumbDB();
-    const tx    = db.transaction(IDB_STORE, "readonly");
-    const store = tx.objectStore(IDB_STORE);
+    const validIds = ids.filter(Boolean);
+    if (validIds.length === 0) return { ok: true, thumbs: [] };
 
+    // Step 1：全 store.get() を同一トランザクション内で発行してレコードを収集
+    //   （この間 await しない、event loop に戻さない）
+    const records = await new Promise((resolve, reject) => {
+      const tx    = db.transaction(IDB_STORE, "readonly");
+      const store = tx.objectStore(IDB_STORE);
+      const results = new Array(validIds.length);
+      let pending = validIds.length;
+      let errored = false;
+      for (let i = 0; i < validIds.length; i++) {
+        const idx = i;
+        const req = store.get(validIds[i]);
+        req.onsuccess = (e) => {
+          if (errored) return;
+          results[idx] = e.target.result || null;
+          if (--pending === 0) resolve(results);
+        };
+        req.onerror = (e) => {
+          if (errored) return;
+          errored = true;
+          reject(e.target.error);
+        };
+      }
+    });
+
+    // Step 2：トランザクションは閉じた状態で blob → base64 変換（await 安全）
     const thumbs = [];
-    for (const id of ids) {
-      if (!id) continue;
-      const rec = await new Promise((resolve, reject) => {
-        const req = store.get(id);
-        req.onsuccess = (e) => resolve(e.target.result || null);
-        req.onerror   = (e) => reject(e.target.error);
-      });
+    for (const rec of records) {
       if (!rec || !rec.blob) continue;
       const ab    = await rec.blob.arrayBuffer();
       const bytes = new Uint8Array(ab);

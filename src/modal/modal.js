@@ -22,6 +22,10 @@ browser.runtime.onMessage.addListener((message) => {
   if (message.type === "MODAL_NEW_IMAGE") {
     initModal();
   }
+  // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の再初期化通知
+  if (message.type === "MODAL_NEW_FROM_CONVERSION") {
+    initModal();
+  }
 });
 
 // ----------------------------------------------------------------
@@ -87,7 +91,24 @@ async function initModal() {
   // 画像情報を storage から取得
   const { _pendingModal } = await browser.storage.local.get("_pendingModal");
   if (!_pendingModal) { window.close(); return; }
-  const { imageUrl, pageUrl, suggestedFilename, associatedAudio } = _pendingModal;
+
+  // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の場合は
+  // background の _pendingConversionStash から受け取る（storage.local broadcast 回避）。
+  let imageUrl, pageUrl, suggestedFilename, associatedAudio;
+  if (_pendingModal.__fromConversion) {
+    const claim = await browser.runtime.sendMessage({ type: "CLAIM_CONVERSION_PAYLOAD" });
+    if (!claim || !claim.ok || !claim.payload) {
+      console.error("[modal] __fromConversion flag but no payload stashed");
+      window.close();
+      return;
+    }
+    ({ imageUrl, pageUrl, suggestedFilename, associatedAudio } = claim.payload);
+  } else {
+    // 通常経路：従来通り storage.local._pendingModal から受け取る
+    ({ imageUrl, pageUrl, suggestedFilename } = _pendingModal);
+    associatedAudio = null;
+  }
+
   // v1.31.4 GROUP-28 mvdl：動画→GIF 変換で音声を同時取得した場合、
   // associatedAudio = {dataUrl, mimeType, extension, durationSec} を受け取る。
   // EXECUTE_SAVE_MULTI の payload に中継して保存時にファイル保存＋履歴紐付け。

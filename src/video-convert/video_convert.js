@@ -82,48 +82,53 @@ function computeGifSize(origWidth, origHeight) {
 // Phase 1.5 GROUP-28 mvdl：音声録音（MediaRecorder + captureStream）
 // ================================================================
 /**
- * 動画 URL から指定秒数の音声を MediaRecorder で録音して Blob を返す。
+ * 既存の preview video 要素から音声を MediaRecorder で録音して Blob を返す。
  * 成功時：Blob（audio/webm）
- * 失敗時：null（audio track なし / MIME 非サポート / CORS NG / 再生失敗等）
+ * 失敗時：null（audio track なし / MIME 非サポート / captureStream 非対応 / 再生失敗等）
+ *
+ * v1.31.5 修正：2 つの <video> を同時ロードするとタブクラッシュの原因になるため、
+ * 既存プレビュー要素を流用する方式に変更。volume=0 でユーザーに無音、muted=false で
+ * captureStream に audio track が入る状態を保つ。
  */
-async function recordAudio(videoUrl, durationSec) {
+async function recordAudio(previewVideo, durationSec) {
   return new Promise((resolve) => {
-    const vid = document.createElement("video");
-    vid.src = videoUrl;
-    vid.crossOrigin = "anonymous";
-    vid.muted = false;
-    vid.playsInline = true;
-    // 画面外に配置（音声キャプチャは必要だが映像は見せない）
-    vid.style.position = "fixed";
-    vid.style.left = "-9999px";
-    vid.style.top = "0";
-    vid.style.width = "1px";
-    vid.style.height = "1px";
-    document.body.appendChild(vid);
+    if (!previewVideo) {
+      console.warn("[video_convert] no preview video element");
+      return resolve(null);
+    }
+    if (typeof previewVideo.captureStream !== "function") {
+      console.warn("[video_convert] captureStream not supported");
+      return resolve(null);
+    }
 
     let recorder = null;
     let resolved = false;
-    const cleanup = () => {
-      try { vid.pause(); } catch (_) {}
-      try { vid.remove(); } catch (_) {}
-    };
+    const originalMuted  = previewVideo.muted;
+    const originalVolume = previewVideo.volume;
+    const originalTime   = previewVideo.currentTime;
+
     const resolveOnce = (value) => {
       if (resolved) return;
       resolved = true;
-      cleanup();
+      try { previewVideo.pause(); } catch (_) {}
+      try { previewVideo.muted  = originalMuted; } catch (_) {}
+      try { previewVideo.volume = originalVolume; } catch (_) {}
+      try { previewVideo.currentTime = originalTime; } catch (_) {}
       resolve(value);
     };
 
-    const onReady = async () => {
+    const startRecording = async () => {
       try {
-        if (typeof vid.captureStream !== "function") {
-          console.warn("[video_convert] captureStream not supported");
-          return resolveOnce(null);
-        }
-        const stream = vid.captureStream();
+        // 録音のために audio track を有効化。ユーザーには無音（volume=0）。
+        // muted=true だと captureStream で audio track が消えるブラウザ挙動があるため
+        // muted=false + volume=0 の組合せにする。
+        previewVideo.muted = false;
+        previewVideo.volume = 0;
+
+        const stream = previewVideo.captureStream();
         const audioTracks = stream.getAudioTracks();
         if (!audioTracks || audioTracks.length === 0) {
-          console.info("[video_convert] no audio track");
+          console.info("[video_convert] no audio track in preview stream");
           return resolveOnce(null);
         }
 
@@ -146,8 +151,8 @@ async function recordAudio(videoUrl, durationSec) {
         };
 
         recorder.start();
-        try { vid.currentTime = 0; } catch (_) {}
-        await vid.play();
+        try { previewVideo.currentTime = 0; } catch (_) {}
+        await previewVideo.play();
         setTimeout(() => {
           try {
             if (recorder && recorder.state === "recording") recorder.stop();
@@ -159,20 +164,24 @@ async function recordAudio(videoUrl, durationSec) {
       }
     };
 
-    vid.oncanplaythrough = onReady;
-    vid.onerror = () => {
-      console.warn("[video_convert] video load failed for audio");
-      resolveOnce(null);
-    };
-    // 読込タイムアウト
-    setTimeout(() => {
-      if (!resolved) {
-        console.warn("[video_convert] audio recording load timeout");
-        resolveOnce(null);
-      }
-    }, 10_000);
-
-    try { vid.load(); } catch (_) {}
+    // プレビュー要素は既にロード中／済みのはず。readyState で判定。
+    // HAVE_FUTURE_DATA (3) 以上なら即開始、未満なら canplay を待つ。
+    if (previewVideo.readyState >= 3) {
+      startRecording();
+    } else {
+      const onCanPlay = () => {
+        previewVideo.removeEventListener("canplay", onCanPlay);
+        startRecording();
+      };
+      previewVideo.addEventListener("canplay", onCanPlay);
+      setTimeout(() => {
+        if (!resolved) {
+          previewVideo.removeEventListener("canplay", onCanPlay);
+          console.warn("[video_convert] preview video not ready in 15s");
+          resolveOnce(null);
+        }
+      }, 15_000);
+    }
   });
 }
 
@@ -265,10 +274,11 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   let reached100 = false;
 
   // Phase 1.5 GROUP-28 mvdl：音声録音を並列開始
-  // gifshot が動画を内部的に処理する傍で、別 video 要素で audio を MediaRecorder 録音。
-  // 両方完了を待ってから保存モーダルへ受け渡す。
+  // gifshot は独自 video を内部生成するが、録音は既存 preview video を流用する。
+  // v1.31.5 修正：同一 URL を 2 要素で同時ロードするとタブクラッシュしたため統合。
   // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
-  const audioPromise = recordAudio(videoUrl, PHASE1_PARAMS.DURATION_SEC);
+  const previewVideo = document.getElementById("preview");
+  const audioPromise = recordAudio(previewVideo, PHASE1_PARAMS.DURATION_SEC);
 
   // v1.31.1 診断：100% に達してからのタイムアウト（GIF エンコードが無限に待たないよう）。
   // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
@@ -366,22 +376,21 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
         suggestedFilename = `video-${ts}.gif`;
       }
 
-      // 既存の保存フロー起動：_pendingModal に GIF dataURL + 推奨ファイル名 + 関連音声をセットして OPEN_MODAL_WINDOW
-      await browser.storage.local.set({
-        _pendingModal: {
-          imageUrl: obj.image,
-          pageUrl: pageUrl || "",
-          suggestedFilename, // v1.31.2：modal.js 側で優先採用
-          associatedAudio,   // v1.31.4 Phase 1.5：null or {dataUrl, mimeType, extension, durationSec}
-        },
-      });
+      // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload（imageUrl 10MB + audio 5MB）を
+      // storage.local._pendingModal に入れると Firefox の onChanged broadcast で
+      // 全 extension context にクローンされ 8GB 級メモリ膨張でタブクラッシュしていた。
+      // → background.js のメモリに stash し、_pendingModal はフラグだけにする。
       await browser.runtime.sendMessage({
-        type: "OPEN_MODAL_WINDOW",
+        type: "STASH_CONVERSION_PAYLOAD",
         imageUrl: obj.image,
         pageUrl: pageUrl || "",
+        suggestedFilename,
+        associatedAudio,
       });
+      await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
       // 受領データクリア（次回衝突防止）
       await browser.storage.local.remove("_pendingVideoConvert");
+      // v1.31.5：_pendingModal は background 側で既に __fromConversion フラグでセット済。
       // 自ウィンドウを閉じる（少し待って保存モーダル起動を先に）
       setTimeout(() => window.close(), 500);
     } catch (err) {

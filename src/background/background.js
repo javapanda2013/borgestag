@@ -116,6 +116,23 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 // ----------------------------------------------------------------
 let modalWindowId = null;
 
+// ----------------------------------------------------------------
+// v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換の payload を
+// storage.local を経由せず background メモリで受渡して過剰な broadcast を回避
+// ----------------------------------------------------------------
+// 背景：v1.31.4 で _pendingModal に imageUrl (10MB dataURL) + associatedAudio
+// (5MB dataURL) を入れたところ、Firefox の storage.local の onChanged が
+// 全 extension context へ broadcast して ~500MB 級の不要 clone を発生、
+// WebExtensions プロセスが 8GB に膨れてタブクラッシュ（2026-04-24 Profiler 実測）。
+// 解消策：storage.local._pendingModal は `{__fromConversion: true}` のみ入れ、
+// 実データは _pendingConversionStash にメモリ保持。modal.js が起動時に
+// CLAIM_CONVERSION_STASH で 1 回取得して消費する。
+let _pendingConversionStash = null;
+
+function _clearPendingConversionStash() {
+  _pendingConversionStash = null;
+}
+
 async function openModalWindow(imageUrl, pageUrl) {
   // 既存ウィンドウが開いていれば再利用
   if (modalWindowId !== null) {
@@ -161,9 +178,56 @@ async function openModalWindow(imageUrl, pageUrl) {
 
 // ウィンドウが閉じられたら ID をリセット
 browser.windows.onRemoved.addListener((windowId) => {
-  if (windowId === modalWindowId) modalWindowId = null;
+  if (windowId === modalWindowId) {
+    modalWindowId = null;
+    // v1.31.5：未消費の変換 stash が残っていたらクリア（メモリリーク防止）
+    _clearPendingConversionStash();
+  }
   if (windowId === videoConvertWindowId) videoConvertWindowId = null;
 });
+
+// v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換専用の保存モーダル起動。
+// storage.local._pendingModal には `{__fromConversion: true}` のみセットし、
+// 大容量データ（imageUrl / associatedAudio）は _pendingConversionStash で保持。
+// modal.js 起動時に CLAIM_CONVERSION_PAYLOAD で取得される。
+async function openModalFromConversion() {
+  // 既存ウィンドウ再利用（通常経路と同じ分岐）
+  if (modalWindowId !== null) {
+    try {
+      const win = await browser.windows.get(modalWindowId);
+      if (win) {
+        await browser.storage.local.set({ _pendingModal: { __fromConversion: true } });
+        if (win.state === "minimized") {
+          await browser.windows.update(modalWindowId, { state: "normal" });
+        }
+        await browser.windows.update(modalWindowId, { focused: true });
+        const tabs = await browser.tabs.query({ windowId: modalWindowId });
+        if (tabs[0]) {
+          await browser.tabs.update(tabs[0].id, { active: true });
+          // 既存 modal に再初期化を依頼
+          browser.tabs.sendMessage(tabs[0].id, { type: "MODAL_NEW_FROM_CONVERSION" });
+        }
+        return;
+      }
+    } catch (_) {
+      modalWindowId = null;
+    }
+  }
+
+  const { modalSize } = await browser.storage.local.get("modalSize");
+  const w = modalSize?.width  || 920;
+  const h = modalSize?.height || 580;
+
+  await browser.storage.local.set({ _pendingModal: { __fromConversion: true } });
+
+  const win = await browser.windows.create({
+    url:    browser.runtime.getURL("src/modal/modal.html"),
+    type:   "normal",
+    width:  w,
+    height: h,
+  });
+  modalWindowId = win.id;
+}
 
 // ----------------------------------------------------------------
 // 動画 → GIF 変換ウィンドウ管理（GROUP-15-impl-A-phase1、v1.31.0）
@@ -257,6 +321,31 @@ async function handleAsyncMessage(message, sender) {
         videoHeight: message.videoHeight,
         duration: message.duration,
       });
+      return;
+
+    // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換 payload の受渡
+    case "STASH_CONVERSION_PAYLOAD":
+      // video_convert.js が保存モーダル起動前に大容量 dataURL と関連音声を
+      // ここに保持し、storage.local.broadcast を回避する。
+      _pendingConversionStash = {
+        imageUrl:         message.imageUrl,
+        pageUrl:          message.pageUrl,
+        suggestedFilename: message.suggestedFilename,
+        associatedAudio:  message.associatedAudio || null,
+      };
+      return { ok: true };
+
+    case "CLAIM_CONVERSION_PAYLOAD": {
+      // modal.js initModal が起動時に 1 回だけ取得。取得後は即 null 化。
+      const payload = _pendingConversionStash;
+      _pendingConversionStash = null;
+      return { ok: true, payload };
+    }
+
+    case "OPEN_MODAL_FROM_CONVERSION":
+      // storage.local._pendingModal には __fromConversion フラグだけを入れ、
+      // imageUrl / associatedAudio などの大データは _pendingConversionStash から取得。
+      openModalFromConversion();
       return;
     case "LIST_DIR":
       return listDir(message.path);

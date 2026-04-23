@@ -5,6 +5,65 @@
 
 ---
 
+## [1.31.5] - 2026-04-24
+
+### Fixed — Phase 1.5 で WebExtensions プロセス 8GB 膨張・タブクラッシュを包括 hotfix（GROUP-28 mvdl hotfix）
+
+#### 症状
+v1.31.4 で動画→GIF 変換を実行すると：
+1. コンソールに `[video_convert] audio recording load timeout` が出力
+2. 変換ウィンドウのタブがクラッシュ（「タブがクラッシュしてしまいました」画面）
+
+#### 原因（Firefox Profiler 実測で判明、2026-04-24）
+- **WebExtensions プロセス（pid=24512）のメモリピーク 8,151 MB に到達**
+- Native allocation 内訳：
+  - `JSON.stringify <- addSaveHistoryMulti @ background.js:2194` : **473.9 MB**（storage.local.set の内部 JSON 化）
+  - `StructuredCloneHolder`（serialize + deserialize）：**218.1 MB**
+  - `sendAsyncMessage <- fireOnChanged @ ext-storage.js`：**91.4 MB**（storage.local.set で全 extension context に onChanged broadcast）
+  - `Window.atob` / `IDBObjectStore.put` / `IDBCursorWithValue.value` など IDB 周辺：合計 150+ MB
+
+**真因は 2 つの相乗効果**：
+
+1. **同一動画 URL を 2 個の `<video>` で同時ロード**：音声録音用に新規生成した hidden video + gifshot 内部 video が同じ URL を取り合い、一方が timeout
+2. **`_pendingModal` に大容量 dataURL（GIF 10MB + 音声 5MB）を入れたため**、Firefox の `storage.local.set` が onChanged を全 extension context に broadcast し、**各 listener で構造化クローン**が発生。さらに IDB バックエンドへの書込・読出もフル JSON 化。結果として単一セーブあたり数百 MB の overhead、複数回試行で GB 級に膨張してタブ OOM 的クラッシュ
+
+#### 対策 1：preview video を音声録音にも流用（二重ロード解消）
+- 新規 video 要素を作らず `document.getElementById("preview")` を `recordAudio` に渡す
+- `muted = false` + `volume = 0` の組合せでユーザー無音・captureStream に audio track 含まれる状態を維持
+- 録音後に元の muted / volume / currentTime を復元
+- これで video 要素が gifshot 内部 1 個 + preview 1 個の計 **2 個**に収まる（従来 3 個）
+
+#### 対策 2：変換 payload を storage.local でなく background メモリで受渡（broadcast 回避）
+- `background.js` に `_pendingConversionStash` モジュール変数を追加
+- 新メッセージ：
+  - `STASH_CONVERSION_PAYLOAD`：video_convert.js が {imageUrl, pageUrl, suggestedFilename, associatedAudio} を stash
+  - `CLAIM_CONVERSION_PAYLOAD`：modal.js が起動時に 1 回取得（取得後即 null 化）
+  - `OPEN_MODAL_FROM_CONVERSION`：`storage.local._pendingModal = {__fromConversion: true}` の**フラグのみ**書込、保存モーダル起動
+- `modal.js initModal`：`_pendingModal.__fromConversion` が true なら CLAIM_CONVERSION_PAYLOAD で取得、false なら従来どおり `_pendingModal` から読込
+- 既存ウィンドウ再利用時は `MODAL_NEW_FROM_CONVERSION` メッセージで再初期化を通知
+- `modalWindowId` のウィンドウ close 時に stash をクリア（メモリリーク防止）
+
+これで `storage.local` に入るのは**フラグ 1 個（数バイト）だけ**、broadcast / IDB 書込の負荷は全て消滅。
+
+#### 想定効果
+- WebExtensions プロセスのピーク 8GB → 数百 MB へ大幅削減想定
+- Firefox の storage.local.set による structured-clone broadcast が消滅
+- タブクラッシュ解消、音声を含む動画→GIF 変換が実用可能に
+
+#### 補足：録音中はプレビューが 20 秒再生される
+仕様：`preview.play()` で再生しながら MediaRecorder がキャプチャするため、変換実行中はプレビュー画面で動画が再生される（ユーザー側は volume=0 で無音）。
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 動画→GIF 変換時にタブクラッシュが発生しない
+- Profiler で WebExtensions プロセスのピーク < 1GB 想定
+- 録音中にプレビュー画面で動画が再生される（音声は聞こえない）
+- 変換完了後、GIF + .webm の 2 ファイルが同フォルダに保存される
+- 保存履歴タブで🔇アイコンが表示され、クリックで音声再生可能
+- 複数回連続変換してもメモリ膨張しない（stash が modal 閉鎖時にクリアされる）
+
+---
+
 ## [1.31.4] - 2026-04-24
 
 ### Added — 動画→GIF 変換時に音声も保存（GROUP-28 mvdl、Phase 1.5）

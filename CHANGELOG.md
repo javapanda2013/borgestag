@@ -5,6 +5,48 @@
 
 ---
 
+## [1.31.1] - 2026-04-24
+
+### Fixed — 動画 → GIF 変換が 100% 到達後に停滞する CSP 問題（GROUP-15-impl-A-phase1 hotfix）
+
+#### 症状
+v1.31.0 で動画変換を実行すると、progressCallback で capture 100% まで進むが、その後の callback が発火せず停滞。ブラウザコンソールに以下の CSP 違反エラー：
+
+```
+Content-Security-Policy: ページの設定により blob:moz-extension://.../... の
+Worker スクリプト (worker-src) の実行をブロックしました。
+次のディレクティブに違反しています: "script-src 'self' 'wasm-unsafe-eval'"
+```
+
+#### 原因
+gifshot は Web Worker を `new Worker(URL.createObjectURL(new Blob([workerCode])))` の **blob: URL** で生成する実装。Firefox の WebExtension MV2 デフォルト CSP `script-src 'self' 'wasm-unsafe-eval'` が worker-src のフォールバックとして適用され、blob: URL Worker の起動を拒否。結果、Worker が 1 個も起動せず GIF エンコードが進まない状態に。
+
+#### 対策 1：CSP で worker-src を明示的に blob: 許可
+`manifest.json` に `content_security_policy` を明示設定：
+
+```json
+"content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'self';"
+```
+
+- `script-src` は従来どおり厳格（'self' + wasm-unsafe-eval）
+- `worker-src` のみ blob: を追加し、Worker の blob: URL 起動を許可
+- 通常スクリプトへの影響なし、AMO 署名も通過想定（worker-src 限定なので）
+
+#### 対策 2：エンコード段階のタイムアウト診断
+`video_convert.js` に 60 秒タイムアウトを実装。capture 100% 到達後 60 秒間 progressCallback が来なければ、エンコード段階で詰まっていることを推定しエラー表示。ユーザーに F12 での CSP/Worker エラー確認を促す。
+
+また capture / エンコードの進捗ログを明確化：
+- capture 中：「キャプチャ中… N%」
+- 100% 到達：「キャプチャ完了、GIF エンコード中…（Worker で処理、進捗非表示）」
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 変換ウィンドウ起動時に CSP 違反エラーが**出ないこと**（F12 コンソール）
+- 動画 → GIF 変換が正常完走し、保存モーダルが起動すること
+- エンコードに時間がかかっても 60 秒タイムアウト前に callback が発火していれば正常
+
+---
+
 ## [1.31.0] - 2026-04-24
 
 ### Added — 動画 → GIF 変換 Phase 1 MVP（GROUP-15-impl-A-phase1）

@@ -151,6 +151,25 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   const numFrames = PHASE1_PARAMS.DURATION_SEC * PHASE1_PARAMS.FPS;
 
   const startTime = Date.now();
+  let lastProgressAt = Date.now();
+  let reached100 = false;
+
+  // v1.31.1 診断：100% に達してからのタイムアウト（GIF エンコードが無限に待たないよう）。
+  // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
+  // GIF エンコード段階（Web Worker）は進捗が取れない。Worker で詰まっている場合の
+  // 検知のため、100% 到達後 60 秒で強制エラー表示。
+  const encodeTimeout = setInterval(() => {
+    if (reached100 && Date.now() - lastProgressAt > 60_000) {
+      clearInterval(encodeTimeout);
+      log(
+        "⚠ エンコード段階でタイムアウト（60 秒）。" +
+        "ブラウザコンソール（F12）で CSP 違反や Worker エラーが出ていないか確認してください。",
+        "error"
+      );
+      btn.disabled = false;
+      btn.textContent = "再試行";
+    }
+  }, 5_000);
 
   gifshot.createGIF({
     video: [videoUrl],
@@ -162,9 +181,18 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
     numWorkers: PHASE1_PARAMS.NUM_WORKERS,
     progressCallback: (captureProgress) => {
       updateProgress(captureProgress);
-      log(`変換中… ${Math.round(captureProgress * 100)}%`);
+      lastProgressAt = Date.now();
+      if (captureProgress >= 1.0) {
+        if (!reached100) {
+          reached100 = true;
+          log("キャプチャ完了、GIF エンコード中…（Worker で処理、進捗非表示）");
+        }
+      } else {
+        log(`キャプチャ中… ${Math.round(captureProgress * 100)}%`);
+      }
     },
   }, async (obj) => {
+    clearInterval(encodeTimeout);
     if (obj.error) {
       log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
       btn.disabled = false;

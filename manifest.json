@@ -1,8 +1,9 @@
 {
   "manifest_version": 2,
   "name": "BorgesTag",
-  "version": "1.31.0",
+  "version": "1.31.1",
   "description": "右クリックから画像をタグ付きで保存する拡張機能",
+  "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'self';",
   "permissions": [
     "contextMenus",
     "storage",

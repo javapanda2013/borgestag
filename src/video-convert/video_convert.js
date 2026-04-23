@@ -207,11 +207,32 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
     updateProgress(1);
 
     try {
-      // 既存の保存フロー起動：_pendingModal に GIF dataURL をセットして OPEN_MODAL_WINDOW
+      // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
+      // 元動画 URL から basename を抽出して .gif 拡張子でファイル名提案。
+      // dataURL のままだと guessFilename が拡張子を推定できず .jpg 扱いになり、
+      // Native 側も JPEG として処理 → サムネイルのアニメーションが失われる。
+      let suggestedFilename = "video-capture.gif";
+      try {
+        const u = new URL(videoUrl);
+        const basename = (u.pathname.split("/").pop() || "").replace(/\.[^.]*$/, "");
+        if (basename) {
+          suggestedFilename = `${basename}.gif`;
+        } else {
+          // URL からパスが取れない場合はタイムスタンプで一意化
+          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+          suggestedFilename = `video-${ts}.gif`;
+        }
+      } catch (_) {
+        const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+        suggestedFilename = `video-${ts}.gif`;
+      }
+
+      // 既存の保存フロー起動：_pendingModal に GIF dataURL + 推奨ファイル名をセットして OPEN_MODAL_WINDOW
       await browser.storage.local.set({
         _pendingModal: {
           imageUrl: obj.image,
           pageUrl: pageUrl || "",
+          suggestedFilename, // v1.31.2：modal.js 側で優先採用
         },
       });
       await browser.runtime.sendMessage({

@@ -87,7 +87,7 @@ async function initModal() {
   // 画像情報を storage から取得
   const { _pendingModal } = await browser.storage.local.get("_pendingModal");
   if (!_pendingModal) { window.close(); return; }
-  const { imageUrl, pageUrl } = _pendingModal;
+  const { imageUrl, pageUrl, suggestedFilename } = _pendingModal;
   // 使用済みフラグをクリア（別ウィンドウ開くときの再初期化用に残す）
 
   // 必要なデータを並列取得
@@ -129,7 +129,11 @@ async function initModal() {
     browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]),
   ]);
 
-  const defaultFilename = guessFilename(imageUrl);
+  // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
+  // 動画→GIF 変換経由など、呼出側が明示的にファイル名を提案した場合はそれを優先採用。
+  // data URL は guessFilename で拡張子推定できないため（data:image/gif;base64,... の
+  // pathname が base64 string になる）、呼出側ヒントが重要。
+  const defaultFilename = suggestedFilename || guessFilename(imageUrl);
 
   // HTMLを #modal-root に書き込む
   document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename);
@@ -5250,6 +5254,20 @@ function _processToastQueue() {
 // ユーティリティ
 // ----------------------------------------------------------------
 function guessFilename(url) {
+  // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：data URL の場合は MIME から拡張子推定。
+  // data URL を URL オブジェクトで parse すると pathname に base64 本体が入ってしまい
+  // 適切なファイル名が得られない（従来は全て .jpg にフォールバックしていた）。
+  if (typeof url === "string" && url.startsWith("data:")) {
+    const m = url.match(/^data:([a-zA-Z0-9/.+-]+)(?:;|,)/);
+    if (m) {
+      const mime = m[1];
+      // "image/gif" → "gif"、"image/jpeg" → "jpg"、"image/webp" → "webp" 等
+      const sub = (mime.split("/")[1] || "").toLowerCase();
+      const ext = sub === "jpeg" ? "jpg" : (sub || "bin");
+      return `image.${ext}`;
+    }
+    return "image.bin";
+  }
   try {
     const parts = new URL(url).pathname.split("/").filter(Boolean);
     const last = parts[parts.length - 1] || "image";

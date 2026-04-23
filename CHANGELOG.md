@@ -5,6 +5,63 @@
 
 ---
 
+## [1.31.2] - 2026-04-24
+
+### Fixed — 動画→GIF 変換後のファイル拡張子・サムネアニメーション問題（GROUP-15-impl-A-phase1 hotfix）
+
+#### 症状
+v1.31.1 で動画→GIF 変換が正常完走するようになったが：
+1. 出力ファイルの拡張子が `.jpg` になり、**GIF フィルタ（保存履歴タブ）で検出されない**
+2. **保存履歴のサムネイルが動かない**（静止画になる）
+
+#### 原因
+変換ウィンドウから保存モーダルへ `obj.image`（`data:image/gif;base64,...` の dataURL）を imageUrl として渡している。modal.js の `guessFilename(imageUrl)` は data URL に対して：
+- `new URL(dataUrl).pathname` = `"image/gif;base64,R0lGODlh..."` となり
+- `.split("/").filter(Boolean).pop()` = base64 本体
+- 末尾が `.xxx` 拡張子パターンにマッチしないため **`${base64}.jpg` を返す**
+
+結果としてファイル名が `.jpg` になり、Native 側も JPEG として処理 → GIF アニメーションが失われる。
+
+#### 対策 1：video_convert.js で suggestedFilename を提案
+元動画 URL の basename を抽出し `.gif` 拡張子でファイル名提案。元 URL から取れない場合は `video-YYYY-MM-DD-HH-MM-SS.gif` タイムスタンプ形式でフォールバック。
+
+```js
+_pendingModal: {
+  imageUrl: obj.image,
+  pageUrl: pageUrl || "",
+  suggestedFilename, // ← 新フィールド
+}
+```
+
+#### 対策 2：modal.js で suggestedFilename を優先採用
+`initModal` で `_pendingModal.suggestedFilename` があればそれを優先、なければ従来の `guessFilename(imageUrl)` にフォールバック：
+
+```js
+const defaultFilename = suggestedFilename || guessFilename(imageUrl);
+```
+
+#### 対策 3：guessFilename を data URL 対応に改良（防御的）
+将来同様の経路で data URL が来ても拡張子を正しく推定できるよう、`guessFilename` 冒頭で data URL を検出して MIME から拡張子推定：
+
+- `data:image/gif;...` → `image.gif`
+- `data:image/jpeg;...` → `image.jpg`（jpeg→jpg 正規化）
+- `data:image/webp;...` → `image.webp`
+- `data:image/png;...` → `image.png`
+
+#### 効果
+- 動画→GIF 変換の保存ファイル拡張子が `.gif` で正しく記録される
+- 保存履歴の GIF フィルタで検出される
+- Native Python の `make_gif_thumbnail` 経路が動作し、サムネイルがアニメーション付きで保存される
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 動画→GIF 変換後の保存ファイル名が `xxx.gif` になっている
+- 保存履歴タブの GIF フィルタで変換動画が検出される
+- 保存履歴のサムネイルがアニメーションしている
+- 既存の画像保存フローは従来通り（guessFilename の URL 分岐が影響しないこと）
+
+---
+
 ## [1.31.1] - 2026-04-24
 
 ### Fixed — 動画 → GIF 変換が 100% 到達後に停滞する CSP 問題（GROUP-15-impl-A-phase1 hotfix）

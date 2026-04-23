@@ -704,32 +704,24 @@ async function exportData() {
   ]);
   log("📦 設定データ取得完了");
 
-  // IndexedDB のサムネイルも取得（GROUP-26-III / v1.29.1: サムネ埋込 OFF なら空配列固定、JSON サイズ大幅削減）
-  let idbThumbs = [];
+  // GROUP-26-mem-2 (v1.31.0 Phase A'): 全サムネ一括取得（EXPORT_IDB_THUMBS, 〜350MB）を廃止、
+  // history chunk ごとに GET_IDB_THUMBS_BY_IDS で都度取得して実行中ピークを削減。
+  // サムネ埋込 OFF のときは thumb 取得自体をスキップ（既存挙動と一致）。
   const exportThumbsEnabled = stored.exportThumbsEnabled !== false; // デフォルト ON（既存挙動維持）
   if (exportThumbsEnabled) {
-    try {
-      const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
-      if (res?.ok) idbThumbs = res.thumbs;
-    } catch {}
-    log(`🖼 サムネイル取得完了（${idbThumbs.length} 件）`);
+    log("🖼 サムネイル埋込 ON（chunk 単位で IDB から都度取得、ピーク削減）");
   } else {
-    log(`🖼 サムネイル埋込は OFF（_idbThumbs=[] で JSON サイズを大幅削減、thumbId 参照は保持）`);
+    log("🖼 サムネイル埋込は OFF（_idbThumbs=[] で JSON サイズを大幅削減、thumbId 参照は保持）");
   }
 
   // ---- 差分エクスポート処理 ----
   const isDiff = !!stored.diffExportEnabled && !!stored.lastExportedAt;
   let exportHistory = stored.saveHistory || [];
-  let exportThumbs  = idbThumbs;
 
   if (isDiff) {
     const lastAt = new Date(stored.lastExportedAt);
     const fullCount = exportHistory.length;
     exportHistory = exportHistory.filter(entry => entry.savedAt && new Date(entry.savedAt) > lastAt);
-    // 差分エントリで参照されるサムネイルのみに絞る
-    const thumbIdSet = new Set(exportHistory.map(e => e.thumbId).filter(Boolean));
-    exportThumbs = idbThumbs.filter(t => thumbIdSet.has(t.id));
-    idbThumbs = null; // GROUP-26-mem (v1.29.2): 差分フィルタ後は元の全配列（~350MB）不要
     log(`🔍 差分: ${exportHistory.length} 件 / 全 ${fullCount} 件（前回エクスポート: ${stored.lastExportedAt.slice(0, 19).replace("T", " ")}）`);
     if (exportHistory.length === 0) {
       log("ℹ️ 差分なし（前回エクスポート以降の新規エントリはありません）");
@@ -782,46 +774,60 @@ async function exportData() {
   files.push({ category: "settings", path: settingsName });
   stored = null; // GROUP-26-mem: settings 書出後は不要
 
-  // history-NNN.json 分割
+  // GROUP-26-mem-2 (v1.31.0 Phase A'): history と thumbs のループを統合し、
+  // chunk ごとに per-iteration で書き出す。1 iteration の寿命は const スコープで完結、
+  // 次反復前に旧 chunk は GC 対象になるため実行中ピークが大幅削減される。
   const historyTotal = exportHistory.length;
+  let thumbsTotalWritten = 0;
   for (let i = 0, n = 1; i < historyTotal; i += CHUNK_SIZE, n++) {
-    const chunk = exportHistory.slice(i, i + CHUNK_SIZE);
-    const name = `history-${String(n).padStart(3, "0")}.json`;
-    const chunkRes = await browser.runtime.sendMessage({
+    const batch = exportHistory.slice(i, i + CHUNK_SIZE);
+
+    // history-NNN.json 書出
+    const histName = `history-${String(n).padStart(3, "0")}.json`;
+    const histRes = await browser.runtime.sendMessage({
       type: "WRITE_FILE",
-      path: `${tempDir}\\${name}`,
-      content: JSON.stringify(chunk, null, 2),
+      path: `${tempDir}\\${histName}`,
+      content: JSON.stringify(batch, null, 2),
     });
-    if (!chunkRes?.ok) {
-      logError(`${name} 書込失敗: ${chunkRes?.error || ""}`);
+    if (!histRes?.ok) {
+      logError(`${histName} 書込失敗: ${histRes?.error || ""}`);
       return;
     }
-    files.push({ category: "history", path: name, entries: chunk.length });
-    log(`✏️ ${name} 書込（${Math.min(i + CHUNK_SIZE, historyTotal)}/${historyTotal}）`);
-  }
-  exportHistory = null;
+    files.push({ category: "history", path: histName, entries: batch.length });
+    log(`✏️ ${histName} 書込（${Math.min(i + CHUNK_SIZE, historyTotal)}/${historyTotal}）`);
 
-  // thumbs-NNN.json 分割（サムネ ON 時のみ）
-  const thumbsTotal = exportThumbs.length;
-  if (exportThumbsEnabled && thumbsTotal > 0) {
-    for (let i = 0, n = 1; i < thumbsTotal; i += CHUNK_SIZE, n++) {
-      const chunk = exportThumbs.slice(i, i + CHUNK_SIZE);
-      const name = `thumbs-${String(n).padStart(3, "0")}.json`;
-      const chunkRes = await browser.runtime.sendMessage({
-        type: "WRITE_FILE",
-        path: `${tempDir}\\${name}`,
-        content: JSON.stringify(chunk, null, 2),
-      });
-      if (!chunkRes?.ok) {
-        logError(`${name} 書込失敗: ${chunkRes?.error || ""}`);
-        return;
+    // thumbs-NNN.json 書出（サムネ ON かつ該当エントリに thumbId があれば）
+    if (exportThumbsEnabled) {
+      const thumbIds = batch.map(e => e.thumbId).filter(Boolean);
+      if (thumbIds.length > 0) {
+        const thumbsRes = await browser.runtime.sendMessage({
+          type: "GET_IDB_THUMBS_BY_IDS",
+          ids: thumbIds,
+        });
+        if (!thumbsRes?.ok) {
+          logError(`thumbs-${String(n).padStart(3, "0")}.json 取得失敗: ${thumbsRes?.error || ""}`);
+          return;
+        }
+        if (thumbsRes.thumbs.length > 0) {
+          const thumbsName = `thumbs-${String(n).padStart(3, "0")}.json`;
+          const writeRes = await browser.runtime.sendMessage({
+            type: "WRITE_FILE",
+            path: `${tempDir}\\${thumbsName}`,
+            content: JSON.stringify(thumbsRes.thumbs, null, 2),
+          });
+          if (!writeRes?.ok) {
+            logError(`${thumbsName} 書込失敗: ${writeRes?.error || ""}`);
+            return;
+          }
+          files.push({ category: "thumbs", path: thumbsName, entries: thumbsRes.thumbs.length });
+          thumbsTotalWritten += thumbsRes.thumbs.length;
+          log(`✏️ ${thumbsName} 書込（${thumbsRes.thumbs.length} 件）`);
+        }
       }
-      files.push({ category: "thumbs", path: name, entries: chunk.length });
-      log(`✏️ ${name} 書込（${Math.min(i + CHUNK_SIZE, thumbsTotal)}/${thumbsTotal}）`);
     }
   }
-  exportThumbs = null;
-  idbThumbs = null;
+  exportHistory = null;
+  const thumbsTotal = thumbsTotalWritten;
 
   // manifest.json 書出
   const manifestData = {

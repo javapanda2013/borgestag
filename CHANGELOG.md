@@ -5,6 +5,46 @@
 
 ---
 
+## [1.30.8] - 2026-04-23
+
+### Changed — エクスポート実行中ピーク削減（GROUP-26-mem-2 Phase A'）
+
+#### 背景
+v1.30.7 で実行後残留は完全解消したが、**実行中ピークは依然 4-5GB**。原因は `EXPORT_IDB_THUMBS` で settings.js が全サムネ dataUrl 配列（〜350MB）を一括取得していた設計：
+
+- settings.js が IDB 全件を受信 → 約 350MB
+- structured-clone で background → settings 両側保持 → さらに +350MB
+- 加えて chunk loop 中の一時文字列・JSON stringify 中間状態
+
+調査で `AsyncFunctionGenerator` が 778MB 保持（settings zone）と確認済。
+
+#### 対策
+新 Native Messaging 内部コマンド `GET_IDB_THUMBS_BY_IDS(ids)` を追加し、**history chunk ごとに 500 件分の thumbs だけ IDB から取得**するように設計変更：
+
+- settings.js：従来の `EXPORT_IDB_THUMBS` 1 発 → **history chunk 単位で `GET_IDB_THUMBS_BY_IDS` を N 回**に分割
+- history ループと thumbs ループを統合、1 iteration で history-NNN.json と thumbs-NNN.json を書出
+- 1 iteration の寿命は const スコープで完結、次反復前に旧 chunk は GC 対象になる
+
+#### 想定効果
+- 実行中ピーク：**4-5GB → 1-2GB**（-60〜70% 期待）
+- 実行後残留：v1.30.7 で既に解消済み、本変更で劣化なし
+- 機能変化：なし（エクスポート zip の内容・互換性は完全維持）
+
+#### 互換性
+- 出力される zip の manifest.json / history-NNN.json / thumbs-NNN.json 構造は不変
+- import 側は files 配列を category ごとに処理するため、thumbs-NNN の連番にギャップ（thumbId のないエントリだけの chunk）があっても動作
+- UI 側の「サムネ埋込 OFF でどれだけ削減」プレビューは `EXPORT_IDB_THUMBS` を残置で従来どおり動作（関数自体は削除しない）
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- エクスポート正常完走（機能デグレなし）
+- エクスポート zip の中身が従来と同一（history-NNN.json、thumbs-NNN.json、manifest.json、settings.json）
+- インポート機能が新 zip も旧 zip も読める
+- **実行中ピーク測定**：タスクマネージャで extension プロセスが 5GB に達しないこと（目標 1-2GB）
+- **実行後残留測定**：v1.30.7 と同じく 42MB 前後（劣化なし確認）
+
+---
+
 ## [1.30.7] - 2026-04-23
 
 ### Changed — sendNative で payload / payloadJson を null 代入（GROUP-26-slice-6）

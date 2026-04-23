@@ -286,6 +286,8 @@ async function handleAsyncMessage(message, sender) {
       return generateMissingThumbs(message.targetIds || null, message.overwrite || false);
     case "EXPORT_IDB_THUMBS":
       return exportIdbThumbs();
+    case "GET_IDB_THUMBS_BY_IDS":
+      return getIdbThumbsByIds(message.ids);
     case "IMPORT_IDB_THUMBS":
       return importIdbThumbs(message.thumbs);
     // v1.25.0 GROUP-7-b-ext-persist: 外部取り込み用サムネ永続 IDB ストア
@@ -1489,6 +1491,43 @@ async function exportIdbThumbs() {
     const thumbs = [];
     for (const rec of records) {
       if (!rec.id || !rec.blob) continue;
+      const ab    = await rec.blob.arrayBuffer();
+      const bytes = new Uint8Array(ab);
+      let binary  = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      thumbs.push({
+        id:       rec.id,
+        dataUrl:  `data:${rec.blob.type || "image/jpeg"};base64,` + btoa(binary),
+      });
+    }
+    return { ok: true, thumbs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * 指定された ID 配列に対応する IDB サムネイルだけを Base64 DataURL 化して返す。
+ * GROUP-26-mem-2 (v1.31.0 Phase A'): エクスポート実行中ピーク削減のため、
+ * 全サムネ一括取得 (`EXPORT_IDB_THUMBS`, 〜350MB) を避けて chunk 単位で都度取得する経路。
+ * 想定呼出単位は CHUNK_SIZE = 500 件相当（応答 〜50MB）。
+ */
+async function getIdbThumbsByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return { ok: true, thumbs: [] };
+  try {
+    const db = await openThumbDB();
+    const tx    = db.transaction(IDB_STORE, "readonly");
+    const store = tx.objectStore(IDB_STORE);
+
+    const thumbs = [];
+    for (const id of ids) {
+      if (!id) continue;
+      const rec = await new Promise((resolve, reject) => {
+        const req = store.get(id);
+        req.onsuccess = (e) => resolve(e.target.result || null);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      if (!rec || !rec.blob) continue;
       const ab    = await rec.blob.arrayBuffer();
       const bytes = new Uint8Array(ab);
       let binary  = "";

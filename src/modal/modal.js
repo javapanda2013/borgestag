@@ -4176,10 +4176,15 @@ function setupModalEvents(
       // アニメ保持サムネが生成されるため、ここでの Canvas→JPEG 変換を回避して
       // null を返す。これにより background.js handleSave の優先度ロジック
       // （thumbDataUrl || pyThumb）で Python 生成の gif アニメサムネが採用される。
-      // TODO (GROUP-15): mp4/Canvas→gif 変換機能を実装する際、変換済み gif は
-      // この関数を bypass して thumbDataUrl に直接セットする設計とする。もし
-      // 本関数を通す経路が生まれたら、引数に sourceMime を追加して判定する。
       if (/\.gif(\?|#|$)/i.test(url)) return null;
+
+      // v1.31.3 GROUP-15-impl-A-phase1-hotfix-thumb：
+      // 動画→GIF 変換経由の場合、imageUrl は `data:image/gif;base64,...` の
+      // data URL。上の .gif 拡張子判定では引っかからないため個別に bypass。
+      // これにより Native Python の make_gif_thumbnail 経由の
+      // アニメーション GIF サムネが IDB に保存される。
+      // （過去の TODO コメント「変換済み gif はこの関数を bypass」の実装）
+      if (/^data:image\/gif[;,]/i.test(url)) return null;
 
       // ① DOM上の同ホスト <img> を crossOrigin="anonymous" で再ロードしてCanvas描画
       // （crossOriginなしで読み込まれた画像はCanvas汚染でblob取得不可のため再取得）

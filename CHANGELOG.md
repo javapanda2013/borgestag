@@ -5,6 +5,48 @@
 
 ---
 
+## [1.31.3] - 2026-04-24
+
+### Fixed — 動画→GIF 変換後のサムネアニメーション維持（GROUP-15-impl-A-phase1 hotfix 3rd）
+
+#### 症状
+v1.31.2 で保存ファイル拡張子は `.gif` になり GIF フィルタも通過するようになったが、**保存履歴のサムネイルが依然として静止画**。
+
+#### 原因
+`modal.js` の `fetchThumbnailInPage` は `/\.gif(\?|#|$)/i.test(url)` で URL 末尾 `.gif` を検出して Canvas→JPEG 変換を bypass（Native Python のアニメ GIF サムネを優先採用するため）していた。
+
+しかし動画→GIF 変換経由では imageUrl が **data URL（`data:image/gif;base64,...`）**。この regex にマッチしないため Canvas→JPEG 経路に流れ、静止 JPEG サムネが生成される。
+
+`handleSave` の優先度ロジック `thumbDataUrl || pyThumb` で modal 側の静止 JPEG が Native の GIF アニメサムネに優先採用されてしまい、IDB には JPEG Blob が保存される。結果として保存履歴のサムネイルが静止化。
+
+なお過去（GROUP-14 時代）に該当コードに残されていた TODO コメント：
+> TODO (GROUP-15): mp4/Canvas→gif 変換機能を実装する際、変換済み gif はこの関数を bypass する設計とする
+
+がまさにこの問題を指していた。
+
+#### 対策
+`fetchThumbnailInPage` の既存 `.gif` URL bypass の直後に data URL での GIF MIME 判定を追加：
+
+```js
+if (/\.gif(\?|#|$)/i.test(url)) return null;  // 既存
+// v1.31.3 新規
+if (/^data:image\/gif[;,]/i.test(url)) return null;
+```
+
+これで data URL の GIF も bypass、Native Python の `make_gif_thumbnail` 経由でアニメーション保持 GIF サムネ（`thumbChunkPath` 経由、`thumbMime: "image/gif"`）が IDB に保存される。
+
+#### 効果
+- 動画→GIF 変換の保存履歴サムネイルがアニメーション再生される
+- 既存の URL ベース GIF（直 `.gif` URL の画像）動作に影響なし
+- 将来同様の data URL 経路が発生しても同ルートで動作
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 動画→GIF 変換後の保存履歴タブで、サムネイルがアニメーションする
+- 通常の画像・GIF 保存フローは従来通り動作（デグレなし）
+
+---
+
 ## [1.31.2] - 2026-04-24
 
 ### Fixed — 動画→GIF 変換後のファイル拡張子・サムネアニメーション問題（GROUP-15-impl-A-phase1 hotfix）

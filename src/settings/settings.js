@@ -44,7 +44,9 @@ let _histAuthorFilter  = "";
 // 保存履歴の取り込み元フィルター ("" | "external_import" | "normal")
 let _histSourceFilter  = "";
 // 保存履歴の GIF フィルター（v1.22.2）
-let _histGifFilter     = false;
+// v1.32.2 GROUP-28 mvdl：GIF のみチェックボックスをプルダウン化、音声付きフィルタ追加
+// "all" | "gif" | "audio"
+let _histFormatFilter  = "all";
 
 // 開いているタグ行のセット（折りたたみ状態の管理）
 const openTags = new Set();
@@ -2162,7 +2164,7 @@ function setupHistoryTab() {
       _histFilterTagChips.length === 0 &&
       _histFilterAuthorChips.length === 0 &&
       !_histSourceFilter &&
-      !_histGifFilter;
+      _histFormatFilter === "all";
   }
   _updateSelectAllBtn = updateSelectAllBtn; // グローバル参照を更新
 
@@ -2796,9 +2798,9 @@ function setupHistoryTab() {
     });
   }
 
-  // GIF フィルター（v1.22.2）
-  document.getElementById("hist-gif-filter")?.addEventListener("change", (e) => {
-    _histGifFilter = e.target.checked;
+  // v1.32.2：形式フィルター（GIF のみ → プルダウン化、音声付き追加）
+  document.getElementById("hist-format-filter")?.addEventListener("change", (e) => {
+    _histFormatFilter = e.target.value || "all";
     _histPage = 0;
     updateSelectAllBtn();
     renderHistoryGrid();
@@ -2874,16 +2876,16 @@ function renderHistoryGrid() {
   const hasTagFilter    = _histFilterTagChips.length > 0;
   const hasAuthorFilter = _histFilterAuthorChips.length > 0;
   const hasSourceFilter = !!_histSourceFilter;
-  const hasGifFilter    = _histGifFilter;
+  const hasFormatFilter = _histFormatFilter !== "all";
 
-  const filtered = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasGifFilter)
+  const filtered = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter)
     ? _historyData.filter(e => _entryMatchesCurrentFilter(e))
     : _historyData;
 
   // 絞り込み結果をライトボックスのグローバルナビ用に保持
-  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasGifFilter) ? filtered : null;
+  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter) ? filtered : null;
 
-  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasGifFilter;
+  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter;
   const totalFiltered = filtered.length;
 
   // ページ範囲補正
@@ -3249,11 +3251,12 @@ function _entryMatchesCurrentFilter(entry) {
   const hasTagFilter    = _histFilterTagChips.length > 0;
   const hasAuthorFilter = _histFilterAuthorChips.length > 0;
   const hasSourceFilter = !!_histSourceFilter;
-  const hasGifFilter    = _histGifFilter;
-  if (!hasTagFilter && !hasAuthorFilter && !hasSourceFilter && !hasGifFilter) return true;
+  const hasFormatFilter = _histFormatFilter !== "all";
+  if (!hasTagFilter && !hasAuthorFilter && !hasSourceFilter && !hasFormatFilter) return true;
 
-  // GIF フィルター（v1.22.2）
-  if (hasGifFilter && !/\.gif$/i.test(entry.filename || "")) return false;
+  // v1.32.2 GROUP-28 mvdl：形式フィルター
+  if (_histFormatFilter === "gif" && !/\.gif$/i.test(entry.filename || "")) return false;
+  if (_histFormatFilter === "audio" && !entry.audioFilename) return false;
 
   const entryTags = (entry.tags || []).map(t => t.toLowerCase());
   const tagMatch = !hasTagFilter || (
@@ -3440,8 +3443,8 @@ function _updateHistCount() {
   const hasTagFilter    = _histFilterTagChips.length > 0;
   const hasAuthorFilter = _histFilterAuthorChips.length > 0;
   const hasSourceFilter = !!_histSourceFilter;
-  const hasGifFilter    = _histGifFilter;
-  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasGifFilter;
+  const hasFormatFilter = _histFormatFilter !== "all";
+  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter;
   const filtered = isFiltering
     ? _historyData.filter(_entryMatchesCurrentFilter)
     : _historyData;

@@ -941,7 +941,14 @@ function buildModalHTML(defaultFilename) {
     }
     .history-filter-clear.visible { display: block; }
     .history-filter-clear:hover { color: #e74c3c; }
-    /* GIF フィルターラベル（v1.26.0） */
+    /* v1.32.2 GROUP-28 mvdl：形式フィルタープルダウン（旧 GIF のみチェックボックス） */
+    .history-format-filter {
+      font-size: 10px; color: #444; cursor: pointer;
+      border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 6px; background: #fff; white-space: nowrap;
+    }
+    .history-format-filter:focus { border-color: #4a90e2; outline: none; }
+    /* GIF フィルターラベル（v1.26.0、旧 checkbox、v1.32.2 で select に置換されたが class 残存時のフォールバック） */
     .history-gif-filter-label {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 11px; color: #444; cursor: pointer;
@@ -1127,6 +1134,22 @@ function buildModalHTML(defaultFilename) {
       pointer-events: none;
     }
     .history-item:hover .history-overlay { opacity: 1; pointer-events: auto; }
+
+    /* v1.32.2 GROUP-28 mvdl：保存ウィンドウの保存履歴でも音声再生ボタン常時表示 */
+    .history-audio-icon {
+      position: absolute; left: 6px; bottom: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 2;
+      transition: background 0.15s;
+    }
+    .history-audio-icon:hover { background: rgba(40,90,180,0.85); }
+    .history-audio-icon[data-muted="0"] { background: rgba(40,120,60,0.85); }
 
     .history-body {
       padding: 0; overflow: hidden;
@@ -1444,10 +1467,12 @@ function buildModalHTML(defaultFilename) {
                 <option value="and">AND</option>
                 <option value="or">OR</option>
               </select>
-              <label class="history-gif-filter-label" id="history-gif-filter-wrap" title="GIF のみ表示">
-                <input type="checkbox" id="history-gif-filter" />
-                <span>GIF のみ</span>
-              </label>
+              <!-- v1.32.2 GROUP-28 mvdl：GIF のみチェックボックスをプルダウン化、音声付きフィルタ追加 -->
+              <select id="history-format-filter" class="history-format-filter" title="表示形式で絞り込み">
+                <option value="all">📄 全て</option>
+                <option value="gif">🎞 GIF のみ</option>
+                <option value="audio">🔊 音声付き</option>
+              </select>
             </div>
           </div>
 
@@ -1850,8 +1875,83 @@ function setupModalEvents(
   let historyFilterTag    = ""; // shadow: chips.join(" ")（既存コード互換）
   let historyFilterAuthor = ""; // shadow: chips.join(" ")（既存コード互換）
   let historyFilterMode   = "and"; // "and" | "or"
-  let historyFilterGifOnly = false; // v1.26.0: GIF のみ表示フィルター
+  // v1.32.2 GROUP-28 mvdl：GIF のみ → プルダウン化
+  // "all" | "gif" | "audio"
+  let historyFormatFilter = "all";
   let _historyRenderGen = 0; // renderHistory() の世代番号（非同期競合による二重描画防止）
+
+  // v1.32.2 GROUP-28 mvdl：保存ウィンドウの保存履歴にも音声再生機構
+  // （settings.js 側の _histAudioCache と同等、modal ウィンドウごとに独立）
+  const _modalAudioCache = new Map(); // entry.id → {audio, blobUrl}
+  const _modalAudioPlayingIds = new Set();
+
+  function _modalUpdateAudioButtonsForEntry(entryId, playing) {
+    document.querySelectorAll(`.history-audio-icon[data-audio-entry-id="${entryId}"]`).forEach(btn => {
+      btn.dataset.muted = playing ? "0" : "1";
+      btn.textContent = playing ? "🔊" : "🔇";
+    });
+  }
+
+  async function _modalToggleAudio(entry, btn) {
+    const existing = _modalAudioCache.get(entry.id);
+    if (existing && existing.audio && !existing.audio.paused) {
+      try { existing.audio.pause(); existing.audio.currentTime = 0; } catch (_) {}
+      _modalAudioPlayingIds.delete(entry.id);
+      _modalUpdateAudioButtonsForEntry(entry.id, false);
+      return;
+    }
+
+    const paths = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
+    const primary = paths[0];
+    if (!primary || !entry.audioFilename) {
+      console.warn(`[modal-hist-audio] パス情報がありません`, { entry });
+      return;
+    }
+    const audioPath = `${primary.replace(/[\\/]+$/, "")}\\${entry.audioFilename}`;
+
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "⏳";
+    try {
+      let cached = _modalAudioCache.get(entry.id);
+      if (!cached) {
+        const res = await browser.runtime.sendMessage({ type: "READ_FILE_CHUNKS_B64", path: audioPath });
+        if (!res || !res.ok || !Array.isArray(res.chunksB64)) {
+          console.warn(`[modal-hist-audio] 音声読込失敗`, res?.error, { path: audioPath });
+          btn.textContent = originalText;
+          btn.disabled = false;
+          return;
+        }
+        const arrays = [];
+        for (const b64 of res.chunksB64) {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          arrays.push(arr);
+        }
+        const blob = new Blob(arrays, { type: entry.audioMimeType || "audio/webm" });
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+        audio.loop = true;
+        audio.onpause = () => {
+          if (audio.ended || audio.currentTime === 0) {
+            _modalAudioPlayingIds.delete(entry.id);
+            _modalUpdateAudioButtonsForEntry(entry.id, false);
+          }
+        };
+        cached = { audio, blobUrl };
+        _modalAudioCache.set(entry.id, cached);
+      }
+      await cached.audio.play();
+      _modalAudioPlayingIds.add(entry.id);
+      _modalUpdateAudioButtonsForEntry(entry.id, true);
+    } catch (err) {
+      console.warn(`[modal-hist-audio] 音声再生エラー`, err);
+      btn.textContent = originalText;
+    } finally {
+      btn.disabled = false;
+    }
+  }
   let _histPage     = 0;   // 現在ページ（0始まり）
   let _histPageSize = 100; // 1ページの表示件数（初期値、storage.get で上書き）
   // v1.26.2: ページ内ファーストビュー先行描画・裏読み込みの定数
@@ -2109,11 +2209,11 @@ function setupModalEvents(
     });
   }
 
-  // v1.26.0: GIF のみフィルター
-  const historyGifFilterInput = document.getElementById("history-gif-filter");
-  if (historyGifFilterInput) {
-    historyGifFilterInput.addEventListener("change", (e) => {
-      historyFilterGifOnly = e.target.checked;
+  // v1.32.2：形式フィルター（GIF のみ → プルダウン化）
+  const historyFormatFilterSelect = document.getElementById("history-format-filter");
+  if (historyFormatFilterSelect) {
+    historyFormatFilterSelect.addEventListener("change", (e) => {
+      historyFormatFilter = e.target.value || "all";
       _histPage = 0;
       renderHistory();
     });
@@ -2167,11 +2267,13 @@ function setupModalEvents(
         return tagMatch && authorMatch;
       });
     }
-    // v1.26.0: GIF のみフィルター（filename 拡張子ベース）
-    if (historyFilterGifOnly) {
+    // v1.32.2 GROUP-28 mvdl：形式フィルター（GIF のみ / 音声付き）
+    if (historyFormatFilter === "gif") {
       filtered = filtered.filter(e => /\.gif$/i.test(e.filename || ""));
+    } else if (historyFormatFilter === "audio") {
+      filtered = filtered.filter(e => !!e.audioFilename);
     }
-    const isFiltered = hasTagFilter || hasAuthFilter || historyFilterGifOnly;
+    const isFiltered = hasTagFilter || hasAuthFilter || historyFormatFilter !== "all";
 
     const totalFiltered = filtered.length;
     // ページ範囲を超えないよう補正
@@ -2428,9 +2530,15 @@ function setupModalEvents(
           data-href="${escapeHtml(entry.pageUrl)}">🔗 ${escapeHtml(displayUrl)}</a>`;
       }
 
+      // v1.32.2 GROUP-28 mvdl：音声あり時は左下スピーカーアイコン
+      const audioIconHtml = entry.audioFilename
+        ? `<button class="history-audio-icon" data-muted="${_modalAudioPlayingIds.has(entry.id) ? "0" : "1"}" data-audio-entry-id="${escapeHtml(entry.id)}" title="音声再生: ${escapeHtml(entry.audioFilename)}">${_modalAudioPlayingIds.has(entry.id) ? "🔊" : "🔇"}</button>`
+        : "";
+
       item["innerHTML"] = `
         <div class="history-thumb-placeholder" title="${escapeHtml(pathTitle)}"
           style="cursor:pointer">🖼</div>
+        ${audioIconHtml}
         <div class="history-overlay">
           <div class="history-body">
             <div class="history-filename">${escapeHtml(entry.filename)}</div>
@@ -2492,6 +2600,15 @@ function setupModalEvents(
         </div>`;
 
       const thumbEl = item.querySelector(".history-thumb-placeholder");
+
+      // v1.32.2 GROUP-28 mvdl：音声アイコンのクリックハンドラ
+      const audioIconEl = item.querySelector(".history-audio-icon");
+      if (audioIconEl) {
+        audioIconEl.addEventListener("click", (e) => {
+          e.stopPropagation();
+          _modalToggleAudio(entry, audioIconEl);
+        });
+      }
 
       /** サムネイルクリック時のプレビュー表示 */
       const safeGroup = groupEntries || [entry];

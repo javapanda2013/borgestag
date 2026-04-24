@@ -383,15 +383,13 @@
       padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
     }
     .hist-toolbar-filters-row input[type="text"]:focus { border-color: #4a90e2; }
-    /* GIF フィルターラベル（v1.22.2） */
-    .hist-gif-filter-label {
-      display: inline-flex; align-items: center; gap: 4px;
+    /* v1.32.2 GROUP-28 mvdl：形式フィルタープルダウン（旧 GIF のみチェックボックス） */
+    .hist-format-filter {
       font-size: 11px; color: #444; cursor: pointer;
       border: 1px solid #dde; border-radius: 4px;
       padding: 2px 8px; background: #fff; white-space: nowrap;
-      user-select: none;
     }
-    .hist-gif-filter-label input[type="checkbox"] { margin: 0; cursor: pointer; }
+    .hist-format-filter:focus { border-color: #4a90e2; outline: none; }
     /* 絞り込みチップ化（v1.21.1） */
     .hist-chip-wrap {
       position: relative;
@@ -1165,10 +1163,12 @@
             <option value="external_import">📥 外部取り込みのみ</option>
             <option value="normal">🖱 通常保存のみ</option>
           </select>
-          <label class="hist-gif-filter-label" id="hist-gif-filter-wrap" title="GIFのみ表示">
-            <input type="checkbox" id="hist-gif-filter" />
-            <span>GIF のみ</span>
-          </label>
+          <!-- v1.32.2 GROUP-28 mvdl：GIF のみチェックボックスをプルダウン化、音声付きフィルタ追加 -->
+          <select id="hist-format-filter" class="hist-format-filter" title="表示形式で絞り込み">
+            <option value="all">📄 全て</option>
+            <option value="gif">🎞 GIF のみ</option>
+            <option value="audio">🔊 音声付き</option>
+          </select>
         </div>
       </div>
     </div>

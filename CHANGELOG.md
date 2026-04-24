@@ -5,6 +5,59 @@
 
 ---
 
+## [1.32.2] - 2026-04-24
+
+### Fixed — viewer.html 音声ボタンが表示されない問題（GROUP-28 mvdl hotfix 7th）
+
+#### 症状
+v1.32.0 で viewer.html（保存した画像を開く）でも音声ボタンを実装したが、実際には**ボタンが表示されない**状態だった。
+
+#### 原因
+viewer.js の IIFE 構造で、画像読込ブロック（`res.dataUrl` / `res.chunksB64`）内の `return;` で IIFE が早期脱出し、末尾に置いた**音声ボタン設定コードに到達していなかった**。
+
+#### 対策
+音声ボタンの設定（`audioPath` があれば `audioBtn.style.display = "flex"` + click リスナー追加）を**画像読込ブロックの前**に移動。画像読込結果に関わらず音声ボタンを有効化。
+
+### Added — 保存ウィンドウの保存履歴にも音声再生 UI（GROUP-28 mvdl6）
+
+#### 要望
+ユーザー要望：保存ウィンドウ（modal.html）の保存履歴タブでも音声再生可能に。
+
+#### 実装
+- `modal.js` に `_modalAudioCache` / `_modalAudioPlayingIds` / `_modalToggleAudio()` を新設（settings.js の `_histAudioCache` / `_toggleHistAudio` と同等、modal ウィンドウごとに独立 state）
+- `_buildHistoryItem` の innerHTML に `.history-audio-icon` overlay 追加（entry.audioFilename 有り時のみ）
+- CSS `.history-audio-icon` 追加（左下 24×24 丸、緑背景は再生中）
+- `READ_FILE_CHUNKS_B64` 経由で音声ファイル取得 → Blob → loop 再生
+- 複数同時再生対応（他エントリ再生中でも停止しない）
+
+### Added — 形式フィルタープルダウン化＋音声付き絞り込み（GROUP-28 mvdl7）
+
+#### 要望
+ユーザー要望：各保存履歴画面で音声付き動画の絞り込み。既存の「GIF のみ」チェックボックスをプルダウン化して選択項目に「音声付き」など追加。
+
+#### 実装
+settings.html / settings.js / modal.js の保存履歴フィルタ UI を書換：
+
+- **UI 変更**：`<input type="checkbox">` → `<select>` + 3 択
+  - 📄 全て
+  - 🎞 GIF のみ
+  - 🔊 音声付き
+- **state 変更**：`_histGifFilter` / `historyFilterGifOnly`（bool）→ `_histFormatFilter` / `historyFormatFilter`（"all" | "gif" | "audio"）
+- **フィルタ判定**：
+  - `gif`：`entry.filename` が `.gif` で終わる
+  - `audio`：`entry.audioFilename` が truthy
+- **settings.js 3 箇所 + modal.js 1 箇所**の `hasGifFilter` 参照を `hasFormatFilter` に置換
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- viewer.html で音声あり動画を開くと**右下に🔇ボタンが表示**される（v1.32.0 で動作不備だったもの）
+- 保存ウィンドウの保存履歴タブで音声ありエントリに🔇アイコン表示、クリックで再生トグル
+- 設定画面 / 保存ウィンドウ両方の保存履歴タブに**形式プルダウン**が表示、「音声付き」を選ぶと音声ありエントリのみ表示
+- 「GIF のみ」選択時は従来どおり `.gif` ファイルのみ表示
+- 「全て」選択時はフィルタなし
+
+---
+
 ## [1.32.1] - 2026-04-24
 
 ### Fixed — インポート後の保存履歴が savedAt 順にならない問題（GROUP-29）

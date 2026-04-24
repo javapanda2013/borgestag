@@ -2655,10 +2655,11 @@ function setupHistoryTab() {
           <div style="font-size:12px;color:#555;margin-bottom:6px">対象値</div>
           <select id="rrd-source" style="width:100%;padding:6px 8px;font-size:13px;border:1px solid #ccc;border-radius:6px;font-family:inherit">
             <option value="">（選択してください）</option>
-            ${options.map(o => {
+            ${options.map((o, i) => {
               const label = `${o.kind === "tag" ? "🏷" : "✏️"} ${escHtml(o.value)}`;
-              const val = `${o.kind}\0${escHtml(o.value)}`;
-              return `<option value="${val}">${label}</option>`;
+              // v1.34.1 hotfix：HTML 属性値の NUL は parser で U+FFFD に置換される仕様のため、
+              // 従来の kind\0value 形式では分離不能だった。index 参照方式に変更（options 配列をクロージャ経由で参照）。
+              return `<option value="${i}">${label}</option>`;
             }).join("")}
           </select>
           ${options.length === 0 ? `<div style="font-size:12px;color:#c0392b;margin-top:6px">選択エントリにタグ・権利者がありません。</div>` : ""}
@@ -2692,7 +2693,11 @@ function setupHistoryTab() {
     okBtn.addEventListener("click", async () => {
       const raw = sourceSel.value;
       if (!raw) return;
-      const [kind, oldVal] = raw.split("\0");
+      const idx = parseInt(raw, 10);
+      const selected = options[idx];
+      if (!selected) return;
+      const kind = selected.kind;
+      const oldVal = selected.value;
       const newValRaw = isReplace ? (targetInput.value || "").trim() : "";
       if (isReplace && !newValRaw) return;
 

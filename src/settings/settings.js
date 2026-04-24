@@ -2255,6 +2255,8 @@ function setupHistoryTab() {
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-replace-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-remove-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
@@ -2268,6 +2270,8 @@ function setupHistoryTab() {
     document.getElementById("hist-deselect-all").disabled = true;
     document.getElementById("hist-add-tag-selected").disabled = true;
     document.getElementById("hist-add-author-selected").disabled = true;
+    document.getElementById("hist-replace-selected").disabled = true;
+    document.getElementById("hist-remove-selected").disabled = true;
     document.getElementById("hist-sync-global-tags").disabled = true;
     document.getElementById("hist-group-selected").disabled = true;
     document.getElementById("hist-ungroup-selected").disabled = true;
@@ -2353,6 +2357,18 @@ function setupHistoryTab() {
   document.getElementById("hist-add-author-selected").addEventListener("click", () => {
     if (!_histSelected.size) return;
     showAddAuthorDialog([..._histSelected]);
+  });
+
+  // v1.34.0 GROUP-3-b：一括置換
+  document.getElementById("hist-replace-selected").addEventListener("click", () => {
+    if (!_histSelected.size) return;
+    showReplaceRemoveDialog([..._histSelected], "replace");
+  });
+
+  // v1.34.0 GROUP-3-b：一括除去
+  document.getElementById("hist-remove-selected").addEventListener("click", () => {
+    if (!_histSelected.size) return;
+    showReplaceRemoveDialog([..._histSelected], "remove");
   });
 
   /**
@@ -2599,6 +2615,159 @@ function setupHistoryTab() {
     overlay.querySelector(".pd-cancel").addEventListener("click", () => overlay.remove());
     overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
     setTimeout(() => input.focus(), 50);
+  }
+
+  /**
+   * v1.34.0 GROUP-3-b：置換／除去共用モーダル
+   * @param {string[]} targetIds 対象エントリのID配列
+   * @param {"replace"|"remove"} mode
+   */
+  function showReplaceRemoveDialog(targetIds, mode) {
+    const existing = document.querySelector(".replace-remove-dialog-overlay");
+    if (existing) existing.remove();
+
+    // 選択エントリの tags ∪ authors を収集（実在値のみ）
+    const targetSet = new Set(targetIds);
+    const entries = _historyData.filter(e => targetSet.has(e.id));
+    const tagSet = new Set();
+    const authorSet = new Set();
+    for (const e of entries) {
+      for (const t of e.tags || []) tagSet.add(t);
+      for (const a of getEntryAuthors(e)) authorSet.add(a);
+    }
+    // "kind:value" 形式で一意化（同じ値がタグ・権利者双方に実在しても両方見せる）
+    const options = [];
+    for (const t of [...tagSet].sort((a, b) => a.localeCompare(b))) options.push({ kind: "tag", value: t });
+    for (const a of [...authorSet].sort((a, b) => a.localeCompare(b))) options.push({ kind: "author", value: a });
+
+    const isReplace = mode === "replace";
+    const title = isReplace ? "🔁 置換" : "➖ 除去";
+    const action = isReplace ? "置換する" : "除去する";
+    const overlay = document.createElement("div");
+    overlay.className = "replace-remove-dialog-overlay period-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="period-dialog" style="max-width:440px">
+        <h3>${title}${targetIds.length > 1 ? `（${targetIds.length} 件）` : ""}</h3>
+        <div style="font-size:12px;color:#888;margin-bottom:10px">
+          選択エントリに実在するタグ・権利者から対象値を選んでください（完全一致で${isReplace ? "置換" : "除去"}）。
+        </div>
+        <div style="margin-bottom:14px">
+          <div style="font-size:12px;color:#555;margin-bottom:6px">対象値</div>
+          <select id="rrd-source" style="width:100%;padding:6px 8px;font-size:13px;border:1px solid #ccc;border-radius:6px;font-family:inherit">
+            <option value="">（選択してください）</option>
+            ${options.map(o => {
+              const label = `${o.kind === "tag" ? "🏷" : "✏️"} ${escHtml(o.value)}`;
+              const val = `${o.kind}\0${escHtml(o.value)}`;
+              return `<option value="${val}">${label}</option>`;
+            }).join("")}
+          </select>
+          ${options.length === 0 ? `<div style="font-size:12px;color:#c0392b;margin-top:6px">選択エントリにタグ・権利者がありません。</div>` : ""}
+        </div>
+        ${isReplace ? `
+        <div style="margin-bottom:14px">
+          <div style="font-size:12px;color:#555;margin-bottom:6px">置換後の値</div>
+          <input id="rrd-target" type="text" autocomplete="off" placeholder="置換後の値を入力…"
+            style="width:100%;padding:6px 8px;font-size:13px;border:1px solid #ccc;border-radius:6px;outline:none;font-family:inherit" />
+        </div>` : ""}
+        <div class="pd-footer">
+          <button class="pd-cancel">キャンセル</button>
+          <button class="rrd-ok pd-ok" style="background:${isReplace ? "#4a90e2" : "#c0392b"}" disabled>${action}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const sourceSel = overlay.querySelector("#rrd-source");
+    const targetInput = overlay.querySelector("#rrd-target");
+    const okBtn = overlay.querySelector(".rrd-ok");
+
+    function updateOkState() {
+      const hasSource = !!sourceSel.value;
+      if (!isReplace) { okBtn.disabled = !hasSource; return; }
+      const newVal = (targetInput?.value || "").trim();
+      okBtn.disabled = !(hasSource && newVal);
+    }
+    sourceSel.addEventListener("change", updateOkState);
+    if (targetInput) targetInput.addEventListener("input", updateOkState);
+
+    okBtn.addEventListener("click", async () => {
+      const raw = sourceSel.value;
+      if (!raw) return;
+      const [kind, oldVal] = raw.split("\0");
+      const newValRaw = isReplace ? (targetInput.value || "").trim() : "";
+      if (isReplace && !newValRaw) return;
+
+      // 除去時：全タグ／全権利者が空になるエントリがあるか事前チェック
+      if (!isReplace) {
+        const wouldEmpty = [];
+        for (const e of entries) {
+          if (kind === "tag") {
+            const curTags = (e.tags || []).filter(t => t !== oldVal);
+            if ((e.tags || []).includes(oldVal) && curTags.length === 0) wouldEmpty.push(e);
+          } else {
+            const curAuthors = getEntryAuthors(e).filter(a => a !== oldVal);
+            if (getEntryAuthors(e).includes(oldVal) && curAuthors.length === 0) wouldEmpty.push(e);
+          }
+        }
+        if (wouldEmpty.length > 0) {
+          const label = kind === "tag" ? "タグ" : "権利者";
+          const ok = confirm(`除去すると ${wouldEmpty.length} 件のエントリで${label}が空になります。続行しますか？`);
+          if (!ok) return;
+        }
+      }
+
+      overlay.remove();
+
+      const stored = await browser.storage.local.get("saveHistory");
+      const history = stored.saveHistory || [];
+      let processed = 0;
+      for (const entry of history) {
+        if (!targetSet.has(entry.id)) continue;
+        if (kind === "tag") {
+          const tags = entry.tags || [];
+          if (!tags.includes(oldVal)) continue;
+          if (isReplace) {
+            const set = new Set(tags.map(t => (t === oldVal ? newValRaw : t)));
+            entry.tags = [...set];
+          } else {
+            entry.tags = tags.filter(t => t !== oldVal);
+          }
+          processed++;
+        } else {
+          const authors = getEntryAuthors(entry);
+          if (!authors.includes(oldVal)) continue;
+          if (isReplace) {
+            const set = new Set(authors.map(a => (a === oldVal ? newValRaw : a)));
+            entry.authors = [...set];
+          } else {
+            entry.authors = authors.filter(a => a !== oldVal);
+          }
+          delete entry.author;
+          processed++;
+        }
+      }
+
+      if (processed > 0) {
+        await browser.storage.local.set({ saveHistory: history });
+        // グローバルカタログにも反映（置換時のみ、新値を追加）
+        if (isReplace) {
+          const key = kind === "tag" ? "globalTags" : "globalAuthors";
+          const { [key]: g } = await browser.storage.local.get(key);
+          const gSet = new Set(g || []);
+          gSet.add(newValRaw);
+          await browser.storage.local.set({ [key]: [...gSet] });
+        }
+        _historyData = history;
+        for (const id of targetIds) _refreshHistCardByEntryId(id);
+        _updateHistCount();
+      }
+      const label = kind === "tag" ? "タグ" : "権利者";
+      const verb = isReplace ? "置換" : "除去";
+      showStatus(`${processed} 件の${label}を${verb}しました`);
+    });
+
+    overlay.querySelector(".pd-cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+    setTimeout(() => sourceSel.focus(), 50);
   }
 
   document.getElementById("hist-delete-period").addEventListener("click", () => {
@@ -2936,6 +3105,8 @@ function renderHistoryGrid() {
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-replace-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-remove-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
@@ -2953,6 +3124,8 @@ function renderHistoryGrid() {
   document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
   document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
   document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
+  document.getElementById("hist-replace-selected").disabled = _histSelected.size === 0;
+  document.getElementById("hist-remove-selected").disabled = _histSelected.size === 0;
   document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
   document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
   document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
@@ -3096,6 +3269,8 @@ function renderHistoryGridGrouped(grid, entries) {
         document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
         document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
         document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
+        document.getElementById("hist-replace-selected").disabled = _histSelected.size === 0;
+        document.getElementById("hist-remove-selected").disabled = _histSelected.size === 0;
         document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
         document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
         document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
@@ -3769,6 +3944,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-tag-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-add-author-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-replace-selected").disabled = _histSelected.size === 0;
+    document.getElementById("hist-remove-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-sync-global-tags").disabled = _histSelected.size === 0;
     document.getElementById("hist-group-selected").disabled = _histSelected.size < 2;
     document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;

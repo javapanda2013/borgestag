@@ -119,18 +119,49 @@ async function recordAudio(previewVideo, durationSec) {
 
     const startRecording = async () => {
       try {
-        // 録音のために audio track を有効化。ユーザーには無音（volume=0）。
-        // muted=true だと captureStream で audio track が消えるブラウザ挙動があるため
-        // muted=false + volume=0 の組合せにする。
-        previewVideo.muted = false;
+        // v1.31.6：確実に unmuted + volume=0 状態にしてから play → captureStream の順番で実行。
+        // play() を先に呼ぶことで audio pipeline が稼働、captureStream で audio track が取得できる。
+        previewVideo.muted  = false;
         previewVideo.volume = 0;
+
+        console.log("[video_convert] preview state before play:",
+          `readyState=${previewVideo.readyState}`,
+          `muted=${previewVideo.muted}`,
+          `volume=${previewVideo.volume}`,
+          `duration=${previewVideo.duration}`);
+
+        // まず再生を開始（audio pipeline を活性化）
+        try { previewVideo.currentTime = 0; } catch (_) {}
+        try {
+          await previewVideo.play();
+        } catch (playErr) {
+          console.warn("[video_convert] preview play() failed:", playErr);
+          return resolveOnce(null);
+        }
+
+        // 少し待って audio pipeline が安定してから captureStream
+        await new Promise(r => setTimeout(r, 150));
 
         const stream = previewVideo.captureStream();
         const audioTracks = stream.getAudioTracks();
+        const videoTracks = stream.getVideoTracks();
+        console.log("[video_convert] stream tracks:",
+          `audio=${audioTracks.length}`,
+          `video=${videoTracks.length}`);
         if (!audioTracks || audioTracks.length === 0) {
-          console.info("[video_convert] no audio track in preview stream");
+          console.info("[video_convert] no audio track (probably no audio in source video or Firefox capture restriction)");
           return resolveOnce(null);
         }
+        // track 状態を確認
+        console.log("[video_convert] audio track[0]:",
+          `kind=${audioTracks[0].kind}`,
+          `enabled=${audioTracks[0].enabled}`,
+          `muted=${audioTracks[0].muted}`,
+          `readyState=${audioTracks[0].readyState}`);
+        if (audioTracks[0].muted) {
+          console.warn("[video_convert] audio track is MUTED at source, recording may be silent");
+        }
+        audioTracks[0].enabled = true;
 
         if (!MediaRecorder.isTypeSupported(PHASE1_PARAMS.AUDIO_MIME)) {
           console.warn("[video_convert] MIME not supported:", PHASE1_PARAMS.AUDIO_MIME);
@@ -140,8 +171,16 @@ async function recordAudio(previewVideo, durationSec) {
         const audioStream = new MediaStream(audioTracks);
         recorder = new MediaRecorder(audioStream, { mimeType: PHASE1_PARAMS.AUDIO_MIME });
         const chunks = [];
-        recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            chunks.push(e.data);
+            console.log(`[video_convert] dataavailable: ${e.data.size} bytes`);
+          }
+        };
+        recorder.onstart = () => console.log("[video_convert] recorder started");
         recorder.onstop = () => {
+          const totalSize = chunks.reduce((s, c) => s + c.size, 0);
+          console.log(`[video_convert] recorder stopped, total ${chunks.length} chunks = ${totalSize} bytes`);
           const blob = new Blob(chunks, { type: "audio/webm" });
           resolveOnce(blob);
         };
@@ -151,8 +190,6 @@ async function recordAudio(previewVideo, durationSec) {
         };
 
         recorder.start();
-        try { previewVideo.currentTime = 0; } catch (_) {}
-        await previewVideo.play();
         setTimeout(() => {
           try {
             if (recorder && recorder.state === "recording") recorder.stop();
@@ -215,7 +252,11 @@ async function init() {
     ].join("");
 
     // プレビュー動画
+    // v1.31.6 GROUP-28 mvdl hotfix：muted=true だと Firefox captureStream で audio track が
+    // 取得できないため、HTML から muted 属性を外し、ここで volume=0 にしてユーザー無音にする。
     const video = document.getElementById("preview");
+    video.volume = 0;
+    video.muted = false;
     video.src = videoUrl;
     video.load();
 
@@ -380,14 +421,22 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
       // storage.local._pendingModal に入れると Firefox の onChanged broadcast で
       // 全 extension context にクローンされ 8GB 級メモリ膨張でタブクラッシュしていた。
       // → background.js のメモリに stash し、_pendingModal はフラグだけにする。
-      await browser.runtime.sendMessage({
+      console.log(`[video_convert] sending STASH_CONVERSION_PAYLOAD: ` +
+        `imageUrl.length=${obj.image.length}, ` +
+        `suggestedFilename=${suggestedFilename}, ` +
+        `hasAudio=${!!associatedAudio}` +
+        (associatedAudio ? `, audioDataUrl.length=${associatedAudio.dataUrl.length}` : ""));
+      const stashRes = await browser.runtime.sendMessage({
         type: "STASH_CONVERSION_PAYLOAD",
         imageUrl: obj.image,
         pageUrl: pageUrl || "",
         suggestedFilename,
         associatedAudio,
       });
-      await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
+      console.log(`[video_convert] STASH result:`, stashRes);
+
+      const openRes = await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
+      console.log(`[video_convert] OPEN_MODAL_FROM_CONVERSION result:`, openRes);
       // 受領データクリア（次回衝突防止）
       await browser.storage.local.remove("_pendingVideoConvert");
       // v1.31.5：_pendingModal は background 側で既に __fromConversion フラグでセット済。

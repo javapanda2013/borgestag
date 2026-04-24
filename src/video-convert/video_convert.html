@@ -110,7 +110,13 @@
     <h1>🎬 動画 → GIF 変換（Phase 1 MVP）</h1>
 
     <div class="video-wrap">
-      <video id="preview" controls muted playsinline></video>
+      <!--
+        v1.31.6 GROUP-28 mvdl hotfix：muted 属性を削除。
+        Firefox の captureStream() は初期 muted=true の video 要素から audio track を
+        取得できないため、HTML 初期状態から muted を外す。ユーザーへの無音化は
+        init() で `video.volume = 0` に設定して実現。
+      -->
+      <video id="preview" controls playsinline></video>
     </div>
 
     <div class="meta" id="meta"></div>

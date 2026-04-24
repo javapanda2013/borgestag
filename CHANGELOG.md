@@ -5,6 +5,55 @@
 
 ---
 
+## [1.31.6] - 2026-04-24
+
+### Fixed — muted 属性で captureStream から audio track が取れない問題（GROUP-28 mvdl hotfix 3rd）
+
+#### 症状
+v1.31.5 でクラッシュは解消（WebExtensions プロセスピーク 8GB → 913MB、Profiler 確認済）し動画→GIF 変換が完走するようになったが、**保存フォルダに .webm が出力されず、保存履歴にも🔇アイコンが出ない**（音声録音が失敗している）。
+
+#### 原因
+`src/video-convert/video_convert.html` のプレビュー video 要素に `muted` 属性が付いていた：
+
+```html
+<video id="preview" controls muted playsinline></video>
+```
+
+Firefox の `HTMLMediaElement.captureStream()` は、**初期 muted=true の video 要素から audio track を取得できない**挙動がある。初期ロード時に muted=true で audio pipeline が抑制され、後から JS で `muted = false` に変更しても stream には audio track が追加されない。
+
+結果：`stream.getAudioTracks()` が空配列を返し、recordAudio が null を返却、associatedAudio = null で GIF のみ保存。
+
+#### 対策
+1. **HTML から `muted` 属性を削除**：
+   ```html
+   <video id="preview" controls playsinline></video>
+   ```
+2. **init() で `video.volume = 0` + `video.muted = false`**：ユーザーには無音・audio pipeline は稼働状態
+3. **recordAudio：play() を先に呼んでから captureStream()**：audio pipeline 稼働後にキャプチャ、150ms 待って安定化
+4. **audio track の状態を検証**：`track.muted / enabled / readyState` をログ出力、`muted` なら警告
+5. **MediaRecorder のライフサイクル詳細ログ**：`onstart` / `ondataavailable`（byte 数）/ `onstop`（chunk 数と合計バイト）を追加
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 動画→GIF 変換後、保存フォルダに **GIF + .webm の 2 ファイル**が出る
+- 保存履歴タブで🔇アイコンが表示される
+- F12 コンソールで以下のログが出力される：
+  - `[video_convert] preview state before play: readyState=...`
+  - `[video_convert] stream tracks: audio=1 video=1`
+  - `[video_convert] audio track[0]: ...`
+  - `[video_convert] recorder started`
+  - `[video_convert] dataavailable: N bytes`（複数回）
+  - `[video_convert] recorder stopped, total M chunks = L bytes`
+- 音声なしの mp4 源（無音動画）の場合は `no audio track` ログが出て GIF のみ保存される
+
+#### もし v1.31.6 でも音声が出ない場合の判別
+F12 コンソールの `[video_convert]` ログを見ると：
+- `stream tracks: audio=0` → Firefox の captureStream が依然 audio を取れない、深掘り調査必要
+- `audio track is MUTED at source` → source video の問題、Phase 2 で content.js フレーム抽出方式検討
+- `ondataavailable` が 0 回 → MediaRecorder が正常稼働していない
+
+---
+
 ## [1.31.5] - 2026-04-24
 
 ### Fixed — Phase 1.5 で WebExtensions プロセス 8GB 膨張・タブクラッシュを包括 hotfix（GROUP-28 mvdl hotfix）

@@ -95,14 +95,21 @@ async function initModal() {
   // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の場合は
   // background の _pendingConversionStash から受け取る（storage.local broadcast 回避）。
   let imageUrl, pageUrl, suggestedFilename, associatedAudio;
+  console.log(`[modal] initModal: _pendingModal keys=${Object.keys(_pendingModal).join(",")}, ` +
+    `__fromConversion=${!!_pendingModal.__fromConversion}`);
   if (_pendingModal.__fromConversion) {
     const claim = await browser.runtime.sendMessage({ type: "CLAIM_CONVERSION_PAYLOAD" });
+    console.log(`[modal] CLAIM_CONVERSION_PAYLOAD response:`, claim);
     if (!claim || !claim.ok || !claim.payload) {
-      console.error("[modal] __fromConversion flag but no payload stashed");
+      console.error("[modal] __fromConversion flag but no payload stashed, closing");
       window.close();
       return;
     }
     ({ imageUrl, pageUrl, suggestedFilename, associatedAudio } = claim.payload);
+    console.log(`[modal] claim payload: ` +
+      `imageUrl.length=${imageUrl?.length}, ` +
+      `suggestedFilename=${suggestedFilename}, ` +
+      `hasAudio=${!!associatedAudio}`);
   } else {
     // 通常経路：従来通り storage.local._pendingModal から受け取る
     ({ imageUrl, pageUrl, suggestedFilename } = _pendingModal);

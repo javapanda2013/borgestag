@@ -333,18 +333,24 @@ async function handleAsyncMessage(message, sender) {
         suggestedFilename: message.suggestedFilename,
         associatedAudio:  message.associatedAudio || null,
       };
+      console.log(`[background] STASH_CONVERSION_PAYLOAD: ` +
+        `imageUrl.length=${message.imageUrl?.length}, ` +
+        `hasAudio=${!!message.associatedAudio}`);
       return { ok: true };
 
     case "CLAIM_CONVERSION_PAYLOAD": {
       // modal.js initModal が起動時に 1 回だけ取得。取得後は即 null 化。
       const payload = _pendingConversionStash;
       _pendingConversionStash = null;
+      console.log(`[background] CLAIM_CONVERSION_PAYLOAD: ` +
+        `payload=${payload ? "present" : "null"}`);
       return { ok: true, payload };
     }
 
     case "OPEN_MODAL_FROM_CONVERSION":
       // storage.local._pendingModal には __fromConversion フラグだけを入れ、
       // imageUrl / associatedAudio などの大データは _pendingConversionStash から取得。
+      console.log(`[background] OPEN_MODAL_FROM_CONVERSION`);
       openModalFromConversion();
       return;
     case "LIST_DIR":

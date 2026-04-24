@@ -2242,7 +2242,13 @@ function setupHistoryTab() {
 
   // 全選択（絞り込み中の全件）
   selectAllBtn.addEventListener("click", () => {
-    if (_histFilterTagChips.length === 0 && _histFilterAuthorChips.length === 0 && !_histSourceFilter) return;
+    // v1.33.2：updateSelectAllBtn の 4 種フィルタ判定と条件を揃える（形式フィルタ漏れを修正）
+    if (
+      _histFilterTagChips.length === 0 &&
+      _histFilterAuthorChips.length === 0 &&
+      !_histSourceFilter &&
+      _histFormatFilter === "all"
+    ) return;
     const filtered = _historyData.filter(e => _entryMatchesCurrentFilter(e));
     filtered.forEach(e => _histSelected.add(e.id));
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;

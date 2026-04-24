@@ -94,6 +94,32 @@ let _extPickerLastClickedIdx = -1;  // Shift+クリック範囲選択の起点
 // 初期化
 // ----------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
+  // v1.32.1 GROUP-29：settings 画面起動時に saveHistory の savedAt 降順ソートを保証。
+  // 過去の import（v1.32.0 以前）で順序が乱れたデータを自動修復する one-time 修正。
+  // 既に降順なら何もしない（冪等）、何度実行しても安全。
+  try {
+    const { saveHistory } = await browser.storage.local.get("saveHistory");
+    if (Array.isArray(saveHistory) && saveHistory.length >= 2) {
+      let outOfOrder = false;
+      for (let i = 0; i < saveHistory.length - 1; i++) {
+        const ta = saveHistory[i]?.savedAt     ? new Date(saveHistory[i].savedAt).getTime()     : 0;
+        const tb = saveHistory[i + 1]?.savedAt ? new Date(saveHistory[i + 1].savedAt).getTime() : 0;
+        if (ta < tb) { outOfOrder = true; break; }
+      }
+      if (outOfOrder) {
+        saveHistory.sort((a, b) => {
+          const ta = a?.savedAt ? new Date(a.savedAt).getTime() : 0;
+          const tb = b?.savedAt ? new Date(b.savedAt).getTime() : 0;
+          return tb - ta;
+        });
+        await browser.storage.local.set({ saveHistory });
+        console.log(`[GROUP-29] saveHistory を savedAt 降順で再ソート（${saveHistory.length} 件）`);
+      }
+    }
+  } catch (err) {
+    console.warn("[GROUP-29] saveHistory 再ソート失敗", err);
+  }
+
   // ---- タブスクロールインジケーター ----
   const _tabBar      = document.querySelector(".tab-bar");
   const _indLeft     = document.querySelector(".tab-scroll-left");
@@ -1396,7 +1422,10 @@ async function importData(e) {
     } catch (err) { logError(`modalSize の保存に失敗: ${err.message}`); return; }
   }
 
-  // ---- saveHistory のマージ（id重複除去・最大10件） ----
+  // ---- saveHistory のマージ（id重複除去・savedAt 降順ソート） ----
+  // v1.32.1 GROUP-29：従来は `[...newItems, ...existing]` で imported を先頭に置いていた
+  // ため、手元に新しい履歴があり古い履歴を import すると古い方が前に来ていた。
+  // savedAt 降順でソートして常に「新しい順＝先頭」に統一する。
   if (Array.isArray(parsed.saveHistory)) {
     try {
       const existing = current.saveHistory || [];
@@ -1409,9 +1438,15 @@ async function importData(e) {
           delete h.subTags;
         }
       });
-      const merged = [...newItems, ...existing]; // 上限なし
+      const merged = [...newItems, ...existing];
+      // v1.32.1：savedAt 降順で並べ替え（新しい順＝先頭、savedAt なしは末尾）
+      merged.sort((a, b) => {
+        const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+        const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+        return tb - ta;
+      });
       await browser.storage.local.set({ saveHistory: merged });
-      log(`🗂 saveHistory: ${newItems.length} 件追加（合計 ${merged.length} 件）`);
+      log(`🗂 saveHistory: ${newItems.length} 件追加（合計 ${merged.length} 件、savedAt 降順でソート）`);
     } catch (err) { logError(`saveHistory の保存に失敗: ${err.message}`); return; }
   }
 

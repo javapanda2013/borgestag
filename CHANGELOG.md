@@ -5,6 +5,50 @@
 
 ---
 
+## [1.32.1] - 2026-04-24
+
+### Fixed — インポート後の保存履歴が savedAt 順にならない問題（GROUP-29）
+
+#### 症状
+手元に**新しい**保存履歴がある状態で、**古い**保存履歴をインポートすると、古い imported エントリが先頭に来て、新しい既存エントリが後ろに押しやられる。保存履歴タブは savedAt 降順（最新が先頭）が期待動作。
+
+#### 原因（2026-04-24 調査）
+`settings.js` の import マージロジック（`_applyImportedPayload`）：
+
+```js
+// 従来
+const merged = [...newItems, ...existing];  // imported を先頭に prepend
+```
+
+imported を先頭に置いていたため、imported の savedAt が古くても常に先頭に来ていた。
+
+#### Q29 回答（ユーザー、2026-04-24）
+- Q29-1：**最新が先頭（ファイルの保存日時順）**
+- Q29-2：**新しい日付の履歴に古い履歴を読み込んだら前に来た**（逆方向の症状）
+- Q29-3：**対応重くないなら早めに消化**
+- Q29-4：**並び順切替 UI はない**
+
+#### 対策
+1. **インポート時のマージに savedAt 降順ソートを追加**：
+   ```js
+   const merged = [...newItems, ...existing];
+   merged.sort((a, b) => {
+     const ta = a?.savedAt ? new Date(a.savedAt).getTime() : 0;
+     const tb = b?.savedAt ? new Date(b.savedAt).getTime() : 0;
+     return tb - ta; // 降順
+   });
+   ```
+2. **設定画面起動時に冪等 one-time 再ソート**：過去の import（v1.32.0 以前）で順序が乱れたデータを自動修復。settings.js DOMContentLoaded で saveHistory を走査、降順でない箇所があれば sort して storage に戻す。冪等で何度実行しても安全。
+
+#### 動作確認項目
+- **Native 変更なし**（native v1.11.1 維持）
+- 設定画面を開くだけで既存の順序乱れデータが自動修正される（コンソールに `[GROUP-29] saveHistory を savedAt 降順で再ソート` ログ）
+- 古い履歴を import しても既存の新しい履歴が先頭に残る（正しい savedAt 降順）
+- savedAt なしエントリ（あるとすれば）は末尾に回る
+- 通常保存（unshift）は従来どおり最新が先頭に来る
+
+---
+
 ## [1.32.0] - 2026-04-24
 
 ### Added — 音声再生の拡張（GROUP-28 mvdl Phase 2 partial）

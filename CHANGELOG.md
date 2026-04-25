@@ -5,6 +5,46 @@
 
 ---
 
+## [1.39.0] - 2026-04-25
+
+### Improved — 処理中モーダルのレイアウト調整＋プレビュー画像にキャプション（GROUP-40）
+
+#### 背景
+v1.38.1 リリース後の動作確認時、ユーザーから 4 件の UI 調整要望：
+1. プレビュー画像下に「処理待ちの間…表示しています」キャプションが欲しい（お気に入りソース時は文言を変える）
+2. スピナー位置がプレビューの表示領域を狭めている → メッセージ左にインライン化、完了アイコンも同位置に置換することで二重 ✅ 表示を解消
+3. 閉じるボタンを文言の右に配置、busy/done 状態でレイアウトが揺れないよう縦幅を確保
+4. プレビュー画像を倍程度のサイズに（縦幅基準で倍、横幅は画像のアスペクト比に合わせて伸縮）
+
+#### 実装
+**`settings.html` の busy modal HTML/CSS 再構成**：
+- プレビュー img：`max-width: none` ／ `max-height: 240px`（旧 120px の倍） ／ `width: auto` ／ `object-fit: contain`。横幅は画像アスペクト比に追従
+- modal card：`max-width: 80vw` で画面はみ出し防止、`display: inline-block` で画像幅に追従
+- キャプション div：プレビュー直下、グレー小フォント
+- status-row：flex 横並びで `[spinner/icon] [message] [close-btn]`、`min-height: 30px` で busy/done 間のレイアウトジャンプ防止
+- spinner / icon サイズ：32/36px → 20px（インライン化に合わせて縮小）
+
+**`settings.js`**：
+- `_loadBusyPreview`：`isFavSource = favs.length > 0` で事前に判別（修正前のコメント「ランダム選定後にわかる」は誤認、favorites プールから選ぶ時点で確定）。caption に文言設定：
+  - お気に入りプール使用時：「処理待ちの間お気に入りからランダムに表示しています」
+  - 全保存履歴プール使用時：「処理待ちの間ランダムな画像を表示しています」
+  - プレビュー取得失敗時は caption も非表示
+- `showBusyModal`：caption 要素を初期非表示にリセット、status-row の各要素も新構造に合わせる
+- `completeBusyModal`：spinner と icon は同じスロットで切替、`doneMessage` には `✅` を含めない方針に変更
+
+**7 ハンドラの `completeBusyModal()` 引数から `✅ ` を除去**（インライン icon と二重表示になっていたため）：
+- `削除` / `グループ化` / `グループ解除` / `タグ追加` / `権利者追加` / `置換・除去` / `タグ反映` / `お気に入り追加` / `お気に入り解除`
+
+### Files Changed
+- `manifest.json`：1.38.1 → 1.39.0
+- `src/settings/settings.html`：busy modal レイアウト再構成（キャプション追加、status-row 横並び、プレビュー拡大）
+- `src/settings/settings.js`：`_loadBusyPreview` キャプション設定、`showBusyModal`／`completeBusyModal` 新構造対応、7 ハンドラの ✅ プレフィックス除去
+
+### Files Unchanged
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.38.1] - 2026-04-25
 
 ### Fixed — 処理中モーダル完了時の auto-close 削除（Q-ux-B 要件不一致）

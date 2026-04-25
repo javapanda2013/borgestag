@@ -2282,28 +2282,37 @@ function setupHistoryTab() {
   //   showBusyModal("処理中…", `${n} 件`);
   //   try {
   //     // ... 重い処理
-  //     completeBusyModal("✅ 完了");
+  //     completeBusyModal("完了");
   //   } finally { hideBusyModal(); }   // 完了済なら no-op、エラーなら即閉じ
   let _busyState = "hidden"; // hidden / busy / done
   let _busyPreviewToken = 0; // 古いプレビュー fetch を破棄するためのトークン
 
   // v1.38.0：お気に入りからランダム 1 件選び、なければ全保存履歴からランダム。サムネ取得＋プレビュー表示
+  // v1.39.0 GROUP-40-caption：表示画像のソース（favorite or 全保存履歴）に応じてキャプションも切替
   async function _loadBusyPreview(token) {
     try {
       const list = (_historyData || []).filter(e => e?.thumbId);
       if (list.length === 0) return;
       const favs = list.filter(e => !!e.favorite);
-      const pool = favs.length > 0 ? favs : list;
+      const isFavSource = favs.length > 0;
+      const pool = isFavSource ? favs : list;
       const pick = pool[Math.floor(Math.random() * pool.length)];
       const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: pick.thumbId });
       // この間に showBusyModal が再度呼ばれていれば、古いトークンは破棄
       if (token !== _busyPreviewToken) return;
-      if (_busyState !== "busy") return;
+      if (_busyState !== "busy" && _busyState !== "done") return;
       if (r?.dataUrl) {
         const img = document.getElementById("busy-modal-preview");
+        const caption = document.getElementById("busy-modal-caption");
         if (img) {
           img.src = r.dataUrl;
           img.style.display = "block";
+        }
+        if (caption) {
+          caption.textContent = isFavSource
+            ? "処理待ちの間お気に入りからランダムに表示しています"
+            : "処理待ちの間ランダムな画像を表示しています";
+          caption.style.display = "block";
         }
       }
     } catch (_) { /* プレビュー失敗は致命的ではないので握りつぶす */ }
@@ -2323,12 +2332,15 @@ function setupHistoryTab() {
     const icon = document.getElementById("busy-modal-icon");
     const closeBtn = document.getElementById("busy-modal-close");
     const preview = document.getElementById("busy-modal-preview");
+    const caption = document.getElementById("busy-modal-caption");
     if (msg) msg.textContent = message || "処理中…";
     if (subEl) subEl.textContent = sub || "";
-    if (spinner) spinner.style.display = "flex";
+    // v1.39.0 GROUP-40-spinner-inline：スピナーは flex item として inline 表示
+    if (spinner) spinner.style.display = "block";
     if (icon) icon.style.display = "none";
     if (closeBtn) closeBtn.style.display = "none";
     if (preview) { preview.style.display = "none"; preview.removeAttribute("src"); }
+    if (caption) { caption.style.display = "none"; caption.textContent = ""; }
     overlay.dataset.shown = "1";
     overlay.style.display = "flex";
     // プレビュー画像取得は非同期で進行
@@ -2337,6 +2349,8 @@ function setupHistoryTab() {
 
   // v1.38.1：完了時はプレビュー画像を眺める時間を確保するため auto-close せず、
   // ユーザーが閉じるボタンを押すまで残す（Q-ux-B 本来要件）
+  // v1.39.0 GROUP-40：スピナーが居た位置で ✅ アイコンに置換、閉じるボタンは同じ行の右へ。
+  // doneMessage には ✅ を含めない（インライン icon と二重になるため）
   function completeBusyModal(doneMessage) {
     if (_busyState === "hidden") return; // showBusyModal なしで呼ばれた場合は無視
     _busyState = "done";
@@ -2347,13 +2361,12 @@ function setupHistoryTab() {
     const closeBtn = document.getElementById("busy-modal-close");
     if (spinner) spinner.style.display = "none";
     if (icon) icon.style.display = "block";
-    if (msg) msg.textContent = doneMessage || "✅ 完了";
+    if (msg) msg.textContent = doneMessage || "完了";
     if (subEl) subEl.textContent = "";
     if (closeBtn) {
       closeBtn.style.display = "inline-block";
       closeBtn.onclick = () => { _busyForceHide(); };
     }
-    // auto-close なし：プレビュー画像を眺めたいので閉じるのはユーザー操作のみ
   }
 
   function _busyForceHide() {
@@ -2411,7 +2424,7 @@ function setupHistoryTab() {
     try {
       const changed = await _setBulkFavorite(ids, true);
       showStatus(`${changed} 件をお気に入りに追加しました`);
-      completeBusyModal(`✅ ${changed} 件をお気に入りに追加`);
+      completeBusyModal(`${changed} 件をお気に入りに追加しました`);
     } finally { hideBusyModal(); }
   });
 
@@ -2423,7 +2436,7 @@ function setupHistoryTab() {
     try {
       const changed = await _setBulkFavorite(ids, false);
       showStatus(`${changed} 件のお気に入りを解除しました`);
-      completeBusyModal(`✅ ${changed} 件のお気に入り解除`);
+      completeBusyModal(`${changed} 件のお気に入りを解除しました`);
     } finally { hideBusyModal(); }
   });
 
@@ -2438,7 +2451,7 @@ function setupHistoryTab() {
       await browser.storage.local.set({ saveHistory: history });
       _histSelected.clear();
       await renderHistoryTab();
-      completeBusyModal(`✅ ${n} 件削除しました`);
+      completeBusyModal(`${n} 件削除しました`);
     } finally { hideBusyModal(); }
   });
 
@@ -2483,7 +2496,7 @@ function setupHistoryTab() {
         _clearSelectionAndDisableBulkButtons();
       }
       showStatus(`${targets.length} 件をグループから解除しました`);
-      completeBusyModal(`✅ ${targets.length} 件解除しました`);
+      completeBusyModal(`${targets.length} 件解除しました`);
     } finally {
       hideBusyModal();
     }
@@ -2527,7 +2540,7 @@ function setupHistoryTab() {
         _clearSelectionAndDisableBulkButtons();
       }
       showStatus(`${targets.length} 件をグループ化しました`);
-      completeBusyModal(`✅ ${targets.length} 件グループ化しました`);
+      completeBusyModal(`${targets.length} 件グループ化しました`);
     } finally {
       hideBusyModal();
     }
@@ -2679,7 +2692,7 @@ function setupHistoryTab() {
           _updateHistCount();
           showStatus(`タグを ${pendingTags.size} 件追加しました`);
         }
-        completeBusyModal(`✅ タグ ${pendingTags.size} 件追加`);
+        completeBusyModal(`タグ ${pendingTags.size} 件追加しました`);
       } finally {
         hideBusyModal();
       }
@@ -2809,7 +2822,7 @@ function setupHistoryTab() {
           _updateHistCount();
           showStatus(`権利者を ${pendingAuthors.size} 件追加しました`);
         }
-        completeBusyModal(`✅ 権利者 ${pendingAuthors.size} 件追加`);
+        completeBusyModal(`権利者 ${pendingAuthors.size} 件追加しました`);
       } finally {
         hideBusyModal();
       }
@@ -2974,7 +2987,7 @@ function setupHistoryTab() {
         }
         const label = kind === "tag" ? "タグ" : "権利者";
         showStatus(`${processed} 件の${label}を${verbLabel}しました`);
-        completeBusyModal(`✅ ${processed} 件の${label}を${verbLabel}`);
+        completeBusyModal(`${processed} 件の${label}を${verbLabel}しました`);
       } finally {
         hideBusyModal();
       }
@@ -3248,7 +3261,7 @@ function setupHistoryTab() {
 
       if (newGlobalTagsList.length === 0 && destAddCount === 0) {
         showStatus("すべて反映済みです（新規追加なし）");
-        completeBusyModal("✅ 反映済み（新規追加なし）");
+        completeBusyModal("反映済み（新規追加なし）");
         return;
       }
 
@@ -3260,7 +3273,7 @@ function setupHistoryTab() {
       if (destAddCount > 0) parts.push(`保存先: ${destAddCount} 件`);
       showStatus(`✅ 反映しました（${parts.join("、")}）`);
       renderAll();
-      completeBusyModal(`✅ 反映完了（${parts.join("、")}）`);
+      completeBusyModal(`反映完了（${parts.join("、")}）`);
     } finally {
       hideBusyModal();
     }

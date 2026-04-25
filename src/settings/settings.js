@@ -2264,20 +2264,31 @@ function setupHistoryTab() {
     renderHistoryGrid();
   });
 
+  // v1.35.0 GROUP-35-perf-B：選択クリア＋一括ボタン無効化を一箇所に集約。
+  // グループ化／解除でも再利用、renderHistoryGrid を経由しない軽量経路を提供。
+  function _clearSelectionAndDisableBulkButtons() {
+    document.querySelectorAll(".hist-card.selected").forEach(card => {
+      card.classList.remove("selected");
+      const cb = card.querySelector(".hist-select-box");
+      if (cb) cb.checked = false;
+    });
+    const ids = [
+      "hist-deselect-all", "hist-add-tag-selected", "hist-add-author-selected",
+      "hist-replace-selected", "hist-remove-selected", "hist-sync-global-tags",
+      "hist-group-selected", "hist-ungroup-selected", "hist-delete-selected",
+    ];
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el) el.disabled = true;
+    }
+    _updateAudioToggleSelectedBtn();
+  }
+
   // 選択削除
   document.getElementById("hist-deselect-all").addEventListener("click", () => {
     _histSelected.clear();
-    document.getElementById("hist-deselect-all").disabled = true;
-    document.getElementById("hist-add-tag-selected").disabled = true;
-    document.getElementById("hist-add-author-selected").disabled = true;
-    document.getElementById("hist-replace-selected").disabled = true;
-    document.getElementById("hist-remove-selected").disabled = true;
-    document.getElementById("hist-sync-global-tags").disabled = true;
-    document.getElementById("hist-group-selected").disabled = true;
-    document.getElementById("hist-ungroup-selected").disabled = true;
-    document.getElementById("hist-delete-selected").disabled = true;
-    _updateAudioToggleSelectedBtn();
-    renderHistoryGrid();
+    _clearSelectionAndDisableBulkButtons();
+    // 選択チェックボックスのみ整合させればよく、カード DOM 再生成は不要
   });
 
   // v1.33.0 GROUP-32-b：選択した履歴の音声を一括 ON/OFF
@@ -2297,6 +2308,12 @@ function setupHistoryTab() {
 
   // 全件削除
   // 連続保存グループ化
+  // v1.35.0 GROUP-35-perf-B：表示モード判定のヘルパー
+  function _isHistoryGroupMode() {
+    const r = document.querySelector('input[name="history-display-mode"]:checked');
+    return r ? r.value === "group" : false;
+  }
+
   document.getElementById("hist-ungroup-selected").addEventListener("click", async () => {
     if (_histSelected.size < 1) return;
     const ids = [..._histSelected];
@@ -2314,7 +2331,13 @@ function setupHistoryTab() {
     await browser.storage.local.set({ saveHistory: history });
     _historyData = history;
     _histSelected.clear();
-    renderHistoryGrid();
+    // v1.35.0 GROUP-35-perf-B：通常表示モードでは sessionId はカード描画に影響しないため、
+    // renderHistoryGrid 全件再描画を回避。グループ表示モードはグループ枠が変わるため従来通り再描画。
+    if (_isHistoryGroupMode()) {
+      renderHistoryGrid();
+    } else {
+      _clearSelectionAndDisableBulkButtons();
+    }
     showStatus(`${targets.length} 件をグループから解除しました`);
   });
 
@@ -2340,7 +2363,12 @@ function setupHistoryTab() {
     await browser.storage.local.set({ saveHistory: history });
     _historyData = history;
     _histSelected.clear();
-    renderHistoryGrid();
+    // v1.35.0 GROUP-35-perf-B：差分更新（グループ表示モードのみ全件再描画）
+    if (_isHistoryGroupMode()) {
+      renderHistoryGrid();
+    } else {
+      _clearSelectionAndDisableBulkButtons();
+    }
     showStatus(`${targets.length} 件をグループ化しました`);
   });
 

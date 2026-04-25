@@ -1668,8 +1668,64 @@ async function saveThumbToIDB(blob) {
   });
 }
 
+// v1.35.0 GROUP-35-thumb-cache：getThumbFromIDB の LRU メモリキャッシュ
+// Firefox Profiler 計測でグループ化操作時の inclusive allocation:
+//   getThumbFromIDB 207MB / Window.btoa 206MB / StructuredCloneHolder.deserialize 552MB
+// → 各カード再描画ごとに IDB read + arrayBuffer + btoa を繰り返していた。
+// dataUrl をプロセス内 Map で再利用する。LRU 上限：300 件 / 100MB（先に当たる方）。
+const THUMB_CACHE_MAX_ENTRIES = 300;
+const THUMB_CACHE_MAX_BYTES   = 100 * 1024 * 1024; // 100 MB
+const _thumbCache = new Map(); // thumbId → dataUrl（Map は挿入順を保持、LRU 用）
+let _thumbCacheBytes = 0;
+
+function _thumbCacheGet(thumbId) {
+  if (!_thumbCache.has(thumbId)) return null;
+  // LRU：取得した要素を末尾へ移動
+  const v = _thumbCache.get(thumbId);
+  _thumbCache.delete(thumbId);
+  _thumbCache.set(thumbId, v);
+  return v;
+}
+
+function _thumbCachePut(thumbId, dataUrl) {
+  if (!thumbId || !dataUrl) return;
+  // 既存があれば一旦削除して bytes を引く
+  if (_thumbCache.has(thumbId)) {
+    const old = _thumbCache.get(thumbId);
+    _thumbCache.delete(thumbId);
+    _thumbCacheBytes -= (old?.length || 0);
+  }
+  _thumbCache.set(thumbId, dataUrl);
+  _thumbCacheBytes += dataUrl.length;
+  // 上限超過時は先頭（= 最古）から evict
+  while (_thumbCache.size > THUMB_CACHE_MAX_ENTRIES || _thumbCacheBytes > THUMB_CACHE_MAX_BYTES) {
+    const firstKey = _thumbCache.keys().next().value;
+    if (firstKey === undefined) break;
+    const evicted = _thumbCache.get(firstKey);
+    _thumbCache.delete(firstKey);
+    _thumbCacheBytes -= (evicted?.length || 0);
+  }
+}
+
+function _thumbCacheInvalidate(thumbId) {
+  if (!thumbId) return;
+  if (_thumbCache.has(thumbId)) {
+    const v = _thumbCache.get(thumbId);
+    _thumbCache.delete(thumbId);
+    _thumbCacheBytes -= (v?.length || 0);
+  }
+}
+
+function _thumbCacheClear() {
+  _thumbCache.clear();
+  _thumbCacheBytes = 0;
+}
+
 async function getThumbFromIDB(thumbId) {
   if (!thumbId) return null;
+  // v1.35.0：LRU キャッシュヒット時は IDB read / btoa を完全に省略
+  const cached = _thumbCacheGet(thumbId);
+  if (cached) return cached;
   try {
     const db = await openThumbDB();
     const result = await new Promise((resolve, reject) => {
@@ -1687,7 +1743,9 @@ async function getThumbFromIDB(thumbId) {
     let binary  = "";
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     const type  = result.blob.type || "image/jpeg";
-    return `data:${type};base64,` + btoa(binary);
+    const dataUrl = `data:${type};base64,` + btoa(binary);
+    _thumbCachePut(thumbId, dataUrl);
+    return dataUrl;
   } catch (err) {
     addLog("WARN", "IDB サムネイル取得失敗", err.message);
     return null;
@@ -1851,6 +1909,8 @@ async function importIdbThumbs(thumbs) {
       // thumb.dataUrl は呼出元 thumbs 配列の一部、ここでは解放できない（呼出元で対応）
       added++;
     }
+    // v1.35.0：インポートで既存 ID と入れ替わる可能性は低いが安全側でクリア
+    if (added > 0) _thumbCacheClear();
     return { ok: true, added };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -1874,6 +1934,8 @@ async function deleteThumbFromIDB(thumbId) {
       tx.oncomplete = () => resolve();
     });
   } catch { /* 無視 */ }
+  // v1.35.0：IDB から消したのでキャッシュも整合
+  _thumbCacheInvalidate(thumbId);
 }
 
 // ----------------------------------------------------------------

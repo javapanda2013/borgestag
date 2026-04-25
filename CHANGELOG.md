@@ -5,6 +5,64 @@
 
 ---
 
+## [1.35.0] - 2026-04-25
+
+### Performance — 保存履歴サムネキャッシュ＋グループ化処理の差分更新（GROUP-35-perf）
+
+#### 背景
+ユーザー報告「保存処理やグループ化処理が重く感じる」を受けて Firefox Profiler で計測。
+**グループ化処理時** (88 秒分) の WebExtensions プロセス allocation 内訳：
+
+- `StructuredCloneHolder.deserialize`: **552 MB**（storage.local broadcast）
+- `getThumbFromIDB`: **207.88 MB**（毎回 IDB read + arrayBuffer + btoa）
+- `Window.btoa`: **206.45 MB**（dataUrl 変換）
+- `_buildHistCardInner`: **101.74 MB**（カード DOM 生成）
+
+非アイドル CPU 22.5% を占めていた。
+
+#### 改善 1：`getThumbFromIDB` LRU メモリキャッシュ（GROUP-35-perf-C-1）
+
+`background.js` の `getThumbFromIDB` で毎回走っていた **IDB read → arrayBuffer → 文字列化 → btoa → dataUrl 生成**を、プロセス内 Map による LRU キャッシュで再利用する構成に変更。
+
+- 上限：**300 entry / 100MB**（先に当たる方）
+- 整合性：
+  - `deleteThumbFromIDB`：cache から該当 ID を invalidate
+  - `IMPORT_IDB_THUMBS`：cache 全クリア
+  - `generateMissingThumbs`：新 thumbId 生成のみで既存キャッシュに影響なし（追加処理不要）
+
+#### 改善 2：グループ化／解除を差分更新化（GROUP-35-perf-B）
+
+`settings.js` の `hist-group-selected` / `hist-ungroup-selected` ハンドラで、保存履歴の sessionId 変更後に `renderHistoryGrid()` 全件再描画を呼んでいた経路を、表示モード別に分岐：
+
+- **通常表示モード**：sessionId はカード描画に影響しないため、`_clearSelectionAndDisableBulkButtons()` で軽量更新（DOM の `.selected` 解除＋一括操作ボタン無効化）のみ実行
+- **グループ表示モード**：従来通り `renderHistoryGrid()` 全件再描画（グループ枠の構造が変わるため）
+
+`hist-deselect-all` ハンドラも同ヘルパー利用に整理。
+
+#### 期待効果（Profiler 推定）
+- グループ化／解除（通常表示）：再描画起点の `getThumbFromIDB` 200MB + `Window.btoa` 200MB がほぼゼロに
+- 全画面：履歴タブ起動・スクロール・選択など、どの経路でもサムネ取得は初回のみ btoa、以降キャッシュヒット
+- メモリ常駐：extension プロセスに最大 100MB の dataUrl キャッシュが追加（許容範囲）
+
+#### 残課題
+- `StructuredCloneHolder.deserialize` 552MB は `storage.local.set({ saveHistory })` の broadcast 由来。saveHistory を IDB 専用化するなどの大改修が必要なため別途検討。
+
+### Files Changed
+- `src/background/background.js`：`_thumbCache` Map + LRU 操作関数 + `getThumbFromIDB` キャッシュ参照、`deleteThumbFromIDB` / `importIdbThumbs` で invalidate
+- `src/settings/settings.js`：`_clearSelectionAndDisableBulkButtons` / `_isHistoryGroupMode` ヘルパー追加、`hist-group-selected` / `hist-ungroup-selected` / `hist-deselect-all` を差分更新経路に
+- `manifest.json`（1.34.1 → 1.35.0）
+- `native/image_saver.py` は変更なし（v1.11.1 維持）
+
+### 動作確認項目
+- **Native 変更なし**（v1.11.1 維持）
+- 保存履歴タブのサムネ表示が初回ロード後はスクロール・グループ化操作で即時表示される
+- 通常表示モードでグループ化／解除の操作が体感的に高速化
+- グループ表示モードはグループ枠の組み替えが正しく反映される
+- 選択削除・タグ追加・置換・除去後にカード状態（チェック・選択ハイライト）が正しくクリアされる
+- IDB サムネのインポート（zip インポート）後、新規取得が正常動作（cache クリア後に再ロード）
+
+---
+
 ## [1.34.1] - 2026-04-25
 
 ### Fixed — 置換・除去モーダルで kind 分離に失敗しタグ操作が権利者判定になる不具合（v1.34.0 hotfix）

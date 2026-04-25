@@ -2270,25 +2270,112 @@ function setupHistoryTab() {
   });
 
   // v1.37.0 GROUP-38：処理中モーダル（一括操作中の二重押下防止＋進行表示）
-  // - showBusyModal(message, sub) で表示 / hideBusyModal() で閉じる
-  // - sub は補助テキスト（件数や進捗など）。省略可
-  // - finally で必ず hideBusyModal() を呼ぶこと
+  // v1.38.0：お気に入り画像プレビュー＋完了状態対応（Q-ux-2 / Q-ux-B）
+  //
+  // ライフサイクル：
+  //   showBusyModal(msg, sub)  → 表示開始（spinner＋お気に入りプレビュー）
+  //   completeBusyModal(doneMsg) → 「✅ 完了」へ遷移、閉じるボタン表示、auto-close 1.5s
+  //   hideBusyModal()           → 完了状態なら no-op、それ以外は即時非表示（エラー経路向け）
+  //
+  // 標準パターン（処理ハンドラ）：
+  //   showBusyModal("処理中…", `${n} 件`);
+  //   try {
+  //     // ... 重い処理
+  //     completeBusyModal("✅ 完了");
+  //   } finally { hideBusyModal(); }   // 完了済なら no-op、エラーなら即閉じ
+  let _busyState = "hidden"; // hidden / busy / done
+  let _busyAutoCloseTimer = null;
+  let _busyPreviewToken = 0; // 古いプレビュー fetch を破棄するためのトークン
+
+  function _busyClearAutoCloseTimer() {
+    if (_busyAutoCloseTimer) {
+      clearTimeout(_busyAutoCloseTimer);
+      _busyAutoCloseTimer = null;
+    }
+  }
+
+  // v1.38.0：お気に入りからランダム 1 件選び、なければ全保存履歴からランダム。サムネ取得＋プレビュー表示
+  async function _loadBusyPreview(token) {
+    try {
+      const list = (_historyData || []).filter(e => e?.thumbId);
+      if (list.length === 0) return;
+      const favs = list.filter(e => !!e.favorite);
+      const pool = favs.length > 0 ? favs : list;
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: pick.thumbId });
+      // この間に showBusyModal が再度呼ばれていれば、古いトークンは破棄
+      if (token !== _busyPreviewToken) return;
+      if (_busyState !== "busy") return;
+      if (r?.dataUrl) {
+        const img = document.getElementById("busy-modal-preview");
+        if (img) {
+          img.src = r.dataUrl;
+          img.style.display = "block";
+        }
+      }
+    } catch (_) { /* プレビュー失敗は致命的ではないので握りつぶす */ }
+  }
+
   function showBusyModal(message, sub) {
     const overlay = document.getElementById("busy-modal-overlay");
     if (!overlay) return;
+    _busyClearAutoCloseTimer();
+    _busyState = "busy";
+    const token = ++_busyPreviewToken;
+    // 各要素の状態リセット
     const msg = document.getElementById("busy-modal-message");
     const subEl = document.getElementById("busy-modal-sub");
+    const spinner = document.getElementById("busy-modal-spinner");
+    const icon = document.getElementById("busy-modal-icon");
+    const closeBtn = document.getElementById("busy-modal-close");
+    const preview = document.getElementById("busy-modal-preview");
     if (msg) msg.textContent = message || "処理中…";
     if (subEl) subEl.textContent = sub || "";
+    if (spinner) spinner.style.display = "flex";
+    if (icon) icon.style.display = "none";
+    if (closeBtn) closeBtn.style.display = "none";
+    if (preview) { preview.style.display = "none"; preview.removeAttribute("src"); }
     overlay.dataset.shown = "1";
+    overlay.style.display = "flex";
+    // プレビュー画像取得は非同期で進行
+    _loadBusyPreview(token);
   }
-  function hideBusyModal() {
+
+  function completeBusyModal(doneMessage) {
+    if (_busyState === "hidden") return; // showBusyModal なしで呼ばれた場合は無視
+    _busyState = "done";
+    const msg = document.getElementById("busy-modal-message");
+    const subEl = document.getElementById("busy-modal-sub");
+    const spinner = document.getElementById("busy-modal-spinner");
+    const icon = document.getElementById("busy-modal-icon");
+    const closeBtn = document.getElementById("busy-modal-close");
+    if (spinner) spinner.style.display = "none";
+    if (icon) icon.style.display = "block";
+    if (msg) msg.textContent = doneMessage || "✅ 完了";
+    if (subEl) subEl.textContent = "";
+    if (closeBtn) {
+      closeBtn.style.display = "inline-block";
+      closeBtn.onclick = () => { _busyForceHide(); };
+    }
+    // 1.5 秒で auto-close（ユーザーが閉じるボタンで先にクローズしてもよい）
+    _busyClearAutoCloseTimer();
+    _busyAutoCloseTimer = setTimeout(() => { _busyForceHide(); }, 1500);
+  }
+
+  function _busyForceHide() {
     const overlay = document.getElementById("busy-modal-overlay");
     if (!overlay) return;
+    _busyClearAutoCloseTimer();
+    _busyState = "hidden";
     overlay.dataset.shown = "0";
     overlay.style.display = "none";
   }
-  // 公開（modal 側からも import できるよう window scope に置きたい場合は追記、今はローカル）
+
+  function hideBusyModal() {
+    // 完了状態なら閉じる責務を auto-close / 閉じるボタンに委譲（no-op）
+    if (_busyState === "done") return;
+    _busyForceHide();
+  }
 
   // v1.35.0 GROUP-35-perf-B：選択クリア＋一括ボタン無効化を一箇所に集約。
   // グループ化／解除でも再利用、renderHistoryGrid を経由しない軽量経路を提供。
@@ -2331,6 +2418,7 @@ function setupHistoryTab() {
     try {
       const changed = await _setBulkFavorite(ids, true);
       showStatus(`${changed} 件をお気に入りに追加しました`);
+      completeBusyModal(`✅ ${changed} 件をお気に入りに追加`);
     } finally { hideBusyModal(); }
   });
 
@@ -2342,6 +2430,7 @@ function setupHistoryTab() {
     try {
       const changed = await _setBulkFavorite(ids, false);
       showStatus(`${changed} 件のお気に入りを解除しました`);
+      completeBusyModal(`✅ ${changed} 件のお気に入り解除`);
     } finally { hideBusyModal(); }
   });
 
@@ -2356,6 +2445,7 @@ function setupHistoryTab() {
       await browser.storage.local.set({ saveHistory: history });
       _histSelected.clear();
       await renderHistoryTab();
+      completeBusyModal(`✅ ${n} 件削除しました`);
     } finally { hideBusyModal(); }
   });
 
@@ -2400,6 +2490,7 @@ function setupHistoryTab() {
         _clearSelectionAndDisableBulkButtons();
       }
       showStatus(`${targets.length} 件をグループから解除しました`);
+      completeBusyModal(`✅ ${targets.length} 件解除しました`);
     } finally {
       hideBusyModal();
     }
@@ -2443,6 +2534,7 @@ function setupHistoryTab() {
         _clearSelectionAndDisableBulkButtons();
       }
       showStatus(`${targets.length} 件をグループ化しました`);
+      completeBusyModal(`✅ ${targets.length} 件グループ化しました`);
     } finally {
       hideBusyModal();
     }
@@ -2594,6 +2686,7 @@ function setupHistoryTab() {
           _updateHistCount();
           showStatus(`タグを ${pendingTags.size} 件追加しました`);
         }
+        completeBusyModal(`✅ タグ ${pendingTags.size} 件追加`);
       } finally {
         hideBusyModal();
       }
@@ -2723,6 +2816,7 @@ function setupHistoryTab() {
           _updateHistCount();
           showStatus(`権利者を ${pendingAuthors.size} 件追加しました`);
         }
+        completeBusyModal(`✅ 権利者 ${pendingAuthors.size} 件追加`);
       } finally {
         hideBusyModal();
       }
@@ -2887,6 +2981,7 @@ function setupHistoryTab() {
         }
         const label = kind === "tag" ? "タグ" : "権利者";
         showStatus(`${processed} 件の${label}を${verbLabel}しました`);
+        completeBusyModal(`✅ ${processed} 件の${label}を${verbLabel}`);
       } finally {
         hideBusyModal();
       }
@@ -3160,6 +3255,7 @@ function setupHistoryTab() {
 
       if (newGlobalTagsList.length === 0 && destAddCount === 0) {
         showStatus("すべて反映済みです（新規追加なし）");
+        completeBusyModal("✅ 反映済み（新規追加なし）");
         return;
       }
 
@@ -3171,6 +3267,7 @@ function setupHistoryTab() {
       if (destAddCount > 0) parts.push(`保存先: ${destAddCount} 件`);
       showStatus(`✅ 反映しました（${parts.join("、")}）`);
       renderAll();
+      completeBusyModal(`✅ 反映完了（${parts.join("、")}）`);
     } finally {
       hideBusyModal();
     }
@@ -4099,24 +4196,48 @@ async function _toggleAudioSelected() {
   _updateAudioToggleSelectedBtn();
 }
 
-// v1.37.0 GROUP-36-fav：単一エントリのお気に入りトグル
-// - storage.local の saveHistory を更新し、メモリの _historyData / 該当 DOM ボタンも同期
+// v1.37.0 GROUP-36-fav → v1.38.0：単一エントリのお気に入りトグル（オプティミスティック更新）
+// - クリック直後に DOM／メモリを即時反映（体感即時）
+// - storage.local.set は裏で実行、失敗時は DOM／メモリを元に戻してエラー表示
 // - 別タブ／modal 側の表示は次回開いたタイミングで反映される
 async function _toggleEntryFavorite(entryId) {
-  const stored = await browser.storage.local.get("saveHistory");
-  const history = stored.saveHistory || [];
-  const entry = history.find(e => e.id === entryId);
-  if (!entry) return;
-  const next = !entry.favorite;
-  entry.favorite = next;
-  await browser.storage.local.set({ saveHistory: history });
-  _historyData = history;
-  // DOM 上の該当ハートボタンを同期
+  // 現在値の確定（メモリ優先、なければ storage 同期前の保険として false）
+  const memEntry = (_historyData || []).find(e => e.id === entryId);
+  const prev = !!memEntry?.favorite;
+  const next = !prev;
+
+  // ① 即時 UI 反映：メモリ＋ DOM＋（必要なら）グリッド再描画
+  if (memEntry) memEntry.favorite = next;
   _updateFavButtonsForEntry(entryId, next);
-  // フィルタ ON 時は表示集合が変わる可能性があるため再描画
+  let needsReRender = false;
   if (_histFavFilter && !next) {
     _histSelected.delete(entryId);
+    needsReRender = true;
     renderHistoryGrid();
+  }
+
+  // ② 裏で永続化、失敗時はロールバック
+  try {
+    const stored = await browser.storage.local.get("saveHistory");
+    const history = stored.saveHistory || [];
+    const entry = history.find(e => e.id === entryId);
+    if (!entry) {
+      // ストレージ側にエントリが見つからない（削除済み等）→ ロールバックして警告
+      throw new Error("saveHistory にエントリが見つかりません");
+    }
+    entry.favorite = next;
+    await browser.storage.local.set({ saveHistory: history });
+    _historyData = history;
+  } catch (err) {
+    // ロールバック：DOM／メモリを元に戻す
+    if (memEntry) memEntry.favorite = prev;
+    _updateFavButtonsForEntry(entryId, prev);
+    if (needsReRender) {
+      // フィルタ ON で解除した結果消えた表示を戻す
+      renderHistoryGrid();
+    }
+    console.warn("[fav] お気に入りトグル失敗、ロールバック", err);
+    showStatus(`⚠️ お気に入りの保存に失敗しました（${err.message || err}）`, true);
   }
 }
 

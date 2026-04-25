@@ -5,6 +5,59 @@
 
 ---
 
+## [1.38.0] - 2026-04-25
+
+### Improved — お気に入りトグルをオプティミスティック更新（v1.37.0 ユーザー指摘）
+
+#### 背景
+v1.37.0 でお気に入り機能を追加した直後、ユーザーから「❤ 押下時の表示切り替わりが遅い」との指摘。`_toggleEntryFavorite` が `await browser.storage.local.get` → 書込 → DOM 更新の順だったため、ユーザーが感じるまでに数百 ms の遅延が発生していた。
+
+#### 修正
+`settings.js` ／ `modal.js` の `_toggleEntryFavorite` ／ `_modalToggleEntryFavorite` をオプティミスティック更新に変更：
+1. クリック直後に **メモリ＋ DOM＋（必要なら）グリッド再描画** を即時反映
+2. 裏で `storage.local.set` を実行
+3. 失敗時は DOM／メモリ／フィルタ表示をロールバックし、`showStatus`／`showToast` でエラー表示
+
+体感は即時、信頼性は維持（永続化失敗を握りつぶさない）。
+
+### Improved — 処理中モーダルにお気に入りプレビュー＋完了表示（GROUP-38 Q-ux-2 / Q-ux-B 後追い）
+
+v1.37.0 で簡易実装に留めていた以下 2 項目を実装：
+
+#### お気に入り画像プレビュー（Q-ux-2）
+- `showBusyModal()` 呼出時、`_historyData` から `favorite=true` のサムネをランダム 1 件抽出（無ければ全保存履歴からランダム）
+- `GET_THUMB_DATA_URL` で取得した dataUrl をモーダル上部に表示
+- 取得が間に合わない／失敗時はプレビュー非表示で進行（致命的ではない）
+- 連続発火時は `_busyPreviewToken` で古い fetch 結果を破棄
+
+#### 完了状態＋閉じるボタン（Q-ux-B）
+- `completeBusyModal(doneMessage)` API 新設：
+  - スピナーを「✅」アイコンに置換
+  - メッセージを `doneMessage` に更新
+  - `閉じる` ボタン表示
+  - 1.5 秒で auto-close（ユーザーが先に閉じてもよい）
+- `hideBusyModal()` は完了状態のとき no-op（auto-close／閉じるボタンに委譲）。エラー経路から呼ばれた時は即時非表示
+- 標準パターン：`showBusyModal(...) → try { ... ; completeBusyModal("✅ ...") } finally { hideBusyModal() }` 。エラー時は `completeBusyModal` を通らず即時 hide
+
+#### 適用先（v1.37.0 の 7 ハンドラに `completeBusyModal()` を追加）
+- `hist-delete-selected`（削除）
+- `hist-group-selected` / `hist-ungroup-selected`（グループ化／解除）
+- `hist-add-tag-selected` / `hist-add-author-selected`（タグ／権利者追加）
+- `hist-replace-selected` / `hist-remove-selected`（置換／除去）
+- `hist-sync-global-tags`（タグ・保存先反映、新規追加なし時も完了表示）
+- `hist-fav-add-selected` / `hist-fav-remove-selected`（お気に入り一括）
+
+### Files Changed
+- `manifest.json`：1.37.0 → 1.38.0
+- `src/settings/settings.html`：busy modal にプレビュー img／✅ アイコン／閉じるボタン要素を追加
+- `src/settings/settings.js`：`_toggleEntryFavorite` をオプティミスティック更新化／busy modal API を 3 状態（hidden/busy/done）に拡張／`_loadBusyPreview` でお気に入り画像取得／`completeBusyModal` 新設／7 ハンドラに完了通知追加
+- `src/modal/modal.js`：`_modalToggleEntryFavorite` をオプティミスティック更新化（保存ウィンドウ側）
+
+### Files Unchanged
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.37.0] - 2026-04-25
 
 ### Added — 保存履歴お気に入り機能（GROUP-36）

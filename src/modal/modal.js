@@ -2044,25 +2044,38 @@ function setupModalEvents(
     });
   }
 
-  // v1.37.0 GROUP-36-fav：単一エントリのお気に入りトグル（保存ウィンドウ側）
+  // v1.37.0 GROUP-36-fav → v1.38.0：単一エントリのお気に入りトグル（保存ウィンドウ・オプティミスティック更新）
+  // - クリック直後に DOM／allEntries 即時反映、storage.local.set は裏で実行
+  // - 失敗時は DOM／メモリ／フィルタ表示をロールバックしてエラー表示
   async function _modalToggleEntryFavorite(entryId, allEntries) {
-    const stored = await browser.storage.local.get("saveHistory");
-    const history = stored.saveHistory || [];
-    const e = history.find(h => h.id === entryId);
-    if (!e) return;
-    const next = !e.favorite;
-    e.favorite = next;
-    await browser.storage.local.set({ saveHistory: history });
-    // メモリ上の allEntries（renderHistory に渡された配列）も同期
-    if (Array.isArray(allEntries)) {
-      const m = allEntries.find(h => h.id === entryId);
-      if (m) m.favorite = next;
-    }
+    const memEntry = Array.isArray(allEntries) ? allEntries.find(h => h.id === entryId) : null;
+    const prev = !!memEntry?.favorite;
+    const next = !prev;
+
+    // ① 即時 UI 反映
+    if (memEntry) memEntry.favorite = next;
     _modalUpdateFavButtonsForEntry(entryId, next);
+    let needsReRender = false;
     if (_modalHistFavFilter && !next) {
       _modalHistSelected.delete(entryId);
-      // フィルタ ON で外れる場合は再描画
+      needsReRender = true;
       renderHistory();
+    }
+
+    // ② 裏で永続化、失敗時はロールバック
+    try {
+      const stored = await browser.storage.local.get("saveHistory");
+      const history = stored.saveHistory || [];
+      const e = history.find(h => h.id === entryId);
+      if (!e) throw new Error("saveHistory にエントリが見つかりません");
+      e.favorite = next;
+      await browser.storage.local.set({ saveHistory: history });
+    } catch (err) {
+      if (memEntry) memEntry.favorite = prev;
+      _modalUpdateFavButtonsForEntry(entryId, prev);
+      if (needsReRender) renderHistory();
+      console.warn("[modal-fav] お気に入りトグル失敗、ロールバック", err);
+      try { showToast(shadow, `⚠️ お気に入りの保存に失敗しました`, true); } catch (_) {}
     }
   }
 

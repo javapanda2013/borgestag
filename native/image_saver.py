@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.1
+version: 1.11.2
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -184,10 +184,16 @@ def make_gif_thumbnail(gif_bytes, max_size=600, _errors=None):
         return None, None, None
 
 
-def handle_save_image(url, save_path):
+def handle_save_image(url, save_path, skip_thumb=False):
     """
     URL から画像をダウンロードして save_path に保存する。
     保存先ディレクトリが存在しない場合はエラーを返す（自動作成しない）。
+
+    v1.41.8 GROUP-45 hznhv3 R-A：skip_thumb=True の場合は Pillow サムネ生成を skip する。
+    background.js が modal 由来の thumbDataUrl を既に持っている通常画像で使用、
+    生成しても破棄される無駄な Pillow 処理を回避する。GIF は modal が thumbDataUrl 提供しないため
+    skip_thumb=False で呼ばれ、従来通り make_gif_thumbnail で生成。
+    旧 background.js（skip_thumb 未指定）は False デフォルトで従来挙動維持（後方互換）。
     """
     try:
         save_dir = os.path.dirname(save_path)
@@ -229,6 +235,11 @@ def handle_save_image(url, save_path):
 
         with open(final_path, "wb") as f:
             f.write(data)
+
+        # v1.41.8 R-A：modal が thumbDataUrl 提供済の通常画像（GIF 以外）は Pillow スキップ
+        # GIF は modal が null 返却するため skip_thumb=False で呼ばれる → 既存経路維持
+        if skip_thumb and not save_path.lower().endswith(".gif"):
+            return {"ok": True, "savedPath": final_path}
 
         # サムネイル用: Pillow でリサイズして返す
         # 元画像をそのまま Base64 化すると Native Messaging の 4MB 上限を超えるため必ずリサイズする
@@ -292,11 +303,13 @@ def handle_save_image(url, save_path):
         return {"ok": False, "error": str(e)}
 
 
-def handle_save_image_base64(data_url, save_path):
+def handle_save_image_base64(data_url, save_path, skip_thumb=False):
     """
     Base64 データURL から画像をファイルに保存する。
     ブラウザ側で取得した画像データ（認証済み）をそのまま書き出すため、
     Cookie が必要なサイト（Fanbox など）の画像保存に使用する。
+
+    v1.41.8 GROUP-45 hznhv3 R-A：skip_thumb=True で Pillow サムネ生成を skip。
     """
     try:
         b64_data = data_url.split(",", 1)[1]
@@ -315,6 +328,10 @@ def handle_save_image_base64(data_url, save_path):
         return {"ok": False, "error": f"書き込み権限がありません: {save_path}"}
     except Exception as e:
         return {"ok": False, "error": f"ファイル書き込み失敗: {e}"}
+
+    # v1.41.8 R-A：modal 由来 dataUrl を持つ通常画像は Pillow スキップ
+    if skip_thumb and not save_path.lower().endswith(".gif"):
+        return {"ok": True, "savedPath": final_path}
 
     # サムネイル生成（handle_save_image と同じロジック）
     try:
@@ -1453,6 +1470,7 @@ def _dispatch_command(message):
         return handle_save_image(
             message.get("url", ""),
             message.get("savePath", ""),
+            skip_thumb=bool(message.get("skipThumb", False)),  # v1.41.8 R-A
         )
 
     elif cmd == "MKDIR":
@@ -1467,7 +1485,8 @@ def _dispatch_command(message):
     elif cmd == "SAVE_IMAGE_BASE64":
         return handle_save_image_base64(
             message.get("dataUrl", ""),
-            message.get("savePath", "")
+            message.get("savePath", ""),
+            skip_thumb=bool(message.get("skipThumb", False)),  # v1.41.8 R-A
         )
 
     elif cmd == "SCAN_EXTERNAL_IMAGES":

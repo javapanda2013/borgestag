@@ -837,7 +837,8 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
 // 保存処理
 // ----------------------------------------------------------------
 async function handleSave(payload) {
-  const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
+  // v1.41.8 R-B：modal が thumbDataUrl の代わりに thumbBlob を直送（btoa/atob 削減）
+  const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・globalTags 用（サブタグ含む。v1.41.6：saveTagRecord 廃止）
   const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
@@ -860,14 +861,16 @@ async function handleSave(payload) {
 
   addLog("INFO", `保存開始: ${filename}`, `→ ${savePath}`);
 
+  // v1.41.8 R-A：modal が thumbDataUrl / thumbBlob 提供済みなら Native の Pillow サムネ生成は破棄されるので skip
+  const _skipNativeThumb = !!(thumbDataUrl || thumbBlob);
   try {
-    let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+    let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumb });
     if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
       // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
       addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
       const fetched = await fetchImageAsDataUrl(imageUrl);
       if (fetched.dataUrl) {
-        res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
+        res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath, skipThumb: _skipNativeThumb });
       }
     }
     if (!res.ok) throw new Error(res.error || "不明なエラー");
@@ -898,6 +901,7 @@ async function handleSave(payload) {
           cmd: "SAVE_IMAGE_BASE64",
           dataUrl: associatedAudio.dataUrl,
           savePath: audioFullPath,
+          skipThumb: true, // v1.41.8 R-A：音声に Pillow サムネは不要
         });
         if (audioRes.ok) {
           // 音声側も Native で独自に unique_path が走る場合がある
@@ -933,17 +937,20 @@ async function handleSave(payload) {
       addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
     }
     // v1.22.10: Python が thumbData（非 GIF）と thumbChunkPath（大容量 GIF）を出し分けるため
-    //           共通ヘルパーで統合する。content 由来の thumbDataUrl は最優先を維持。
+    //           共通ヘルパーで統合する。content 由来の thumbBlob / thumbDataUrl は最優先を維持。
+    // v1.41.8 R-B：modal 由来は thumbBlob で直送、Native 由来は thumbDataUrl で受ける
     const pyThumb = await resolveThumbDataUrlFromNativeRes(res);
-    const effectiveThumbDataUrl = thumbDataUrl || (pyThumb ? pyThumb.dataUrl : null);
-    const effectiveThumbW = thumbDataUrl ? thumbWidth  : (pyThumb?.width  || null);
-    const effectiveThumbH = thumbDataUrl ? thumbHeight : (pyThumb?.height || null);
+    const effectiveThumbBlob    = thumbBlob || null;
+    const effectiveThumbDataUrl = effectiveThumbBlob ? null : (thumbDataUrl || (pyThumb ? pyThumb.dataUrl : null));
+    const effectiveThumbW = (thumbBlob || thumbDataUrl) ? thumbWidth  : (pyThumb?.width  || null);
+    const effectiveThumbH = (thumbBlob || thumbDataUrl) ? thumbHeight : (pyThumb?.height || null);
 
     await addSaveHistory({
       imageUrl,
       // v1.31.10：Native 側 unique_path による自動リネーム後の実ファイル名を記録
       filename: actualSavedFilename,
       savePath, tags: allTags, authors: resolvedAuthors, pageUrl,
+      thumbBlob:    effectiveThumbBlob,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -2346,7 +2353,8 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 // ----------------------------------------------------------------
 
 async function handleSaveMulti(payload) {
-  const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
+  // v1.41.8 R-B：thumbBlob を直送経路として受取（thumbDataUrl は Native pyThumb 用に保持）
+  const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -2379,13 +2387,15 @@ async function handleSaveMulti(payload) {
     const savePath = normalizePath(rawPath);
     const fullPath = `${savePath}\\${effectiveFilenameMulti}`;
     try {
-      let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath });
+      // v1.41.8 R-A：modal が thumbDataUrl / thumbBlob 提供済みなら Native の Pillow サムネ生成は破棄されるので skip
+      const _skipNativeThumbMulti = !!(thumbDataUrl || thumbBlob);
+      let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumbMulti });
       if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
         // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
         addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
         const fetched = await fetchImageAsDataUrl(imageUrl);
         if (fetched.dataUrl) {
-          res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath });
+          res = await sendNative({ cmd: "SAVE_IMAGE_BASE64", dataUrl: fetched.dataUrl, savePath: fullPath, skipThumb: _skipNativeThumbMulti });
         }
       }
       if (!res.ok) throw new Error(res.error || "不明なエラー");
@@ -2424,6 +2434,7 @@ async function handleSaveMulti(payload) {
             cmd: "SAVE_IMAGE_BASE64",
             dataUrl: associatedAudio.dataUrl,
             savePath: audioFullPath,
+            skipThumb: true, // v1.41.8 R-A：音声に Pillow サムネは不要
           });
           if (audioRes.ok) {
             const audioActualPath = audioRes.savedPath || audioFullPath;
@@ -2447,10 +2458,13 @@ async function handleSaveMulti(payload) {
 
   const successPaths = results.filter(r => r.ok).map(r => r.savePath);
   if (successPaths.length > 0) {
-    const effectiveThumbDataUrl = thumbDataUrl
-      || (pyThumbData ? pyThumbData.dataUrl : null);
-    const effectiveThumbW = thumbDataUrl ? thumbWidth  : (pyThumbData?.w  || null);
-    const effectiveThumbH = thumbDataUrl ? thumbHeight : (pyThumbData?.h || null);
+    // v1.41.8 R-B：modal 由来は thumbBlob 直送、Native 由来は pyThumbData.dataUrl
+    const effectiveThumbBlob    = thumbBlob || null;
+    const effectiveThumbDataUrl = effectiveThumbBlob
+      ? null
+      : (thumbDataUrl || (pyThumbData ? pyThumbData.dataUrl : null));
+    const effectiveThumbW = (thumbBlob || thumbDataUrl) ? thumbWidth  : (pyThumbData?.w || null);
+    const effectiveThumbH = (thumbBlob || thumbDataUrl) ? thumbHeight : (pyThumbData?.h || null);
 
     // v1.41.7 hznhv3 C-β：lastSaveDir / globalTags / recentTags / tagDestinations を集約して 1 回 set
     const _tagStored = await browser.storage.local.get(["globalTags", "recentTags", "tagDestinations"]);
@@ -2475,6 +2489,7 @@ async function handleSaveMulti(payload) {
       // v1.31.10：Native 側 unique_path による自動リネーム後の実ファイル名を記録
       filename: firstActualSavedFilename || effectiveFilenameMulti,
       savePaths: successPaths, tags: allTags, authors: resolvedAuthorsMulti, pageUrl,
+      thumbBlob:    effectiveThumbBlob,
       thumbDataUrl: effectiveThumbDataUrl,
       thumbWidth:   effectiveThumbW,
       thumbHeight:  effectiveThumbH,
@@ -2616,20 +2631,27 @@ function _mergeRecentAuthors(currentRecent, authors, max = 10) {
 }
 
 /** 単一保存先の履歴登録 */
-async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
-  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage });
+async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
+  await addSaveHistoryMulti({ imageUrl, filename, savePaths: [savePath], tags, authors, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage });
 }
 
 /** 複数保存先対応の履歴登録 */
-async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
+async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
   // v1.41.7 hznhv3 C-β + C-γ：authors 系も含めて 1 回の set に集約
   const stored  = await browser.storage.local.get(["saveHistory", "globalAuthors", "recentAuthors"]);
   const history = stored.saveHistory || [];
 
-  // サムネイル：thumbDataUrl が渡された場合は直接 IDB へ保存
-  // （pixiv等はファイル保存データを再利用し、XHR・fetchのCORS問題を回避）
+  // サムネイル：modal 由来 thumbBlob > thumbDataUrl > Native fallback (XHR)
+  // v1.41.8 R-B：modal が thumbBlob を直送した場合は atob を skip して直接 IDB 保存（btoa/atob 削減）
   let thumbId = null;
-  if (thumbDataUrl) {
+  if (thumbBlob instanceof Blob) {
+    try {
+      thumbId = await saveThumbToIDB(thumbBlob);
+      addLog("INFO", `サムネイル IDB 保存 (Blob 直送): ${thumbWidth}×${thumbHeight}`);
+    } catch (err) {
+      addLog("WARN", "サムネイル IDB 保存失敗 (Blob 直送)", err.message);
+    }
+  } else if (thumbDataUrl) {
     try {
       const [meta, b64] = thumbDataUrl.split(",");
       const mimeMatch   = meta.match(/:(.*?);/);

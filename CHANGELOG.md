@@ -5,6 +5,58 @@
 
 ---
 
+## [1.41.8] - 2026-04-27
+
+### Improved — R-A: Native ⑨ Pillow サムネスキップ＋ R-B: modal → background Blob 直送（GROUP-45 hznhv3 残 2 件）
+
+#### 経緯
+GROUP-45 hznhv3 冗長性監査で確定した改善案 6 件のうち、残る R-A / R-B を v1.41.8 として実装。冗長性監査資料 `borgestag_execute_save_redundancy_audit.html` §4.1 / §4.2 で抽出した二重処理を排除。
+
+- **R-A**：modal が thumbDataUrl / thumbBlob を提供した通常画像で、Native の Pillow サムネ生成（`image_saver.py:256-269` の `Image.open → convert RGB → resize LANCZOS → JPEG quality 85 → base64`）が **生成されているのに破棄されている**問題を解決
+- **R-B**：modal の OffscreenCanvas で生成した JPEG Blob を base64 文字列化（`btoa`）→ background で `atob` → 再 Blob 化していた往復を、Blob 直送に変更（CPU 削減）
+
+#### 修正内容
+
+**`native/image_saver.py`** — R-A
+- version: 1.11.1 → 1.11.2
+- `handle_save_image(url, save_path, skip_thumb=False)` シグネチャ追加。`skip_thumb=True` かつ非 GIF なら `{ ok: True, savedPath: final_path }` だけ返して Pillow 処理を完全 skip
+- `handle_save_image_base64(data_url, save_path, skip_thumb=False)` 同様
+- コマンド分岐部で `message.get("skipThumb", False)` を `skip_thumb` 引数に渡す。旧 background（skipThumb 未指定）はデフォルト False で従来挙動維持（後方互換）
+- GIF は modal が thumbBlob / thumbDataUrl を null 返却するため `skip_thumb=False` で呼ばれ、`make_gif_thumbnail` 経路維持
+
+**`src/background/background.js`** — R-A + R-B
+- `handleSave` / `handleSaveMulti`：destructure に `thumbBlob` 追加、`_skipNativeThumb = !!(thumbDataUrl || thumbBlob)` で判定
+- `sendNative` の `cmd: "SAVE_IMAGE"` / `cmd: "SAVE_IMAGE_BASE64"` payload に `skipThumb: _skipNativeThumb` を追加（メイン保存 4 箇所）
+- 関連音声 `sendNative` 2 箇所（handleSave 内、handleSaveMulti 内）には `skipThumb: true` を固定で指定（音声に Pillow サムネは不要）
+- `handleInstantSave`：thumbBlob / thumbDataUrl 共に無いため skipThumb 不指定（従来通り Native pyThumb 経由）
+- thumb 解決ロジック：`effectiveThumbBlob = thumbBlob || null` を最優先、無ければ `effectiveThumbDataUrl = thumbDataUrl || pyThumb?.dataUrl`
+- `addSaveHistory` / `addSaveHistoryMulti`：シグネチャに `thumbBlob` 引数追加。**Blob 直送時は atob を skip して直接 `saveThumbToIDB(thumbBlob)` を呼ぶ**新分岐を追加（旧 dataUrl 経路は Native pyThumb 用に維持）
+
+**`src/modal/modal.js`** — R-B
+- `fetchThumbnailInPage`：dataUrl 化（`btoa(binary)`）処理を削除し `{ blob: jpegBlob, width, height }` を return（DOM 経路 / fetch 経路の両方）
+- 通常保存 / 一括保存 handler の payload：`thumbDataUrl: thumb?.dataUrl` を `thumbBlob: thumb?.blob` に置換、`thumbDataUrl: null` を併記（後方互換しない、modal 側は完全 Blob 経路）
+
+#### 期待される改善
+| 改善 | 効果 |
+|---|---|
+| R-A: Native Pillow スキップ | 通常画像 1 件あたり数百 ms〜数秒の Pillow 処理（resize + JPEG エンコード + base64 化）削減＋ Native プロセス CPU 軽減 |
+| R-B: Blob 直送 | modal 側 `btoa(binary)`（GROUP-35 Profiler `Window.btoa 206MB` の一部）＋ background 側 `atob` の往復 CPU を削減。sendMessage の structured clone は Blob コピーを発生させるが btoa/atob ループより軽量 |
+
+GIF は modal が null 返却するため R-A / R-B 共に対象外（既存 Native make_gif_thumbnail 経路維持）。
+
+#### Files Changed
+- `manifest.json`：1.41.7 → 1.41.8
+- `native/image_saver.py`：1.11.1 → 1.11.2、handle_save_image / handle_save_image_base64 に skip_thumb 引数追加、コマンド分岐部で skipThumb 受取
+- `src/background/background.js`：handleSave / handleSaveMulti / addSaveHistory(Multi) のシグネチャに thumbBlob 追加、sendNative payload に skipThumb 追加、Blob 直送分岐を addSaveHistoryMulti に追加
+- `src/modal/modal.js`：fetchThumbnailInPage が Blob を直接 return、保存ボタン handler の payload を thumbBlob に変更
+
+#### Files Unchanged
+- `handleInstantSave`：modal 経由でないため thumbBlob / thumbDataUrl 共に無し。skipThumb 不指定で Native の pyThumb 経路を維持
+- 既存 `update*` 関数群（外部 message ハンドラから呼ばれる）：v1.41.7 から維持
+- v1.41.7 で実装した C-β / C-γ 集約 set はそのまま動作（thumbBlob 経路でも _extraStorage マージは同じ流れ）
+
+---
+
 ## [1.41.7] - 2026-04-27
 
 ### Improved — 保存経路の `storage.local.set` を 1 回に集約＋ modal の LIST_DIR 早期チェック廃止（GROUP-45 hznhv3 C-β + C-γ + R-C）

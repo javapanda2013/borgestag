@@ -4729,11 +4729,10 @@ function setupModalEvents(
             const canvas = new OffscreenCanvas(w, h);
             canvas.getContext("2d").drawImage(reloadedImg, 0, 0, w, h);
             const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
-            const ab = await jpegBlob.arrayBuffer();
-            const bytes = new Uint8Array(ab);
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return { dataUrl: "data:image/jpeg;base64," + btoa(binary), width: w, height: h };
+            // v1.41.8 R-B：dataUrl 化（btoa）を skip し Blob を直接 return。
+            // sendMessage は structured clone で Blob をコピー転送（CPU は削減、メモリコピーは残る）。
+            // background は payload.thumbBlob を直接 saveThumbToIDB へ流せるため atob も不要。
+            return { blob: jpegBlob, width: w, height: h };
           } catch (canvasErr) {
             console.warn("[ImageSaver] Canvas error after reload:", canvasErr.message);
           }
@@ -4756,11 +4755,8 @@ function setupModalEvents(
       canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
       bitmap.close();
       const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
-      const ab    = await jpegBlob.arrayBuffer();
-      const bytes = new Uint8Array(ab);
-      let binary  = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      return { dataUrl: "data:image/jpeg;base64," + btoa(binary), width: w, height: h };
+      // v1.41.8 R-B：dataUrl 化を skip し Blob を直接 return
+      return { blob: jpegBlob, width: w, height: h };
     } catch (e) {
       console.warn("[ImageSaver] fetchThumbnailInPage error:", e.message);
       return null;
@@ -5012,7 +5008,9 @@ function setupModalEvents(
       subTags:   [...selectedSubTags],
       authors: selectedAuthors,
       pageUrl: pageUrl || null,
-      thumbDataUrl: thumb?.dataUrl   || null,
+      // v1.41.8 R-B：dataUrl ではなく Blob を直送（btoa/atob 削減）
+      thumbBlob:    thumb?.blob      || null,
+      thumbDataUrl: null,
       thumbWidth:   thumb?.width     || null,
       thumbHeight:  thumb?.height    || null,
       skipTagRecord: destMode === "suggest",
@@ -5114,7 +5112,9 @@ function setupModalEvents(
       subTags: [...selectedSubTags],
       authors: selectedAuthors,
       pageUrl: pageUrl || null,
-      thumbDataUrl: thumb?.dataUrl   || null,
+      // v1.41.8 R-B：dataUrl ではなく Blob を直送（btoa/atob 削減）
+      thumbBlob:    thumb?.blob      || null,
+      thumbDataUrl: null,
       thumbWidth:   thumb?.width     || null,
       thumbHeight:  thumb?.height    || null,
       skipTagRecord: destMode === "suggest",

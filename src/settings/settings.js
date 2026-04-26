@@ -3031,22 +3031,28 @@ function setupHistoryTab() {
     btn.disabled = true;
     btn.textContent = "🖼 生成中…";
 
-    const res = await browser.runtime.sendMessage({
-      type: "GENERATE_MISSING_THUMBS",
-      targetIds: targetEntries.map(e => e.id),
-      overwrite,
-    });
-
-    btn.disabled = false;
-    btn.textContent = "🖼 サムネイル生成";
+    // v1.41.4 GROUP-44：処理中モーダル（プレビュー画像つき）。
+    // 結果は専用ダイアログ showThumbGenResultDialog で表示するため completeBusyModal は使わない。
+    showBusyModal("サムネイル生成中…", `${targetEntries.length} 件`);
+    let res;
+    try {
+      res = await browser.runtime.sendMessage({
+        type: "GENERATE_MISSING_THUMBS",
+        targetIds: targetEntries.map(e => e.id),
+        overwrite,
+      });
+      if (res?.ok && res.generated > 0) {
+        const stored = await browser.storage.local.get("saveHistory");
+        _historyData = stored.saveHistory || [];
+        renderHistoryGrid();
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🖼 サムネイル生成";
+      hideBusyModal();
+    }
 
     showThumbGenResultDialog(res, targetEntries.length);
-
-    if (res?.ok && res.generated > 0) {
-      const stored = await browser.storage.local.get("saveHistory");
-      _historyData = stored.saveHistory || [];
-      renderHistoryGrid();
-    }
   });
 
   /** サムネイル生成 確認ダイアログ。"normal" / "overwrite" / null(キャンセル) を返す */
@@ -3180,17 +3186,22 @@ function setupHistoryTab() {
       if (targets.length === 0) return;
       if (!confirm(`${targets.length} 件の履歴を削除しますか？\n（サムネイルも削除されます）`)) return;
 
-      for (const e of targets) {
-        if (e.thumbId) {
-          await browser.runtime.sendMessage({ type: "DELETE_THUMB", thumbId: e.thumbId });
+      // v1.41.4 GROUP-44：処理中モーダル（DELETE_THUMB 順次＋ storage 書込のため件数次第で時間がかかる）
+      showBusyModal("期間削除中…", `${targets.length} 件`);
+      try {
+        for (const e of targets) {
+          if (e.thumbId) {
+            await browser.runtime.sendMessage({ type: "DELETE_THUMB", thumbId: e.thumbId });
+          }
         }
-      }
-      const targetIds = new Set(targets.map(e => e.id));
-      _historyData = _historyData.filter(e => !targetIds.has(e.id));
-      _histSelected.clear();
-      await browser.storage.local.set({ saveHistory: _historyData });
-      overlay.remove();
-      renderHistoryGrid();
+        const targetIds = new Set(targets.map(e => e.id));
+        _historyData = _historyData.filter(e => !targetIds.has(e.id));
+        _histSelected.clear();
+        await browser.storage.local.set({ saveHistory: _historyData });
+        overlay.remove();
+        renderHistoryGrid();
+        completeBusyModal(`${targets.length} 件の履歴を削除しました`);
+      } finally { hideBusyModal(); }
       showStatus(`${targets.length} 件の履歴を削除しました`);
     });
   }
@@ -4379,33 +4390,38 @@ async function _toggleAudioSelected() {
   const targets = _selectedEntriesWithAudio();
   if (targets.length === 0) return;
   const shouldStop = _hasPlayingAudioInSelection();
-  if (shouldStop) {
-    // 再生中のものを一括停止
-    for (const entry of targets) {
-      const cached = _histAudioCache.get(entry.id);
-      if (cached && cached.audio && !cached.audio.paused) {
-        try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
-        _histAudioPlayingIds.delete(entry.id);
-        _updateAudioButtonsForEntry(entry.id, false);
+  // v1.41.4 GROUP-44：処理中モーダル
+  showBusyModal(shouldStop ? "音声停止中…" : "音声再生開始中…", `${targets.length} 件`);
+  try {
+    if (shouldStop) {
+      // 再生中のものを一括停止
+      for (const entry of targets) {
+        const cached = _histAudioCache.get(entry.id);
+        if (cached && cached.audio && !cached.audio.paused) {
+          try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+          _histAudioPlayingIds.delete(entry.id);
+          _updateAudioButtonsForEntry(entry.id, false);
+        }
+      }
+    } else {
+      // 停止中のものを一括再生（_toggleHistAudio は再生中なら停止する挙動なので、停止中のみ直接呼ぶ）
+      for (const entry of targets) {
+        if (_histAudioPlayingIds.has(entry.id)) continue;
+        // ダミー btn を用意して _toggleHistAudio を再利用
+        const iconBtn = document.querySelector(`.hist-card-audio-icon[data-audio-entry-id="${entry.id}"]`);
+        if (iconBtn) {
+          // eslint-disable-next-line no-await-in-loop
+          await _toggleHistAudio(entry, iconBtn);
+        } else {
+          // DOM にボタンがない（別ページ等）場合はダミー element で呼出
+          const dummy = document.createElement("button");
+          // eslint-disable-next-line no-await-in-loop
+          await _toggleHistAudio(entry, dummy);
+        }
       }
     }
-  } else {
-    // 停止中のものを一括再生（_toggleHistAudio は再生中なら停止する挙動なので、停止中のみ直接呼ぶ）
-    for (const entry of targets) {
-      if (_histAudioPlayingIds.has(entry.id)) continue;
-      // ダミー btn を用意して _toggleHistAudio を再利用
-      const iconBtn = document.querySelector(`.hist-card-audio-icon[data-audio-entry-id="${entry.id}"]`);
-      if (iconBtn) {
-        // eslint-disable-next-line no-await-in-loop
-        await _toggleHistAudio(entry, iconBtn);
-      } else {
-        // DOM にボタンがない（別ページ等）場合はダミー element で呼出
-        const dummy = document.createElement("button");
-        // eslint-disable-next-line no-await-in-loop
-        await _toggleHistAudio(entry, dummy);
-      }
-    }
-  }
+    completeBusyModal(shouldStop ? `${targets.length} 件停止しました` : `${targets.length} 件再生開始しました`);
+  } finally { hideBusyModal(); }
   _updateAudioToggleSelectedBtn();
 }
 

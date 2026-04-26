@@ -5,6 +5,46 @@
 
 ---
 
+## [1.41.4] - 2026-04-26
+
+### Improved — 一括選択ボタンの busy modal 抜け対応＋ modal.js への busy modal 機構移植（GROUP-44）
+
+#### 経緯
+ユーザー指摘：「サムネイル生成で処理待ちプレビューがないので実装する／その他にも、一括選択可能なボタンで対応漏れがないか確認」。settings.js / modal.js の両方を全件 grep で走査した結果、以下 6 件の抜けを特定：
+
+- 保存履歴タブ：🖼 サムネイル生成 ／ 期間削除 ／ 🔊 音声 ON/OFF
+- 保存ウィンドウ：❤️ お気に入り追加 ／ 🤍 お気に入り解除 ／ 🔊 音声 ON/OFF（modal.js には busy modal 機構自体が未実装）
+
+#### 修正内容
+
+**`src/settings/settings.js` の 3 件に busy modal を追加**：
+- `hist-gen-thumbs`（サムネイル生成）：`showBusyModal("サムネイル生成中…", "${n} 件")` ＋ `hideBusyModal()`。結果は既存の `showThumbGenResultDialog` で表示するため `completeBusyModal` は使わず即時 hide
+- 期間削除（`showPeriodDeleteDialog` 内 OK ハンドラ）：DELETE_THUMB ループ＋ storage 書込中 busy modal 表示、完了で `completeBusyModal`
+- `_toggleAudioSelected`：再生／停止判定に応じて「音声停止中…」「音声再生開始中…」表示、完了で件数つき完了表示
+
+**`src/modal/modal.js` に busy modal 機構を移植**：
+- ファイル末尾に `_ensureBusyModalDom` / `showBusyModal` / `completeBusyModal` / `hideBusyModal` / `_busyForceHide` / `_loadBusyPreview` を追加
+- `_ensureBusyModalDom`：modal-root のシェルに DOM が存在しないため `template` で動的生成し `document.body` に append（settings.html と同 HTML / CSS）
+- `_loadBusyPreview`：`showBusyModal` 引数で受け取った saveHistory snapshot からお気に入りランダム 1 件選定、`GET_THUMB_DATA_URL` で取得して preview 表示
+- ID は settings.html と同じ `busy-modal-*` を使用（保存ウィンドウは別 DOM context のため衝突なし）
+
+**`src/modal/modal.js` の 3 件に busy modal 呼出を追加**：
+- `history-fav-add-selected`：既存の btn 表示変更（"⏳ 処理中…"）を維持しつつ、`showBusyModal("お気に入り追加中…", "${n} 件", saveHistory)` を併用
+- `history-fav-remove-selected`：同上で「お気に入り解除中…」
+- `_modalToggleAudioSelected`：再生／停止判定に応じてラベル切替、完了で件数つき完了表示
+
+#### Files Changed
+- `manifest.json`：1.41.3 → 1.41.4
+- `src/settings/settings.js`：サムネイル生成／期間削除／音声 ON/OFF の 3 ハンドラに busy modal 呼出追加
+- `src/modal/modal.js`：busy modal 機構（DOM 生成 ＋ show/complete/hide/forceHide/loadPreview）追加、お気に入り追加・解除・音声 ON/OFF の 3 ハンドラに busy modal 呼出追加
+
+#### Files Unchanged
+- 既存の busy modal 呼出を持つ 9 件（タグ追加／権利者追加／置換／除去／タグ・保存先反映／グループ化／グループ解除／お気に入り追加・解除（settings.js）／選択削除）はそのまま
+- 全選択／選択解除は即時操作のため対象外
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.41.3] - 2026-04-26
 
 ### Improved — GIF Worker session pooling で再表示の Worker INIT を skip（GROUP-43 Phase 2-pool）

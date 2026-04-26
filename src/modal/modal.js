@@ -2010,24 +2010,29 @@ function setupModalEvents(
     const targets = _modalSelectedEntriesWithAudio(historyData);
     if (targets.length === 0) return;
     const shouldStop = _modalHasPlayingAudioInSelection();
-    if (shouldStop) {
-      for (const entry of targets) {
-        const cached = _modalAudioCache.get(entry.id);
-        if (cached && cached.audio && !cached.audio.paused) {
-          try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
-          _modalAudioPlayingIds.delete(entry.id);
-          _modalUpdateAudioButtonsForEntry(entry.id, false);
+    // v1.41.4 GROUP-44：処理中モーダル
+    showBusyModal(shouldStop ? "音声停止中…" : "音声再生開始中…", `${targets.length} 件`, historyData);
+    try {
+      if (shouldStop) {
+        for (const entry of targets) {
+          const cached = _modalAudioCache.get(entry.id);
+          if (cached && cached.audio && !cached.audio.paused) {
+            try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+            _modalAudioPlayingIds.delete(entry.id);
+            _modalUpdateAudioButtonsForEntry(entry.id, false);
+          }
+        }
+      } else {
+        for (const entry of targets) {
+          if (_modalAudioPlayingIds.has(entry.id)) continue;
+          const iconBtn = document.querySelector(`.history-audio-icon[data-audio-entry-id="${entry.id}"]`);
+          const useBtn = iconBtn || document.createElement("button");
+          // eslint-disable-next-line no-await-in-loop
+          await _modalToggleAudio(entry, useBtn);
         }
       }
-    } else {
-      for (const entry of targets) {
-        if (_modalAudioPlayingIds.has(entry.id)) continue;
-        const iconBtn = document.querySelector(`.history-audio-icon[data-audio-entry-id="${entry.id}"]`);
-        const useBtn = iconBtn || document.createElement("button");
-        // eslint-disable-next-line no-await-in-loop
-        await _modalToggleAudio(entry, useBtn);
-      }
-    }
+      completeBusyModal(shouldStop ? `${targets.length} 件停止しました` : `${targets.length} 件再生開始しました`);
+    } finally { hideBusyModal(); }
     _modalUpdateAudioToggleBtn(historyData);
   }
 
@@ -2432,18 +2437,22 @@ function setupModalEvents(
   }
 
   // v1.37.0 GROUP-36-fav-bulk：選択した履歴を一括お気に入り追加／解除（GROUP-38：処理中表示）
+  // v1.41.4 GROUP-44：busy modal をプレビュー画像つきで追加（既存の btn 表示変更も維持）
   document.getElementById("history-fav-add-selected")?.addEventListener("click", async (e) => {
     if (!_modalHistSelected.size) return;
     const btn = e.currentTarget;
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = "⏳ 処理中…";
+    const ids = [..._modalHistSelected];
+    showBusyModal("お気に入り追加中…", `${ids.length} 件`, saveHistory);
     try {
-      const ids = [..._modalHistSelected];
       await _modalSetBulkFavorite(ids, true, saveHistory);
+      completeBusyModal(`${ids.length} 件をお気に入りに追加しました`);
     } finally {
       btn.textContent = original;
       _modalUpdateFavBulkBtns();
+      hideBusyModal();
     }
   });
   document.getElementById("history-fav-remove-selected")?.addEventListener("click", async (e) => {
@@ -2452,12 +2461,15 @@ function setupModalEvents(
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = "⏳ 処理中…";
+    const ids = [..._modalHistSelected];
+    showBusyModal("お気に入り解除中…", `${ids.length} 件`, saveHistory);
     try {
-      const ids = [..._modalHistSelected];
       await _modalSetBulkFavorite(ids, false, saveHistory);
+      completeBusyModal(`${ids.length} 件のお気に入りを解除しました`);
     } finally {
       btn.textContent = original;
       _modalUpdateFavBulkBtns();
+      hideBusyModal();
     }
   });
 
@@ -5784,4 +5796,131 @@ function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// =============================================================================
+// v1.41.4 GROUP-44：保存ウィンドウへの busy modal 移植（settings.js と同等の挙動）
+// =============================================================================
+// settings.js の busy modal は HTML 静的要素として settings.html に定義されているが、
+// modal.html は modal-root のシェルのみのため、modal.js 側で DOM を動的生成する。
+// API：
+//   showBusyModal(message, sub, historyArr)  → 表示開始（spinner + プレビュー）
+//   completeBusyModal(doneMessage)           → 「✅ 完了」状態へ遷移、閉じるボタン表示
+//   hideBusyModal()                          → 完了状態なら no-op、それ以外は即時非表示
+// historyArr は saveHistory のスナップショットを引き渡し、お気に入りプレビューに使う。
+// =============================================================================
+let _busyState = "hidden"; // hidden / busy / done
+let _busyPreviewToken = 0;
+let _busyHistorySnapshot = null;
+
+function _ensureBusyModalDom() {
+  if (document.getElementById("busy-modal-overlay")) return;
+  const frag = document.createElement("template");
+  frag.innerHTML = `
+    <div id="busy-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;align-items:center;justify-content:center;font-family:inherit;">
+      <div id="busy-modal-card" style="background:#fff;border-radius:10px;padding:18px 22px;min-width:260px;max-width:80vw;box-shadow:0 8px 24px rgba(0,0,0,0.2);text-align:center;display:inline-block;">
+        <img id="busy-modal-preview" style="display:none;max-width:none;max-height:240px;width:auto;height:auto;object-fit:contain;border-radius:6px;margin:0 auto 6px;box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
+        <div id="busy-modal-caption" style="display:none;font-size:10px;color:#888;margin-bottom:10px;line-height:1.3;"></div>
+        <div id="busy-modal-status-row" style="display:flex;align-items:center;justify-content:center;gap:8px;min-height:30px;">
+          <div id="busy-modal-spinner" style="width:20px;height:20px;border:3px solid #e0e0e0;border-top-color:#4a90e2;border-radius:50%;animation:busy-spin 0.8s linear infinite;flex:0 0 auto;"></div>
+          <div id="busy-modal-icon" style="display:none;font-size:20px;line-height:1;flex:0 0 auto;">✅</div>
+          <div id="busy-modal-message" style="font-size:13px;color:#333;font-weight:600;line-height:1.4;flex:0 1 auto;">処理中…</div>
+          <button id="busy-modal-close" style="display:none;padding:4px 12px;font-size:12px;border:1px solid #4a90e2;background:#fff;color:#4a90e2;border-radius:4px;cursor:pointer;font-family:inherit;flex:0 0 auto;margin-left:4px;">閉じる</button>
+        </div>
+        <div id="busy-modal-sub" style="font-size:11px;color:#666;margin-top:4px;"></div>
+      </div>
+    </div>
+    <style>
+      @keyframes busy-spin { to { transform: rotate(360deg); } }
+      #busy-modal-overlay[data-shown="1"] { display: flex !important; }
+      #busy-modal-close:hover { background:#4a90e2; color:#fff; }
+    </style>
+  `;
+  while (frag.content.firstChild) document.body.appendChild(frag.content.firstChild);
+}
+
+async function _loadBusyPreview(token) {
+  try {
+    const list = (_busyHistorySnapshot || []).filter(e => e?.thumbId);
+    if (list.length === 0) return;
+    const favs = list.filter(e => !!e.favorite);
+    const isFavSource = favs.length > 0;
+    const pool = isFavSource ? favs : list;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: pick.thumbId });
+    if (token !== _busyPreviewToken) return;
+    if (_busyState !== "busy" && _busyState !== "done") return;
+    if (r?.dataUrl) {
+      const img = document.getElementById("busy-modal-preview");
+      const caption = document.getElementById("busy-modal-caption");
+      if (img) {
+        img.src = r.dataUrl;
+        img.style.display = "block";
+      }
+      if (caption) {
+        caption.textContent = isFavSource
+          ? "処理待ちの間お気に入りからランダムに表示しています"
+          : "処理待ちの間ランダムな画像を表示しています";
+        caption.style.display = "block";
+      }
+    }
+  } catch (_) { /* プレビュー失敗は致命的ではないので握りつぶす */ }
+}
+
+function showBusyModal(message, sub, historyArr) {
+  _ensureBusyModalDom();
+  const overlay = document.getElementById("busy-modal-overlay");
+  if (!overlay) return;
+  _busyForceHide();
+  _busyState = "busy";
+  _busyHistorySnapshot = Array.isArray(historyArr) ? historyArr : null;
+  const token = ++_busyPreviewToken;
+  const msg = document.getElementById("busy-modal-message");
+  const subEl = document.getElementById("busy-modal-sub");
+  const spinner = document.getElementById("busy-modal-spinner");
+  const icon = document.getElementById("busy-modal-icon");
+  const closeBtn = document.getElementById("busy-modal-close");
+  const preview = document.getElementById("busy-modal-preview");
+  const caption = document.getElementById("busy-modal-caption");
+  if (msg) msg.textContent = message || "処理中…";
+  if (subEl) subEl.textContent = sub || "";
+  if (spinner) spinner.style.display = "block";
+  if (icon) icon.style.display = "none";
+  if (closeBtn) closeBtn.style.display = "none";
+  if (preview) { preview.style.display = "none"; preview.removeAttribute("src"); }
+  if (caption) { caption.style.display = "none"; caption.textContent = ""; }
+  overlay.dataset.shown = "1";
+  overlay.style.display = "flex";
+  _loadBusyPreview(token);
+}
+
+function completeBusyModal(doneMessage) {
+  if (_busyState === "hidden") return;
+  _busyState = "done";
+  const msg = document.getElementById("busy-modal-message");
+  const subEl = document.getElementById("busy-modal-sub");
+  const spinner = document.getElementById("busy-modal-spinner");
+  const icon = document.getElementById("busy-modal-icon");
+  const closeBtn = document.getElementById("busy-modal-close");
+  if (spinner) spinner.style.display = "none";
+  if (icon) icon.style.display = "block";
+  if (msg) msg.textContent = doneMessage || "完了";
+  if (subEl) subEl.textContent = "";
+  if (closeBtn) {
+    closeBtn.style.display = "inline-block";
+    closeBtn.onclick = () => { _busyForceHide(); };
+  }
+}
+
+function _busyForceHide() {
+  const overlay = document.getElementById("busy-modal-overlay");
+  if (!overlay) return;
+  _busyState = "hidden";
+  overlay.dataset.shown = "0";
+  overlay.style.display = "none";
+}
+
+function hideBusyModal() {
+  if (_busyState === "done") return;
+  _busyForceHide();
 }

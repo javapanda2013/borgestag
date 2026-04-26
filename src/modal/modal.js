@@ -4998,32 +4998,53 @@ function setupModalEvents(
     }
 
     btnMultiSave.disabled = true;
-    btnMultiSave.textContent = "保存中…";
+    btnMultiSave.textContent = "⏳ 保存中…";
+    btnMultiSave.title = "前回の保存処理が実行中です";
 
     // ページコンテキストでサムネイル取得（pixiv 等のクッキー認証に対応）
     const thumb = await fetchThumbnailInPage(imageUrl);
 
-    const result = await browser.runtime.sendMessage({
-      type: "EXECUTE_SAVE_MULTI",
-      payload: {
-        imageUrl, filename,
-        savePaths: [...selectedPaths], tags: [...selectedTags],
-        subTags:   [...selectedSubTags],
-        authors: selectedAuthors,
-        pageUrl: pageUrl || null,
-        // サブタグはtagsにマージして送信（管理は同一）
-        thumbDataUrl: thumb?.dataUrl   || null,
-        thumbWidth:   thumb?.width     || null,
-        thumbHeight:  thumb?.height    || null,
-        skipTagRecord: destMode === "suggest",
-        sessionId:    csSession?.id    || null,
-        sessionIndex: csSession ? (csSession.count + 1) : null,
-        // v1.31.4 GROUP-28 mvdl：動画→GIF 変換由来の音声 data URL を中継
-        associatedAudio: window.__pendingAssociatedAudio || null,
-      },
+    // v1.41.5 GROUP-45 hznhv2：fire-and-forget 化（一括保存も同パターン）
+    const jobIdMulti = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const payloadFFMulti = {
+      imageUrl, filename,
+      savePaths: [...selectedPaths], tags: [...selectedTags],
+      subTags:   [...selectedSubTags],
+      authors: selectedAuthors,
+      pageUrl: pageUrl || null,
+      thumbDataUrl: thumb?.dataUrl   || null,
+      thumbWidth:   thumb?.width     || null,
+      thumbHeight:  thumb?.height    || null,
+      skipTagRecord: destMode === "suggest",
+      sessionId:    csSession?.id    || null,
+      sessionIndex: csSession ? (csSession.count + 1) : null,
+      associatedAudio: window.__pendingAssociatedAudio || null,
+    };
+    const resultPromiseMulti = new Promise((resolve) => {
+      const listener = (msg) => {
+        if (msg?.type === "SAVE_RESULT" && msg.jobId === jobIdMulti) {
+          browser.runtime.onMessage.removeListener(listener);
+          resolve(msg);
+        }
+      };
+      browser.runtime.onMessage.addListener(listener);
     });
+    browser.runtime.sendMessage({ type: "EXECUTE_SAVE_FF", jobId: jobIdMulti, payload: payloadFFMulti }).catch(() => {});
 
-    if (result && result.success && result.failCount === 0) {
+    // 即時最小化
+    try {
+      const winsCur = await browser.windows.getCurrent();
+      await browser.windows.update(winsCur.id, { state: "minimized" });
+    } catch (_) { /* ignore */ }
+
+    const result = await resultPromiseMulti;
+
+    btnMultiSave.disabled = false;
+    btnMultiSave.textContent = "選択した候補に保存";
+    btnMultiSave.title = "";
+
+    // 一括保存：1 件でも失敗があれば失敗扱いで modal 復元（Q-hznhv2-detail-2 = a）
+    if (result && result.ok) {
       await updateContinuousSession();
       await browser.storage.local.set({
         retainedTags:    [...selectedTags],
@@ -5033,27 +5054,14 @@ function setupModalEvents(
       if (csSession) {
         await stayOpenForContinuous();
       } else {
-        const { minimizeAfterSave } = await browser.storage.local.get("minimizeAfterSave");
-        if (minimizeAfterSave) {
-          btnMultiSave.disabled = false;
-          resetModalUI();
-          const wins = await browser.windows.getCurrent();
-          await browser.windows.update(wins.id, { state: "minimized" });
-        } else {
-          showToast(shadow, `✅ ${result.successCount} 件に保存しました`);
-          setTimeout(closeModal, 1400);
-        }
+        resetModalUI();
       }
-    } else if (result && result.success) {
-      const fails = result.results.filter(r => !r.ok)
-        .map(r => `・${r.savePath.split("\\").pop()}：${r.error}`).join("\n");
-      showToast(shadow, `⚠️ ${result.successCount} 件成功・${result.failCount} 件失敗\n${fails}`, true);
-      btnMultiSave.disabled = false;
-      btnMultiSave.textContent = "選択した候補に保存";
     } else {
-      showToast(shadow, `❌ 保存に失敗しました: ${result?.error || "不明なエラー"}`, true);
-      btnMultiSave.disabled = false;
-      btnMultiSave.textContent = "選択した候補に保存";
+      try {
+        const winsCur = await browser.windows.getCurrent();
+        await browser.windows.update(winsCur.id, { state: "normal", focused: true });
+      } catch (_) { /* ignore */ }
+      showSaveFailurePopup(shadow, result?.error || "不明なエラー");
     }
   });
   document.getElementById("btn-save").addEventListener("click", async () => {
@@ -5101,31 +5109,58 @@ function setupModalEvents(
       return;
     }
 
-    btn.textContent = "保存中…";
+    btn.textContent = "⏳ 保存中…";
+    btn.title = "前回の保存処理が実行中です";
 
     // ページコンテキストでサムネイル取得（pixiv 等のクッキー認証に対応）
     const thumb = await fetchThumbnailInPage(imageUrl);
 
-    const result = await browser.runtime.sendMessage({
-      type: "EXECUTE_SAVE",
-      payload: {
-        imageUrl, filename, savePath,
-        tags:    [...selectedTags],
-        subTags: [...selectedSubTags],
-        authors: selectedAuthors,
-        pageUrl: pageUrl || null,
-        thumbDataUrl: thumb?.dataUrl   || null,
-        thumbWidth:   thumb?.width     || null,
-        thumbHeight:  thumb?.height    || null,
-        skipTagRecord: destMode === "suggest",
-        sessionId:    csSession?.id    || null,
-        sessionIndex: csSession ? (csSession.count + 1) : null,
-        // v1.31.4 GROUP-28 mvdl：動画→GIF 変換由来の音声 data URL を中継
-        associatedAudio: window.__pendingAssociatedAudio || null,
-      },
+    // v1.41.5 GROUP-45 hznhv2：fire-and-forget 化
+    // 1) jobId 発行＋ EXECUTE_SAVE_FF を await せずに送信
+    // 2) 即時最小化（ユーザーは待たされない）
+    // 3) SAVE_RESULT 受信時に成功 → 既存リセット経路、失敗 → modal 復元＋失敗ポップアップ
+    const jobId = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const payloadFF = {
+      imageUrl, filename, savePath,
+      tags:    [...selectedTags],
+      subTags: [...selectedSubTags],
+      authors: selectedAuthors,
+      pageUrl: pageUrl || null,
+      thumbDataUrl: thumb?.dataUrl   || null,
+      thumbWidth:   thumb?.width     || null,
+      thumbHeight:  thumb?.height    || null,
+      skipTagRecord: destMode === "suggest",
+      sessionId:    csSession?.id    || null,
+      sessionIndex: csSession ? (csSession.count + 1) : null,
+      associatedAudio: window.__pendingAssociatedAudio || null,
+    };
+    // SAVE_RESULT を待つ Promise（jobId 一致のみ resolve）
+    const resultPromise = new Promise((resolve) => {
+      const listener = (msg) => {
+        if (msg?.type === "SAVE_RESULT" && msg.jobId === jobId) {
+          browser.runtime.onMessage.removeListener(listener);
+          resolve(msg);
+        }
+      };
+      browser.runtime.onMessage.addListener(listener);
     });
+    // 送信は await しない（fire-and-forget、background は即時 ack）
+    browser.runtime.sendMessage({ type: "EXECUTE_SAVE_FF", jobId, payload: payloadFF }).catch(() => {});
 
-    if (result && result.success) {
+    // 即時最小化
+    try {
+      const winsCur = await browser.windows.getCurrent();
+      await browser.windows.update(winsCur.id, { state: "minimized" });
+    } catch (_) { /* ignore */ }
+
+    // SAVE_RESULT 待ち（最小化中も listener は生存）
+    const result = await resultPromise;
+
+    btn.disabled = false;
+    btn.textContent = "保存";
+    btn.title = "";
+
+    if (result && result.ok) {
       await updateContinuousSession();
       await browser.storage.local.set({
         retainedTags:    [...selectedTags],
@@ -5135,22 +5170,16 @@ function setupModalEvents(
       if (csSession) {
         await stayOpenForContinuous();
       } else {
-        const { minimizeAfterSave } = await browser.storage.local.get("minimizeAfterSave");
-        if (minimizeAfterSave) {
-          btn.disabled = false;
-          btn.textContent = "保存";
-          resetModalUI();
-          const wins = await browser.windows.getCurrent();
-          await browser.windows.update(wins.id, { state: "minimized" });
-        } else {
-          showToast(shadow, "✅ 保存しました");
-          setTimeout(closeModal, 1200);
-        }
+        // 通常保存成功時は既に最小化済み。minimizeAfterSave 設定にかかわらず最小化維持＋ resetModalUI のみ
+        resetModalUI();
       }
     } else {
-      showToast(shadow, `❌ 保存に失敗: ${result?.error || "不明なエラー"}`, true);
-      btn.disabled = false;
-      btn.textContent = "保存";
+      // 失敗時は modal を normal 復元＋失敗ポップアップ表示、入力欄は維持（リセットスキップ済）
+      try {
+        const winsCur = await browser.windows.getCurrent();
+        await browser.windows.update(winsCur.id, { state: "normal", focused: true });
+      } catch (_) { /* ignore */ }
+      showSaveFailurePopup(shadow, result?.error || "不明なエラー");
     }
   });
 
@@ -5731,6 +5760,39 @@ async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startG
 function showToast(shadow, message, isError = false) {
   _toastQueue.push({ message, isError });
   if (!_toastActive) _processToastQueue();
+}
+
+// v1.41.5 GROUP-45 hznhv2：保存失敗時のポップアップ
+// 入力欄はリセットスキップで保持されているので、ユーザーは閉じてそのまま再保存ボタンを押せる
+function showSaveFailurePopup(shadow, errorMessage) {
+  const existing = document.getElementById("save-failure-popup");
+  if (existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "save-failure-popup";
+  overlay.style.cssText = `
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2147483647; font-family: "Segoe UI", sans-serif;
+  `;
+  const card = document.createElement("div");
+  card.style.cssText = `
+    background: #fff; border-radius: 10px; padding: 22px 28px;
+    min-width: 340px; max-width: 80vw; box-shadow: 0 8px 28px rgba(0,0,0,0.25);
+  `;
+  card.innerHTML = `
+    <div style="font-size:16px;font-weight:700;color:#c53030;margin-bottom:10px;">❌ 保存に失敗しました</div>
+    <div style="font-size:13px;color:#444;margin-bottom:6px;">入力情報は保持されています。閉じて再度「保存」ボタンを押してください。</div>
+    <pre style="background:#fef4f4;border:1px solid #f0b8b8;border-radius:6px;padding:10px;font-size:11px;color:#721c24;margin:10px 0;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto;"></pre>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button id="save-failure-close" style="padding:6px 14px;font-size:13px;border:1px solid #4a90e2;background:#4a90e2;color:#fff;border-radius:6px;cursor:pointer;font-family:inherit;">閉じる</button>
+    </div>
+  `;
+  card.querySelector("pre").textContent = String(errorMessage || "不明なエラー");
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  card.querySelector("#save-failure-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 }
 
 function _processToastQueue() {

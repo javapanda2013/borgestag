@@ -5,6 +5,52 @@
 
 ---
 
+## [1.41.5] - 2026-04-27
+
+### Improved — 保存ウィンドウの保存処理を fire-and-forget 化、即時最小化＋ OS 通知＋失敗時復元（GROUP-45 hznhv2）
+
+#### 経緯
+ユーザー報告：「保存ウィンドウで保存時の重さが改善されておりません／保存処理を待たずに一旦保存ウィンドウを最小化、失敗時は入力情報を保持し再保存を確認するポップアップを表示」
+
+これまで保存ボタン押下後、handleSave / handleSaveMulti の応答を await している間、ユーザーは保存ウィンドウで待たされていた。Native HTTP DL ＋ Pillow サムネ生成 ＋ saveHistory broadcast で数秒〜十秒級の待機が発生する場面があり、体感を直接改善する fire-and-forget 化を実装。
+
+#### 修正内容
+
+**`manifest.json`**
+- `notifications` permission を追加（OS 通知の作成・クリック検知に必要）
+- 既存ユーザーは Firefox の権限再認可ダイアログ経由でアップグレード
+
+**`src/background/background.js`**
+- `EXECUTE_SAVE_FF` 新設ハンドラ：modal は応答を await せず、background は即時 ack を返した後、非同期で `handleSave` / `handleSaveMulti` 同等処理を実行
+- 完了時 `notifySaveResult(jobId, result, payload)` を呼び：
+  - `browser.notifications.create(jobId, {...})` で OS 通知（成功：「✅ BorgesTag 保存完了」+ filename、失敗：「❌ BorgesTag 保存失敗」+ filename + エラー詳細）
+  - `browser.runtime.sendMessage({ type: "SAVE_RESULT", jobId, ok, error })` で modal に結果通知
+- `payload` を null 代入で参照解放（v1.30.7 GROUP-26-slice-6 同パターン）
+- `browser.notifications.onClicked.addListener`：通知クリック時に modal ウィンドウを `windows.update({state: "normal", focused: true})` で復元、通知クリア
+
+**`src/modal/modal.js`**
+- 通常保存（btn-save）/ 一括保存（btn-multi-save）両方を fire-and-forget 化：
+  - jobId を `crypto.randomUUID()` で発行
+  - `EXECUTE_SAVE_FF` 型 sendMessage（await しない、`.catch(() => {})` で reject 吸収）
+  - 即時 `windows.update({ state: "minimized" })` で最小化
+  - SAVE_RESULT 受信用 listener を Promise でラップ、jobId 一致時に resolve
+  - 保存ボタン disabled 維持＋ラベル「⏳ 保存中…」＋ tooltip「前回の保存処理が実行中です」
+  - 結果到着で：成功時は既存リセット経路（連続保存：`stayOpenForContinuous`、通常：`resetModalUI`）、失敗時は `windows.update({state: "normal"})` で modal 復元＋失敗ポップアップ
+- `showSaveFailurePopup(shadow, errorMessage)` 新設：modal 復元後にエラー詳細＋「閉じる」ボタンのオーバーレイ表示。**入力欄はリセットスキップで保持**されているため、ユーザーは閉じてそのまま再保存ボタンを押せる
+- 既存の `runtime.onMessage` listener には変更なし（SAVE_RESULT は保存ハンドラ内のローカル listener で受信）
+
+#### Files Changed
+- `manifest.json`：1.41.4 → 1.41.5、`notifications` permission 追加
+- `src/background/background.js`：`EXECUTE_SAVE_FF` ハンドラ／`handleSaveFireAndForget` / `notifySaveResult` / `notifications.onClicked` listener 追加
+- `src/modal/modal.js`：通常保存 / 一括保存両方の handler を fire-and-forget 化、`showSaveFailurePopup` 追加
+
+#### Files Unchanged
+- `handleSave` / `handleSaveMulti` 本体は変更なし（同期処理として fire-and-forget の中で呼ばれる）
+- `stayOpenForContinuous`（連続保存中の部分リセット）の内部実装は変更なし
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.41.4] - 2026-04-26
 
 ### Improved — 一括選択ボタンの busy modal 抜け対応＋ modal.js への busy modal 機構移植（GROUP-44）

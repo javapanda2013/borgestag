@@ -353,6 +353,10 @@ async function handleAsyncMessage(message, sender) {
       return handleSave(message.payload);
     case "EXECUTE_SAVE_MULTI":
       return handleSaveMulti(message.payload);
+    // v1.41.5 GROUP-45 hznhv2：fire-and-forget 経路。modal は即時最小化、結果は OS 通知＋ runtime.sendMessage で返却
+    case "EXECUTE_SAVE_FF":
+      handleSaveFireAndForget(message.payload, message.jobId);
+      return Promise.resolve({ ok: true, jobId: message.jobId }); // 即座に ack（modal は await しないが、sendMessage 自体の rejection を防ぐ）
     case "GET_ALL_TAGS":
       return getAllTags();
     case "GET_LAST_SAVE_DIR":
@@ -952,6 +956,71 @@ async function handleSave(payload) {
     return { success: false, error: err.message };
   }
 }
+
+// ============================================================================
+// v1.41.5 GROUP-45 hznhv2：fire-and-forget 保存経路
+// modal は EXECUTE_SAVE_FF を await せず即時最小化、結果は OS 通知＋
+// runtime.sendMessage({ type: "SAVE_RESULT", jobId, ok, error }) で modal へ通知。
+// ============================================================================
+async function handleSaveFireAndForget(payload, jobId) {
+  let result;
+  try {
+    // payload.savePaths（配列）がある場合は handleSaveMulti、それ以外は handleSave に分岐
+    if (Array.isArray(payload?.savePaths) && payload.savePaths.length > 0) {
+      result = await handleSaveMulti(payload);
+    } else {
+      result = await handleSave(payload);
+    }
+  } catch (err) {
+    result = { success: false, error: err?.message || String(err) };
+  }
+  await notifySaveResult(jobId, result, payload);
+  // payload は notify 後不要、参照解放（v1.30.7 GROUP-26-slice-6 同パターン）
+  payload = null;
+  result  = null;
+}
+
+async function notifySaveResult(jobId, result, payload) {
+  const ok = result?.success === true;
+  const filename = payload?.filename || "(filename unknown)";
+  // OS 通知作成
+  try {
+    await browser.notifications.create(jobId, {
+      type:    "basic",
+      iconUrl: browser.runtime.getURL("icons/icon96.png"),
+      title:   ok ? "✅ BorgesTag 保存完了" : "❌ BorgesTag 保存失敗",
+      message: ok ? filename : `${filename}\n${result?.error || "不明なエラー"}`,
+    });
+  } catch (err) {
+    addLog("WARN", "OS 通知の作成に失敗", err?.message || String(err));
+  }
+  // modal への結果通知。modal が既に閉じている場合は sendMessage が reject するが無視
+  try {
+    await browser.runtime.sendMessage({
+      type:  "SAVE_RESULT",
+      jobId,
+      ok,
+      error: result?.error || null,
+    });
+  } catch (_) { /* modal closed: ignore */ }
+}
+
+// 通知クリックで保存ウィンドウ（modal）を normal 状態に復元
+browser.notifications.onClicked.addListener(async (notificationId) => {
+  try {
+    const wins = await browser.windows.getAll({ populate: true });
+    for (const win of wins) {
+      const isModal = (win.tabs || []).some(t => (t.url || "").includes("/modal/modal.html"));
+      if (isModal) {
+        await browser.windows.update(win.id, { state: "normal", focused: true });
+        break;
+      }
+    }
+    await browser.notifications.clear(notificationId);
+  } catch (err) {
+    addLog("WARN", "通知クリック時の復元失敗", err?.message || String(err));
+  }
+});
 
 // ----------------------------------------------------------------
 // タグ永続化

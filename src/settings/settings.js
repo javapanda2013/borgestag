@@ -699,11 +699,11 @@ async function exportData() {
 
   // storage.local のバックアップ対象キー
   // GROUP-26-mem (v1.29.2): const → let、json 作成後に null 化で V8 allocation 余地確保
+  // v1.41.6 hznhv3 C-α：tagRecords をエクスポート対象から除外（write-only 監査記録、機能経路ゼロ、saveHistory に冗長）
   let stored = await browser.storage.local.get([
     "tagDestinations",
     "globalTags",
     "lastSaveDir",
-    "tagRecords",
     "folderBookmarks",
     "explorerRootPath",
     "explorerViewMode",
@@ -1140,8 +1140,9 @@ async function importData(e) {
   // 現在のデータを取得
   let current;
   try {
+    // v1.41.6 hznhv3 C-α：tagRecords を取得対象から除外（インポート時のマージも廃止）
     current = await browser.storage.local.get([
-      "tagDestinations", "globalTags", "lastSaveDir", "tagRecords",
+      "tagDestinations", "globalTags", "lastSaveDir",
       "folderBookmarks", "explorerRootPath", "explorerViewMode",
       "explorerStartPriority", "recentTags", "modalSize", "saveHistory",
       "globalAuthors", "authorDestinations",
@@ -1454,13 +1455,10 @@ async function importData(e) {
     } catch (err) { logError(`saveHistory の保存に失敗: ${err.message}`); return; }
   }
 
-  // ---- tagRecords ----
+  // v1.41.6 hznhv3 C-α：tagRecords は廃止（write-only 監査記録、saveHistory に冗長）。
+  // 旧版でエクスポートされた JSON に tagRecords が含まれていても無視（ログのみ記録、storage には保存しない）。
   if (parsed.tagRecords && typeof parsed.tagRecords === "object") {
-    try {
-      const mergedRec = { ...(current.tagRecords || {}), ...parsed.tagRecords };
-      await browser.storage.local.set({ tagRecords: mergedRec });
-      log(`📝 tagRecords: ${Object.keys(parsed.tagRecords).length} 件追加`);
-    } catch (err) { logError(`tagRecords の保存に失敗: ${err.message}`); return; }
+    log(`ℹ️ tagRecords (${Object.keys(parsed.tagRecords).length} 件) は v1.41.6 で廃止されたため取込対象外`);
   }
 
   // ---- folderBookmarks ----

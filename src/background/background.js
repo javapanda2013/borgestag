@@ -839,7 +839,7 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
 async function handleSave(payload) {
   const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
   const savePath = normalizePath(payload.savePath);
-  const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・saveTagRecord用（サブタグ含む）
+  const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・globalTags 用（サブタグ含む。v1.41.6：saveTagRecord 廃止）
   const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
 
   // ファイル名設定に基づいてタグ・サブタグ・権利者名をファイル名に付加
@@ -913,7 +913,8 @@ async function handleSave(payload) {
     }
 
     if (allTags.length > 0) {
-      await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
+      // v1.41.6 hznhv3 C-α：saveTagRecord 廃止、updateGlobalTagSet を直接呼び出す
+      await updateGlobalTagSet(allTags);
     }
     if (tags && tags.length > 0) {
       await updateRecentTags(tags); // recentTagsはメインタグのみ
@@ -1025,19 +1026,13 @@ browser.notifications.onClicked.addListener(async (notificationId) => {
 // ----------------------------------------------------------------
 // タグ永続化
 // ----------------------------------------------------------------
-async function saveTagRecord({ imageUrl, filename, tags }) {
-  // v1.20.2: 上限 100 → 512 文字へ拡張。
-  // 通常の直画像 URL は 100 文字未満に収まるが、Fanbox / CDN の署名付 URL
-  // （?Expires=...&Signature=... 等が 200 文字以上付く）で先頭 100 文字が
-  // 同一になり異なる記録が衝突していた。tagRecords は write-only（監査記録）
-  // 用途のため、旧記録と共存しても機能影響はなくマイグレーション不要。
-  const key = imageUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 512);
-  const stored = await browser.storage.local.get("tagRecords");
-  const tagRecords = stored.tagRecords || {};
-  tagRecords[key] = { imageUrl, filename, tags, savedAt: new Date().toISOString() };
-  await browser.storage.local.set({ tagRecords });
-  await updateGlobalTagSet(tags);
-}
+// v1.41.6 GROUP-45 hznhv3 C-α：saveTagRecord を廃止。
+// 旧 saveTagRecord は tagRecords（key=imageUrl 由来、value={imageUrl, filename, tags, savedAt}）を
+// write-only な監査記録として storage.local に蓄積していたが、ユーザー UI に表示／検索／統計する経路は
+// 完全にゼロ（saveHistory に同フィールドが既に存在し機能完全冗長）。
+// saveTagRecord 内で呼ばれていた updateGlobalTagSet(tags) は呼出元（handleSave / handleSaveMulti /
+// handleInstantSave）に直接移管した。tagRecords 自体は storage.local から自然消滅させる方針
+// （旧データは無害、settings.js のエクスポート/インポート対象からも除外）。
 
 async function updateGlobalTagSet(newTags) {
   const stored = await browser.storage.local.get("globalTags");
@@ -1278,7 +1273,8 @@ async function handleInstantSave(imageUrl, pageUrl) {
 
     await browser.storage.local.set({ lastSaveDir: savePath });
     if (allTags.length > 0) {
-      await saveTagRecord({ imageUrl, filename: fullPath, tags: allTags });
+      // v1.41.6 hznhv3 C-α：saveTagRecord 廃止、updateGlobalTagSet を直接呼び出す
+      await updateGlobalTagSet(allTags);
       if (tags.length > 0) await updateRecentTags(tags);
       if (subTags.length > 0) await updateRecentSubTags(subTags);
     }
@@ -2398,7 +2394,8 @@ async function handleSaveMulti(payload) {
       addLog("INFO", `一括保存成功: ${actualSavedPath}`);
       await browser.storage.local.set({ lastSaveDir: savePath });
       if (allTags.length > 0) {
-        await saveTagRecord({ imageUrl, filename: actualSavedPath, tags: allTags });
+        // v1.41.6 hznhv3 C-α：saveTagRecord 廃止、updateGlobalTagSet を直接呼び出す
+        await updateGlobalTagSet(allTags);
       }
       if (tags && tags.length > 0 && !skipTagRecord) {
         await recordTagDestination(tags, savePath);
@@ -2644,13 +2641,9 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
   }
 
   await browser.storage.local.set({ saveHistory: history });
-
-  // 使用容量を storage.local の総バイト数で概算してログ出力
-  try {
-    const all   = await browser.storage.local.get(null);
-    const bytes = JSON.stringify(all).length;
-    addLog("INFO", `storage.local 使用量: ${(bytes / 1024).toFixed(1)} KB`);
-  } catch { /* 無視 */ }
+  // v1.41.6 GROUP-45 hznhv3 B-1：保存毎の `storage.local.get(null) + JSON.stringify` 使用量ログを削除。
+  // 容量表示は GET_STORAGE_SIZE → getStorageSize（_roughJsonSize 軽量版）で settings.js が必要時に取得する経路があるため、
+  // デバッグ用 addLog は冗長。削除で broadcast 1 回減＋ getStorageSize 経路は維持（getStorageSize 経由で容量表示は引き続き可能）。
 }
 
 // ----------------------------------------------------------------

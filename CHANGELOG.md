@@ -5,6 +5,53 @@
 
 ---
 
+## [1.41.6] - 2026-04-27
+
+### Improved — 保存処理の冗長除去：B-1 使用量ログ削除＋ C-α tagRecords 廃止（GROUP-45 hznhv3 承認済 2 件）
+
+#### 経緯
+GROUP-45 hznhv3 の冗長性監査（`borgestag_execute_save_redundancy_audit.html`）で確定した改善案 6 件のうち、ユーザー承認済 2 件（B-1 ／ C-α）を v1.41.6 として実装。残る R-A / R-B / R-C / C-β + C-γ は合間の追加調査結果次第で v1.41.7 以降に順次適用。
+
+#### B-1：保存毎の使用量ログ削除（背景）
+保存毎に `addSaveHistoryMulti` 末尾で `storage.local.get(null)` ＋ `JSON.stringify(all).length` を実行し `addLog` で「storage.local 使用量: ...」を記録していたが、この addLog はユーザー UI に出ず純粋なデバッグ目的。容量表示は `getStorageSize`（`_roughJsonSize` 軽量版、v1.31.9 で軽量化済）が `GET_STORAGE_SIZE` 経由で settings.js から呼ばれる正規ルートが既にある。
+
+**削減効果**：保存毎の `storage.local.get(null)` ＋ 全文字列化を完全削除。さらに addLog 自体が `storage.local.set({ appLogs })` を内部で呼ぶため、broadcast 1 回も同時に削減。
+
+#### C-α：tagRecords 廃止（背景）
+`saveTagRecord` は `tagRecords` ストレージキー（key=imageUrl 由来、value={imageUrl, filename, tags, savedAt}）を更新していたが、コメント「`tagRecords` は write-only（監査記録）用途」の通りユーザー UI に表示／検索／統計する経路は完全にゼロ。grep の結果、`saveHistory` に同フィールド（imageUrl / filename / tags / savedAt）が既に保存されており、機能完全冗長。
+
+`saveTagRecord` 内で呼ばれていた `updateGlobalTagSet(tags)` は呼出元（handleSave / handleSaveMulti / handleInstantSave）に直接移管。
+
+**削減効果**：保存毎の `storage.local.get("tagRecords")` ＋ `storage.local.set({ tagRecords })` を完全削除。broadcast 1 回減＋ tagRecords 蓄積容量削減。
+
+#### 修正内容
+
+**`src/background/background.js`**
+- `addSaveHistoryMulti` 末尾の使用量ログ計算ブロック（5 行）を完全削除。コメントで getStorageSize 経路に容量表示を委譲する旨を明記
+- `saveTagRecord` 関数定義（13 行）を完全削除。代わりにコメントで廃止理由と updateGlobalTagSet への移管を明記
+- `saveTagRecord` の 3 箇所の呼出元（handleSave / handleSaveMulti / handleInstantSave）を `updateGlobalTagSet(allTags)` 直接呼出に置換
+- 842 行コメント「履歴・saveTagRecord 用」を「履歴・globalTags 用（v1.41.6：saveTagRecord 廃止）」に更新
+
+**`src/settings/settings.js`**
+- エクスポート時の `storage.local.get` キーリストから `"tagRecords"` 除外（書出 JSON に含めない）
+- インポート時の現データ取得キーリストから `"tagRecords"` 除外（マージ準備不要）
+- インポート時の tagRecords マージブロック（5 行）を「ログのみ表示し取込スキップ」に変更（旧 JSON 互換、機能影響なし）
+
+#### 期待される改善
+1 保存あたりの broadcast 発火が **2 回減**（使用量ログの appLogs set + tagRecords set）。saveHistory 件数が多いユーザーほど効果が大きい（broadcast 1 回 = `StructuredCloneHolder.deserialize 552MB`、GROUP-35 計測値）。
+
+#### Files Changed
+- `manifest.json`：1.41.5 → 1.41.6
+- `src/background/background.js`：使用量ログ削除／saveTagRecord 削除／呼出元 3 箇所を updateGlobalTagSet に置換
+- `src/settings/settings.js`：エクスポート／インポートから tagRecords を除外、旧 JSON 互換ログ追加
+
+#### Files Unchanged
+- `updateGlobalTagSet` / `updateRecentTags` / `recordTagDestination` / `addSaveHistoryMulti` の他処理は変更なし
+- 既存ユーザーの storage.local の `tagRecords` データは放置（無害、自然消滅）。明示的に容量回収する場合は手動 storage.local.remove("tagRecords") が必要だが、本リリースでは migration を含めない（後方互換と最小変更を優先）
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.41.5] - 2026-04-27
 
 ### Improved — 保存ウィンドウの保存処理を fire-and-forget 化、即時最小化＋ OS 通知＋失敗時復元（GROUP-45 hznhv2）

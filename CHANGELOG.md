@@ -5,6 +5,50 @@
 
 ---
 
+## [1.41.1] - 2026-04-26
+
+### Improved — 保存履歴グリッド通常モードの再描画を「既存タイル再利用」型に変更（GROUP-43 Phase 2-reuse）
+
+#### 経緯
+v1.41.0 までは `renderHistoryGrid()` が呼ばれるたびに `grid.innerHTML = ""` で全タイルを破棄し再生成していたため、絞り込み変更や保存履歴タブから他タブへ移動して戻るたびに **GIF タイルが Worker INIT を再実行し、空白期間が発生**。Phase 1 以前（dataUrl 一括描画）では一瞬の点滅で済んでいたが、Phase 2 の Worker パイプラインでは IDB 読込＋ parseGIF＋ decompressFrames を毎回やり直すため空白期間が体感できるレベルに伸びた。
+
+ユーザー報告：「絞り込みの変更や保存履歴タブ以外へ移動→戻るをしていて、　そのたびに読み込み済の要素に再描画がかかり、空白になっているのが非効率のように感じた」
+
+#### 修正内容
+**`src/settings/settings.js` の通常モード描画を `_partialRefreshGroupedDom` と同じ「再利用」パターンに変更**：
+
+1. **`_buildHistCardInner` で `card.dataset.thumbId = entry.thumbId || ""` を保持**：再利用判定のキーとして thumbId 一致を確認するため
+2. **新ヘルパー `_renderHistoryGridNormalReuse(grid, pageSlice)` を追加**：
+   - 既存カードを `entryId` でインデックス化
+   - `pageSlice` 順に走査し、`entry.id` 一致 ＋ `dataset.thumbId` 一致なら再配置のみ（GIF Worker セッション維持）
+   - 不一致 or 未存在は `_buildHistCardInner` で新規生成
+   - 余った既存カードは `_destroyGifSessionsInTree` でセッション破棄＋ DOM 除去
+3. **`renderHistoryGrid` をリファクタ**：
+   - 関数冒頭の `_destroyGifSessionsInTree(grid)` ＋ `grid.innerHTML = ""` を削除（早期破棄を回避）
+   - 空状態 (`filtered.length === 0`)：従来通り全破棄して "履歴がありません" を表示
+   - グループ表示モード：従来通り全破棄＋全描画（Phase 3+ で再利用化検討）
+   - **通常モード**：`_renderHistoryGridNormalReuse` に委譲
+
+#### 期待される改善
+- 絞り込み追加・解除時：マッチ続行する既存 GIF タイルは Worker INIT を再実行せず、即座に同じフレームから継続再生
+- 保存履歴タブから他タブへ移動 → 戻る：DOM ツリーは保持されるため再描画イベント自体が発生しない（既存挙動）。今回の修正は同タブ内でのフィルタ操作・ページャ移動・編集後再描画などで効く
+- サムネイル生成完了の自動再描画（`thumbId` が変化したエントリのみ）：thumbId 不一致で当該タイルのみ作り直し、それ以外のタイルは無傷
+
+#### Files Changed
+- `manifest.json`：1.41.0 → 1.41.1
+- `src/settings/settings.js`：
+  - `_buildHistCardInner` に `card.dataset.thumbId` 設定を追加
+  - `renderHistoryGrid` 本体をリファクタ（早期破棄削除、通常モードを `_renderHistoryGridNormalReuse` 経由に変更）
+  - 新ヘルパー `_renderHistoryGridNormalReuse` を追加
+
+#### Files Unchanged
+- Phase 2 の Worker / vendor / GET_THUMB_BINARY 経路、`_setupGifCanvasInPlaceholder`, `_destroyGifSessionsInTree` 等はそのまま
+- グループ表示モード（`renderHistoryGridGrouped`）の振る舞いは v1.41.0 と同等
+- 保存ウィンドウ（modal.js）グリッドは Phase 3 対象（本リリースでは未着手）
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.41.0] - 2026-04-26
 
 ### Fixed — v1.40.0 の Phase 2 placeholder 検索時序バグを設計書ベースで再構築（GROUP-43 Phase 2 再実装）
@@ -45,13 +89,6 @@ v1.40.0 で `_setupGifCanvasInPlaceholder` を `_buildHistCardInner` 内で**`ca
 - Phase 1 で同梱した vendor / Worker / GET_THUMB_BINARY 経路はそのまま
 - `strict_min_version` は 114.0 のまま（module worker 対応）
 - `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
-
-### 動作確認の観点（設計書 §12 T1〜T12 参照）
-- T1：GIF タイル単体表示で canvas にアニメ再生
-- T3：混在グリッド（GIF と PNG）で両方が正しい要素種別
-- T5：サムネイル生成後の自動表示（v1.40.0 でバグった経路）
-- T6〜T8：タグ追加・お気に入りトグル・fav-filter drop で部分更新
-- T10：Worker 失敗時のフォールバック確認
 
 ---
 

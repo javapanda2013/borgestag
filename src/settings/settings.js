@@ -3302,9 +3302,6 @@ async function renderHistoryTab() {
 
 function renderHistoryGrid() {
   const grid = document.getElementById("hist-grid");
-  // v1.40.0 GROUP-43 Phase 2：DOM 破棄前に GIF Worker セッションをクリーンアップ
-  _destroyGifSessionsInTree(grid);
-  grid.innerHTML = "";
 
   const hasTagFilter    = _histFilterTagChips.length > 0;
   const hasAuthorFilter = _histFilterAuthorChips.length > 0;
@@ -3338,6 +3335,8 @@ function renderHistoryGrid() {
   }
 
   if (filtered.length === 0) {
+    // v1.41.1 GROUP-43 Phase 2-reuse：空状態は全タイル破棄
+    _destroyGifSessionsInTree(grid);
     grid.innerHTML = `<div class="hist-empty">${
       isFiltering ? "絞り込み条件に一致する履歴がありません" : "保存履歴がありません"
     }</div>`;
@@ -3352,6 +3351,10 @@ function renderHistoryGrid() {
   const displayMode = modeRadio ? modeRadio.value : "normal";
 
   if (displayMode === "group") {
+    // v1.41.1：グループ表示モードは従来通り全破棄＋全描画
+    // （Phase 3+ で再利用化検討。タブ切替直後の空白点滅は通常モードに比べ頻度低）
+    _destroyGifSessionsInTree(grid);
+    grid.innerHTML = "";
     renderHistoryGridGrouped(grid, pageSlice);
     document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
     document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
@@ -3367,12 +3370,9 @@ function renderHistoryGrid() {
     return;
   }
 
-  for (const entry of pageSlice) {
-    const card = document.createElement("div");
-    card.className = "hist-card" + (_histSelected.has(entry.id) ? " selected" : "");
-    _buildHistCardInner(card, entry);
-    grid.appendChild(card);
-  }
+  // v1.41.1 GROUP-43 Phase 2-reuse：通常モードは既存タイル再利用で再描画
+  // （絞り込み変更・タブ復帰時に GIF Worker を再 INIT させない／空白点滅を抑制）
+  _renderHistoryGridNormalReuse(grid, pageSlice);
 
   document.getElementById("hist-delete-selected").disabled = _histSelected.size === 0;
   document.getElementById("hist-deselect-all").disabled = _histSelected.size === 0;
@@ -3384,6 +3384,72 @@ function renderHistoryGrid() {
   document.getElementById("hist-ungroup-selected").disabled = _histSelected.size === 0;
   _updateAudioToggleSelectedBtn();
   _updateFavBulkButtons();
+}
+
+// v1.41.1 GROUP-43 Phase 2-reuse：通常モードの既存タイル再利用描画
+// - entry.id 一致 ＋ dataset.thumbId 一致のカードはそのまま再配置（GIF Worker セッション維持）
+// - 不一致 or 不在は新規生成
+// - 不要になった既存カードは GIF セッションを破棄して DOM から除去
+// 参考：_partialRefreshGroupedDom 同様のパターン
+function _renderHistoryGridNormalReuse(grid, pageSlice) {
+  // 既存カードを entryId でインデックス化
+  const existing = new Map();
+  for (const el of Array.from(grid.children)) {
+    if (el.classList && el.classList.contains("hist-card") && el.dataset && el.dataset.entryId) {
+      existing.set(el.dataset.entryId, el);
+    }
+  }
+  // hist-empty / hist-group-wrapper など hist-card 以外は破棄対象に回す
+  const others = Array.from(grid.children).filter(el =>
+    !(el.classList && el.classList.contains("hist-card") && el.dataset && el.dataset.entryId)
+  );
+  for (const el of others) {
+    _destroyGifSessionsInTree(el);
+    el.remove();
+  }
+
+  // pageSlice 順に再配置
+  let prev = null;
+  for (const entry of pageSlice) {
+    const ex = existing.get(entry.id);
+    const sameThumb = ex && (ex.dataset.thumbId || "") === (entry.thumbId || "");
+    if (ex && sameThumb) {
+      // 既存カード再利用：選択状態・チェックボックスのみ同期
+      const isSel = _histSelected.has(entry.id);
+      ex.classList.toggle("selected", isSel);
+      const cb = ex.querySelector(".hist-select-box");
+      if (cb) cb.checked = isSel;
+      // 順序を pageSlice に合わせる
+      if (prev) {
+        if (prev.nextSibling !== ex) grid.insertBefore(ex, prev.nextSibling);
+      } else {
+        if (grid.firstChild !== ex) grid.insertBefore(ex, grid.firstChild);
+      }
+      prev = ex;
+      existing.delete(entry.id);
+    } else {
+      // 新規 or thumbId 不一致：作り直し
+      if (ex) {
+        _destroyGifSessionsInTree(ex);
+        ex.remove();
+        existing.delete(entry.id);
+      }
+      const card = document.createElement("div");
+      card.className = "hist-card" + (_histSelected.has(entry.id) ? " selected" : "");
+      _buildHistCardInner(card, entry);
+      if (prev) {
+        grid.insertBefore(card, prev.nextSibling);
+      } else {
+        grid.insertBefore(card, grid.firstChild);
+      }
+      prev = card;
+    }
+  }
+  // 余った既存カードはセッション破棄＋ DOM 除去
+  for (const orphan of existing.values()) {
+    _destroyGifSessionsInTree(orphan);
+    orphan.remove();
+  }
 }
 
 function renderHistoryPager(total) {
@@ -4648,6 +4714,9 @@ function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
 
 function _buildHistCardInner(card, entry, onThumbClick) {
   card.dataset.entryId = entry.id;
+  // v1.41.1 GROUP-43 Phase 2-reuse：renderHistoryGrid の既存タイル再利用判定で
+  // thumbId 一致を確認するため、thumbId を dataset に保持する
+  card.dataset.thumbId = entry.thumbId || "";
   const paths   = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
   const primary = paths[0] ?? "";
   const date    = new Date(entry.savedAt).toLocaleString("ja-JP");

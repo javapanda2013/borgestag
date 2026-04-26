@@ -3302,6 +3302,8 @@ async function renderHistoryTab() {
 
 function renderHistoryGrid() {
   const grid = document.getElementById("hist-grid");
+  // v1.40.0 GROUP-43 Phase 2：DOM 破棄前に GIF Worker セッションをクリーンアップ
+  _destroyGifSessionsInTree(grid);
   grid.innerHTML = "";
 
   const hasTagFilter    = _histFilterTagChips.length > 0;
@@ -3573,22 +3575,48 @@ function _buildGroupWrapperElement(group) {
   const orderedItemsForLb = [...group.items].reverse();
   const allDataUrls = new Array(orderedItemsForLb.length).fill(null);
   if (first.thumbId) {
-    browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId })
-      .then(r => {
-        if (r?.dataUrl) {
-          allDataUrls[0] = r.dataUrl;
-          const img = document.createElement("img");
-          img.className = "hist-card-thumb";
-          img.src = r.dataUrl;
-          img.style.cursor = "zoom-in";
-          img.addEventListener("click", () => {
-            const _navData = _currentFilteredHistory ?? _historyData;
-            const gIdx = _navData.findIndex(h => h.id === first.id);
-            showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
-          });
-          placeholder.replaceWith(img);
+    if (_isGifEntry(first)) {
+      // v1.40.0 GROUP-43 Phase 2：GIF 代表サムネは <canvas> + Worker
+      const canvas = document.createElement("canvas");
+      canvas.className = "hist-card-thumb";
+      canvas.style.cursor = "zoom-in";
+      canvas.addEventListener("click", async () => {
+        if (!allDataUrls[0]) {
+          try {
+            const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId });
+            if (r?.dataUrl) allDataUrls[0] = r.dataUrl;
+          } catch (_) { /* ignore */ }
+        }
+        const _navData = _currentFilteredHistory ?? _historyData;
+        const gIdx = _navData.findIndex(h => h.id === first.id);
+        showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
+      });
+      placeholder.replaceWith(canvas);
+      _initGifTile(canvas, first).then(sessId => {
+        if (!sessId) {
+          // fallback：dataUrl 経路へ
+          _fallbackCanvasToImg(canvas, first, null);
         }
       }).catch(() => {});
+    } else {
+      // 非 GIF は既存 dataUrl 経路
+      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId })
+        .then(r => {
+          if (r?.dataUrl) {
+            allDataUrls[0] = r.dataUrl;
+            const img = document.createElement("img");
+            img.className = "hist-card-thumb";
+            img.src = r.dataUrl;
+            img.style.cursor = "zoom-in";
+            img.addEventListener("click", () => {
+              const _navData = _currentFilteredHistory ?? _historyData;
+              const gIdx = _navData.findIndex(h => h.id === first.id);
+              showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
+            });
+            placeholder.replaceWith(img);
+          }
+        }).catch(() => {});
+    }
   }
 
   // タグクリック絞り込み
@@ -3725,6 +3753,15 @@ function _partialRefreshGroupedDom(targetIds, prevSessionIds) {
         grid.appendChild(_buildGroupWrapperElement(group));
       }
     }
+  }
+
+  // v1.40.0 GROUP-43 Phase 2：再 attach されなかった旧 DOM 要素は
+  // 棄てられるため、それらに含まれる GIF Worker セッションをクリーンアップ
+  for (const el of existingWrappers.values()) {
+    if (el && !el.parentNode) _destroyGifSessionsInTree(el);
+  }
+  for (const el of existingCards.values()) {
+    if (el && !el.parentNode) _destroyGifSessionsInTree(el);
   }
 }
 
@@ -3973,6 +4010,8 @@ function _refreshHistCardByEntryId(entryId) {
   // 通常カード側
   for (const card of individualCards) {
     if (shouldHide) {
+      // v1.40.0 GROUP-43 Phase 2：除去前に GIF Worker セッションを片付ける
+      _destroyGifSessionsInTree(card);
       card.remove();
       continue;
     }
@@ -4014,6 +4053,8 @@ function _refreshGroupWrapper(wrapper, entryId, entryOrNull) {
     const childCards = [...expandArea.querySelectorAll(`.hist-card[data-entry-id="${entryId}"]`)];
     for (const child of childCards) {
       if (!entryOrNull) {
+        // v1.40.0 GROUP-43 Phase 2：除去前に GIF Worker セッションを片付け
+        _destroyGifSessionsInTree(child);
         child.remove();
       } else {
         // v1.39.1 GROUP-42-b：thumb-wrap を含む既存 DOM を保持し、変更フィールドのみ部分更新
@@ -4312,7 +4353,10 @@ async function _toggleEntryFavorite(entryId) {
     // 該当タイルだけ DOM 除去（他の GIF タイルの再デコードを避ける）
     _histSelected.delete(entryId);
     const { individualCards, groupWrappers } = _findHistCardsByEntryId(entryId);
-    for (const card of individualCards) card.remove();
+    for (const card of individualCards) {
+      _destroyGifSessionsInTree(card); // v1.40.0 GROUP-43 Phase 2
+      card.remove();
+    }
     for (const wrapper of groupWrappers) {
       _refreshGroupWrapper(wrapper, entryId, null);
     }
@@ -4370,7 +4414,10 @@ async function _setBulkFavorite(targetIds, value) {
     for (const id of targetIds) {
       _histSelected.delete(id);
       const { individualCards, groupWrappers } = _findHistCardsByEntryId(id);
-      for (const card of individualCards) card.remove();
+      for (const card of individualCards) {
+        _destroyGifSessionsInTree(card); // v1.40.0 GROUP-43 Phase 2
+        card.remove();
+      }
       for (const wrapper of groupWrappers) {
         _refreshGroupWrapper(wrapper, id, null);
       }
@@ -4389,6 +4436,215 @@ function _updateFavButtonsForEntry(entryId, isFav) {
     btn.setAttribute("aria-pressed", isFav ? "true" : "false");
   });
 }
+
+// =============================================================================
+// v1.40.0 GROUP-43 Phase 2：GIF を <canvas> ＋ Worker パイプラインで再生
+// =============================================================================
+// - Module Worker（src/decoders/gif-decoder.worker.js）を単一共有で起動
+// - タイル毎に sessionId を発行、Worker 内で独立に decode
+// - 失敗時は <img> + dataUrl にフォールバック（既存経路保持）
+// - tile DOM 削除前に _destroyGifSession でクリーンアップ
+// =============================================================================
+let _gifWorker = null;
+let _gifSessionSeq = 0;
+const _gifSessions = new Map();
+// session = { id, canvas, ctx, ready, frameCount, dims, currentIndex, timerId, entryId }
+
+function _getGifWorker() {
+  if (_gifWorker) return _gifWorker;
+  try {
+    _gifWorker = new Worker(
+      browser.runtime.getURL("src/decoders/gif-decoder.worker.js"),
+      { type: "module" }
+    );
+    _gifWorker.onmessage = _onGifWorkerMessage;
+    _gifWorker.onerror = (err) => {
+      console.warn("[gif-worker] error", err);
+    };
+  } catch (err) {
+    console.warn("[gif-worker] 起動失敗", err);
+    _gifWorker = null;
+  }
+  return _gifWorker;
+}
+
+function _onGifWorkerMessage(e) {
+  const msg = e.data || {};
+  const sess = _gifSessions.get(msg.id);
+  if (!sess) {
+    if (msg.bitmap?.close) try { msg.bitmap.close(); } catch (_) {}
+    return;
+  }
+  if (msg.type === "READY") {
+    sess.ready = true;
+    sess.frameCount = msg.frameCount || 1;
+    sess.dims = msg.dims;
+    if (msg.dims) {
+      sess.canvas.width  = msg.dims.width;
+      sess.canvas.height = msg.dims.height;
+    }
+    sess.currentIndex = 0;
+    if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: 0 });
+  } else if (msg.type === "FRAME") {
+    if (sess.canvas && msg.bitmap) {
+      try {
+        sess.ctx.drawImage(msg.bitmap, 0, 0);
+      } catch (err) {
+        console.warn("[gif-worker] drawImage 失敗", err);
+      }
+      try { msg.bitmap.close(); } catch (_) {}
+    }
+    const nextIndex = (msg.index + 1) % (sess.frameCount || 1);
+    sess.currentIndex = nextIndex;
+    sess.timerId = setTimeout(() => {
+      if (!_gifSessions.has(sess.id)) return;
+      if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: nextIndex });
+    }, msg.delay || 100);
+  } else if (msg.type === "ERROR") {
+    console.warn("[gif-worker] session error", msg.id, msg.message);
+    _destroyGifSession(sess.id);
+  }
+}
+
+async function _initGifTile(canvas, entry) {
+  const id = ++_gifSessionSeq;
+  const ctx = canvas.getContext("2d");
+  const sess = {
+    id, canvas, ctx,
+    ready: false, frameCount: 0, dims: null,
+    currentIndex: 0, timerId: null,
+    entryId: entry.id,
+  };
+  _gifSessions.set(id, sess);
+  canvas.dataset.gifSessionId = String(id);
+  let binResp;
+  try {
+    binResp = await browser.runtime.sendMessage({
+      type:    "GET_THUMB_BINARY",
+      thumbId: entry.thumbId,
+    });
+  } catch (err) {
+    _destroyGifSession(id);
+    return null;
+  }
+  if (!binResp?.ok || !binResp.buffer) {
+    _destroyGifSession(id);
+    return null;
+  }
+  const w = _getGifWorker();
+  if (!w) {
+    _destroyGifSession(id);
+    return null;
+  }
+  try {
+    w.postMessage(
+      { type: "INIT", id, gifBuffer: binResp.buffer },
+      [binResp.buffer]
+    );
+  } catch (err) {
+    console.warn("[gif-worker] INIT postMessage 失敗", err);
+    _destroyGifSession(id);
+    return null;
+  }
+  return id;
+}
+
+function _destroyGifSession(id) {
+  const sess = _gifSessions.get(id);
+  if (!sess) return;
+  if (sess.timerId) {
+    try { clearTimeout(sess.timerId); } catch (_) {}
+    sess.timerId = null;
+  }
+  _gifSessions.delete(id);
+  if (_gifWorker) {
+    try { _gifWorker.postMessage({ type: "DESTROY", id }); } catch (_) {}
+  }
+  if (sess.canvas) {
+    try { delete sess.canvas.dataset.gifSessionId; } catch (_) {}
+  }
+}
+
+/** DOM ツリー内のすべての GIF canvas タイルのセッションを破棄（DOM 除去前に呼ぶ） */
+function _destroyGifSessionsInTree(rootEl) {
+  if (!rootEl) return;
+  const canvases = rootEl.matches?.("canvas[data-gif-session-id]")
+    ? [rootEl]
+    : Array.from(rootEl.querySelectorAll?.("canvas[data-gif-session-id]") || []);
+  for (const cv of canvases) {
+    const id = parseInt(cv.dataset.gifSessionId, 10);
+    if (id) _destroyGifSession(id);
+  }
+}
+
+/** GIF タイルかどうか判定 */
+function _isGifEntry(entry) {
+  return /\.gif$/i.test(entry?.filename || "");
+}
+
+/** GIF placeholder を canvas で置換し Worker セッション開始（失敗時は <img> にフォールバック） */
+function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
+  const placeholder = card.querySelector(".hist-card-thumb-placeholder");
+  if (!placeholder) return;
+  const canvas = document.createElement("canvas");
+  canvas.className = "hist-card-thumb";
+  canvas.title = "クリックで拡大";
+  canvas.style.cursor = "zoom-in";
+  canvas.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    // Click 時に dataUrl を取得して Lightbox へ。Phase 4 で Lightbox も canvas 化予定
+    let dataUrl = null;
+    try {
+      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId });
+      dataUrl = r?.dataUrl;
+    } catch (_) { /* ignore */ }
+    if (!dataUrl) return;
+    if (onThumbClick) {
+      onThumbClick(dataUrl, canvas);
+    } else {
+      const _navData = _currentFilteredHistory ?? _historyData;
+      const gIdx = _navData.findIndex(h => h.id === entry.id);
+      showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
+    }
+  });
+  placeholder.replaceWith(canvas);
+  _initGifTile(canvas, entry).then(sessId => {
+    if (!sessId) {
+      // fallback：canvas を img + dataUrl 経路に置換
+      _fallbackCanvasToImg(canvas, entry, onThumbClick);
+    }
+  }).catch(() => {
+    _fallbackCanvasToImg(canvas, entry, onThumbClick);
+  });
+}
+
+function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
+  if (!canvas?.parentNode) return;
+  browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+    .then(r => {
+      if (!r?.dataUrl) return;
+      const img = document.createElement("img");
+      img.className = "hist-card-thumb";
+      img.src = r.dataUrl;
+      img.title = "クリックで拡大";
+      img.style.cursor = "zoom-in";
+      img.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (onThumbClick) {
+          onThumbClick(r.dataUrl, img);
+        } else {
+          const _navData = _currentFilteredHistory ?? _historyData;
+          const gIdx = _navData.findIndex(h => h.id === entry.id);
+          showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
+        }
+      });
+      canvas.replaceWith(img);
+    }).catch(() => {});
+}
+
+// =============================================================================
+// /v1.40.0 GROUP-43 Phase 2
+// =============================================================================
 
 function _buildHistCardInner(card, entry, onThumbClick) {
   card.dataset.entryId = entry.id;
@@ -4418,31 +4674,37 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     </div>
   `;
   if (entry.thumbId) {
-    browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-      .then(r => {
-        if (r?.dataUrl) {
-          const placeholder = card.querySelector(".hist-card-thumb-placeholder");
-          if (placeholder) {
-            const img = document.createElement("img");
-            img.className = "hist-card-thumb";
-            img.src = r.dataUrl;
-            img.title = "クリックで拡大";
-            img.style.cursor = "zoom-in";
-            img.addEventListener("click", (e) => {
-              e.stopPropagation();
-              if (onThumbClick) {
-                onThumbClick(r.dataUrl, img);
-              } else {
-                // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
-                const _navData = _currentFilteredHistory ?? _historyData;
-                const gIdx = _navData.findIndex(h => h.id === entry.id);
-                showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
-              }
-            });
-            placeholder.replaceWith(img);
+    if (_isGifEntry(entry)) {
+      // v1.40.0 GROUP-43 Phase 2：GIF は <canvas> + Worker 経路へ
+      _setupGifCanvasInPlaceholder(card, entry, onThumbClick);
+    } else {
+      // 非 GIF（PNG/JPEG など）は既存 <img> + dataUrl 経路
+      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+        .then(r => {
+          if (r?.dataUrl) {
+            const placeholder = card.querySelector(".hist-card-thumb-placeholder");
+            if (placeholder) {
+              const img = document.createElement("img");
+              img.className = "hist-card-thumb";
+              img.src = r.dataUrl;
+              img.title = "クリックで拡大";
+              img.style.cursor = "zoom-in";
+              img.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (onThumbClick) {
+                  onThumbClick(r.dataUrl, img);
+                } else {
+                  // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
+                  const _navData = _currentFilteredHistory ?? _historyData;
+                  const gIdx = _navData.findIndex(h => h.id === entry.id);
+                  showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
+                }
+              });
+              placeholder.replaceWith(img);
+            }
           }
-        }
-      }).catch(() => {});
+        }).catch(() => {});
+    }
   }
   // v1.31.4 GROUP-28 mvdl：音声アイコンのクリックハンドラ
   if (entry.audioFilename) {

@@ -5,6 +5,70 @@
 
 ---
 
+## [1.40.0] - 2026-04-26
+
+### Improved — 設定画面の保存履歴グリッド GIF を Canvas＋Worker パイプラインに移行（GROUP-43 Phase 2）
+
+#### 背景
+v1.39.1 で単体操作経路の partial update 化（GROUP-42-b）を完了したが、ベース負荷（可視タイル群が常時 main thread で GIF をデコード・アニメーション再生）は手付かずで残っていた。Q-Y-1〜4 回答に基づき、案 Y（`<canvas>` ＋ Worker パイプライン）の Phase 2 として、最も影響の大きい主戦場 S1（通常表示モード）と S2（グループ表示モード代表サムネ）から段階適用を開始。
+
+#### 修正内容
+**`src/settings/settings.js`**：
+- `_isGifEntry(entry)`：`.gif` 拡張子判定ヘルパー
+- `_getGifWorker()` / `_onGifWorkerMessage()`：単一共有 Worker（v1.39.1 で同梱した `src/decoders/gif-decoder.worker.js`）の lazy 起動・メッセージ受信
+- `_initGifTile(canvas, entry)`：タイルごとに sessionId を発行、`GET_THUMB_BINARY` で IDB から ArrayBuffer 取得 → Worker に transferable で移譲 → READY 後に最初のフレーム要求
+- `_destroyGifSession(id)` / `_destroyGifSessionsInTree(rootEl)`：DOM 破棄前のクリーンアップ
+- `_setupGifCanvasInPlaceholder(card, entry, onThumbClick)`：placeholder を canvas で置換、Worker 失敗時は `_fallbackCanvasToImg` で従来 `<img>` 経路にフォールバック
+- `_buildHistCardInner` ／ `_buildGroupWrapperElement`：GIF entry のみ canvas + Worker 経路、非 GIF は既存 `<img>` + dataUrl 経路維持
+
+**フレーム駆動**：
+- READY → `REQ_FRAME index=0` 要求
+- FRAME 受信 → `ctx.drawImage(bitmap, 0, 0)` ＋ `bitmap.close()` ＋ `setTimeout(delay)` で次フレーム要求
+- これにより Worker 内 decode が main thread を一切ブロックしない
+
+**Worker セッション破棄経路**：
+- `renderHistoryGrid()`：grid クリア前
+- `_refreshHistCardByEntryId()`：shouldHide 時の `card.remove()` 前
+- `_refreshGroupWrapper()`：子カード除去時
+- `_partialRefreshGroupedDom()`：再 attach されなかった旧 DOM 要素
+- `_toggleEntryFavorite` / `_setBulkFavorite`：fav-filter drop での `card.remove()` 前
+
+**Lightbox クリック挙動**：
+- canvas タイルのクリック時に `GET_THUMB_DATA_URL` で dataUrl を on-demand 取得 → `showGroupLightbox`／`showLightbox` へ渡す。Phase 4 で Lightbox 自体も canvas 化する予定
+
+**フォールバック**：
+- `GET_THUMB_BINARY` 失敗、Worker 起動失敗、`INIT` postMessage エラー時は `<img>` + dataUrl 経路に置換
+- 既存の保存履歴は引き続き完全に表示される
+
+**Worker（`src/decoders/gif-decoder.worker.js`、Phase 1 で同梱済）**：
+- module worker、gifuct-js + jsBinarySchemaParser を import
+- INIT / REQ_FRAME / REQ_FRAME_AT / DESTROY プロトコル
+- `OffscreenCanvas` ＋ `transferToImageBitmap` で ImageBitmap を transferable で main へ返却
+
+#### Firefox 最低バージョン要件 引き上げ
+- `manifest.json` の `strict_min_version`：109.0 → **114.0**
+- 理由：module worker（`new Worker(url, { type: "module" })`）は Firefox 114 以降で WebExtension 環境にて利用可能
+- 影響：109〜113 のユーザーは v1.39.1 までで停止。実機に多くの 109〜113 ユーザーがいる場合は別ルートを検討
+
+### Files Changed
+- `manifest.json`：1.39.1 → 1.40.0、`strict_min_version` 109.0 → 114.0
+- `src/settings/settings.js`：GIF Worker セッション管理ヘルパー追加、`_buildHistCardInner` / `_buildGroupWrapperElement` で GIF 分岐、各破棄経路にセッションクリーンアップフック追加
+
+### Files Unchanged
+- `src/decoders/gif-decoder.worker.js`：Phase 1（GROUP-43 commit `0ebb9df`）で同梱済、変更なし
+- `src/vendor/gifuct/`：同上
+- `src/background/background.js`：`GET_THUMB_BINARY` は Phase 1 で実装済、変更なし
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+### 残課題（後続 Phase）
+- Phase 3：M2 保存ウィンドウのグリッドサムネ（v1.41.0 予定）
+- Phase 4：S5 / M1 大型表示（v1.42.0）
+- Phase 5：S4 / S7 / M5 中型 Lightbox 系（v1.43.0）
+- Phase 6：S3 / S6 / M3 / M4 残小箇所（v1.44.0）
+- Phase 7：V1 viewer.html（v1.45.0）
+
+---
+
 ## [1.39.1] - 2026-04-25
 
 ### Fixed — 単体エントリ操作時の GIF 再デコードを回避（GROUP-42-b、v1.39.0 ユーザー報告対応）

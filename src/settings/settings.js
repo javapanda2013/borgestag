@@ -4673,39 +4673,11 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       ${favBtnHtml}
     </div>
   `;
-  if (entry.thumbId) {
-    if (_isGifEntry(entry)) {
-      // v1.40.0 GROUP-43 Phase 2：GIF は <canvas> + Worker 経路へ
-      _setupGifCanvasInPlaceholder(card, entry, onThumbClick);
-    } else {
-      // 非 GIF（PNG/JPEG など）は既存 <img> + dataUrl 経路
-      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-        .then(r => {
-          if (r?.dataUrl) {
-            const placeholder = card.querySelector(".hist-card-thumb-placeholder");
-            if (placeholder) {
-              const img = document.createElement("img");
-              img.className = "hist-card-thumb";
-              img.src = r.dataUrl;
-              img.title = "クリックで拡大";
-              img.style.cursor = "zoom-in";
-              img.addEventListener("click", (e) => {
-                e.stopPropagation();
-                if (onThumbClick) {
-                  onThumbClick(r.dataUrl, img);
-                } else {
-                  // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
-                  const _navData = _currentFilteredHistory ?? _historyData;
-                  const gIdx = _navData.findIndex(h => h.id === entry.id);
-                  showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
-                }
-              });
-              placeholder.replaceWith(img);
-            }
-          }
-        }).catch(() => {});
-    }
-  }
+  // v1.41.0 GROUP-43 Phase 2 §5 案 A：サムネ読込ブロックは card.innerHTML
+  // 設定の後に実行する（placeholder element が DOM に存在することを保証）。
+  // 元コードは GIF 経路（同期 querySelector）でこのブロックを innerHTML 設定前に
+  // 実行していたため placeholder=null でフォールバックも発火せず、🖼 が表示されたまま
+  // になる v1.40.0 のバグがあった。本実装では innerHTML 設定後に呼び出す。
   // v1.31.4 GROUP-28 mvdl：音声アイコンのクリックハンドラ
   if (entry.audioFilename) {
     setTimeout(() => {
@@ -4789,6 +4761,40 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         </div>
       </div>
     </div>`;
+
+  // v1.41.0 GROUP-43 Phase 2 §5 案 A：thumbHtml が DOM に組み込まれた後に
+  // サムネ読込を開始（GIF は canvas + Worker、非 GIF は <img> + dataUrl）
+  if (entry.thumbId) {
+    if (_isGifEntry(entry)) {
+      _setupGifCanvasInPlaceholder(card, entry, onThumbClick);
+    } else {
+      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+        .then(r => {
+          if (r?.dataUrl) {
+            const placeholder = card.querySelector(".hist-card-thumb-placeholder");
+            if (placeholder) {
+              const img = document.createElement("img");
+              img.className = "hist-card-thumb";
+              img.src = r.dataUrl;
+              img.title = "クリックで拡大";
+              img.style.cursor = "zoom-in";
+              img.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (onThumbClick) {
+                  onThumbClick(r.dataUrl, img);
+                } else {
+                  // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
+                  const _navData = _currentFilteredHistory ?? _historyData;
+                  const gIdx = _navData.findIndex(h => h.id === entry.id);
+                  showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
+                }
+              });
+              placeholder.replaceWith(img);
+            }
+          }
+        }).catch(() => {});
+    }
+  }
 
   card.querySelector(".hist-select-box").addEventListener("change", (e) => {
     if (e.target.checked) _histSelected.add(entry.id);

@@ -5,6 +5,56 @@
 
 ---
 
+## [1.41.0] - 2026-04-26
+
+### Fixed — v1.40.0 の Phase 2 placeholder 検索時序バグを設計書ベースで再構築（GROUP-43 Phase 2 再実装）
+
+#### 経緯
+v1.40.0 で `_setupGifCanvasInPlaceholder` を `_buildHistCardInner` 内で**`card.innerHTML` 設定前に同期実行**してしまい、`card.querySelector(".hist-card-thumb-placeholder")` が `null` を返してフォールバックも発火せず、保存履歴グリッドの GIF タイルが placeholder 🖼 のまま表示される回帰を発生。サムネイル生成成功ダイアログが出ても表示が更新されない症状で発覚。
+
+ユーザーから「複雑な変更なので設計書を先に作ってから」との指示を受け、Phase 2 の本格設計書（`borgestag_canvas_worker_pipeline_design.html`、13 セクション）を作成し、レビュー後に再実装。
+
+#### 設計書（保守用、外部ファイル）
+新設計書の章立て：
+1. 概要・目的・適用範囲
+2. 全体アーキテクチャ
+3. セッション状態遷移図（Initialized → Loading → Animating → Destroyed＋失敗経路）
+4. postMessage プロトコル詳細
+5. **タイル DOM ライフサイクル＋ 3 案比較で案 A 採用**
+6. Worker pool 戦略
+7. フレーム駆動方式
+8. 失敗経路 6 段階のフォールバック
+9. Lightbox 統合（Phase 2 暫定）
+10. 部分更新との整合性
+11. パフォーマンスモデル
+12. テスト戦略 T1〜T12
+13. 既知の懸念と Phase 3-7 の布石
+
+#### 修正内容（案 A 採用）
+**`src/settings/settings.js` の `_buildHistCardInner`**：
+- サムネ読込ブロック（`if (entry.thumbId) { ... }`）を **`card.innerHTML = ...` 設定の後**に移動
+- 元コードは設定前に同期実行 → placeholder element が DOM に存在しないため検索失敗
+- 移動後は thumbHtml が DOM に展開された状態で `_setupGifCanvasInPlaceholder` を呼ぶため、placeholder.replaceWith(canvas) が正しく動作
+- 非 GIF 経路（`<img>` + dataUrl）も同位置で開始。元々 Promise.then 内で querySelector していたため動作していたが、整合のため同位置に移動
+
+#### Files Changed
+- `manifest.json`：1.40.0 → 1.41.0
+- `src/settings/settings.js`：サムネ読込ブロックを `card.innerHTML` 設定後に移動
+
+#### Files Unchanged
+- Phase 1 で同梱した vendor / Worker / GET_THUMB_BINARY 経路はそのまま
+- `strict_min_version` は 114.0 のまま（module worker 対応）
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+### 動作確認の観点（設計書 §12 T1〜T12 参照）
+- T1：GIF タイル単体表示で canvas にアニメ再生
+- T3：混在グリッド（GIF と PNG）で両方が正しい要素種別
+- T5：サムネイル生成後の自動表示（v1.40.0 でバグった経路）
+- T6〜T8：タグ追加・お気に入りトグル・fav-filter drop で部分更新
+- T10：Worker 失敗時のフォールバック確認
+
+---
+
 ## [1.40.0] - 2026-04-26
 
 ### Improved — 設定画面の保存履歴グリッド GIF を Canvas＋Worker パイプラインに移行（GROUP-43 Phase 2）

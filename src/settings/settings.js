@@ -3665,23 +3665,32 @@ function _buildGroupWrapperElement(group) {
         }
       }).catch(() => {});
     } else {
-      // 非 GIF は既存 dataUrl 経路
-      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId })
-        .then(r => {
-          if (r?.dataUrl) {
-            allDataUrls[0] = r.dataUrl;
-            const img = document.createElement("img");
-            img.className = "hist-card-thumb";
-            img.src = r.dataUrl;
-            img.style.cursor = "zoom-in";
-            img.addEventListener("click", () => {
-              const _navData = _currentFilteredHistory ?? _historyData;
-              const gIdx = _navData.findIndex(h => h.id === first.id);
-              showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
-            });
-            placeholder.replaceWith(img);
-          }
-        }).catch(() => {});
+      // 非 GIF は dataUrl 経路。v1.41.2：frontend cache hit なら同期で <img> を attach
+      const _attachImgFromUrl = (dataUrl) => {
+        allDataUrls[0] = dataUrl;
+        const img = document.createElement("img");
+        img.className = "hist-card-thumb";
+        img.src = dataUrl;
+        img.style.cursor = "zoom-in";
+        img.addEventListener("click", () => {
+          const _navData = _currentFilteredHistory ?? _historyData;
+          const gIdx = _navData.findIndex(h => h.id === first.id);
+          showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
+        });
+        placeholder.replaceWith(img);
+      };
+      const cached = _frontCacheGet(first.thumbId);
+      if (cached) {
+        _attachImgFromUrl(cached);
+      } else {
+        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId })
+          .then(r => {
+            if (r?.dataUrl) {
+              _frontCachePut(first.thumbId, r.dataUrl);
+              _attachImgFromUrl(r.dataUrl);
+            }
+          }).catch(() => {});
+      }
     }
   }
 
@@ -4504,6 +4513,86 @@ function _updateFavButtonsForEntry(entryId, isFav) {
 }
 
 // =============================================================================
+// v1.41.2 GROUP-43 Phase 2-cache：frontend dataUrl LRU cache
+// =============================================================================
+// background.js 側にも _thumbCache はあるが、sendMessage の往復だけでも
+// renderHistoryGrid 新規生成時に async Promise 待ちが発生し空白が出る。
+// settings.js プロセス内に dataUrl Map を持ち、cache hit なら同期で
+// _attachThumbImgFromDataUrl して空白期間を消す。
+// =============================================================================
+const _frontDataUrlCache = new Map(); // thumbId → dataUrl
+let _frontDataUrlCacheBytes = 0;
+const FRONT_DATA_URL_CACHE_MAX_ENTRIES = 300;
+const FRONT_DATA_URL_CACHE_MAX_BYTES   = 100 * 1024 * 1024; // 100 MB
+
+function _frontCacheGet(thumbId) {
+  if (!thumbId || !_frontDataUrlCache.has(thumbId)) return null;
+  const v = _frontDataUrlCache.get(thumbId);
+  // LRU：取得した要素を末尾へ移動
+  _frontDataUrlCache.delete(thumbId);
+  _frontDataUrlCache.set(thumbId, v);
+  return v;
+}
+
+function _frontCachePut(thumbId, dataUrl) {
+  if (!thumbId || !dataUrl) return;
+  if (_frontDataUrlCache.has(thumbId)) {
+    _frontDataUrlCacheBytes -= _frontDataUrlCache.get(thumbId).length;
+    _frontDataUrlCache.delete(thumbId);
+  }
+  _frontDataUrlCache.set(thumbId, dataUrl);
+  _frontDataUrlCacheBytes += dataUrl.length;
+  while (
+    _frontDataUrlCache.size > FRONT_DATA_URL_CACHE_MAX_ENTRIES ||
+    _frontDataUrlCacheBytes > FRONT_DATA_URL_CACHE_MAX_BYTES
+  ) {
+    const firstKey = _frontDataUrlCache.keys().next().value;
+    if (firstKey === undefined) break;
+    _frontDataUrlCacheBytes -= _frontDataUrlCache.get(firstKey).length;
+    _frontDataUrlCache.delete(firstKey);
+  }
+}
+
+// 共通：dataUrl を持っている前提で hist-card の placeholder を <img> に置換し
+// click ハンドラを attach する（_buildHistCardInner 専用、グループ wrapper では使わない）
+function _attachThumbImgFromDataUrl(card, entry, dataUrl, onThumbClick) {
+  const placeholder = card.querySelector(".hist-card-thumb-placeholder");
+  if (!placeholder) return;
+  const img = document.createElement("img");
+  img.className = "hist-card-thumb";
+  img.src = dataUrl;
+  img.title = "クリックで拡大";
+  img.style.cursor = "zoom-in";
+  img.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (onThumbClick) {
+      onThumbClick(dataUrl, img);
+    } else {
+      const _navData = _currentFilteredHistory ?? _historyData;
+      const gIdx = _navData.findIndex(h => h.id === entry.id);
+      showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
+    }
+  });
+  placeholder.replaceWith(img);
+}
+
+// 非 GIF サムネを placeholder へ流し込む（cache hit なら同期、miss なら async＋cache put）
+function _setupNonGifThumbInPlaceholder(card, entry, onThumbClick) {
+  const cached = _frontCacheGet(entry.thumbId);
+  if (cached) {
+    _attachThumbImgFromDataUrl(card, entry, cached, onThumbClick);
+    return;
+  }
+  browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+    .then(r => {
+      if (r?.dataUrl) {
+        _frontCachePut(entry.thumbId, r.dataUrl);
+        _attachThumbImgFromDataUrl(card, entry, r.dataUrl, onThumbClick);
+      }
+    }).catch(() => {});
+}
+
+// =============================================================================
 // v1.40.0 GROUP-43 Phase 2：GIF を <canvas> ＋ Worker パイプラインで再生
 // =============================================================================
 // - Module Worker（src/decoders/gif-decoder.worker.js）を単一共有で起動
@@ -4659,11 +4748,15 @@ function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
   canvas.addEventListener("click", async (e) => {
     e.stopPropagation();
     // Click 時に dataUrl を取得して Lightbox へ。Phase 4 で Lightbox も canvas 化予定
-    let dataUrl = null;
-    try {
-      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId });
-      dataUrl = r?.dataUrl;
-    } catch (_) { /* ignore */ }
+    // v1.41.2：frontend cache hit なら sendMessage skip
+    let dataUrl = _frontCacheGet(entry.thumbId);
+    if (!dataUrl) {
+      try {
+        const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId });
+        dataUrl = r?.dataUrl;
+        if (dataUrl) _frontCachePut(entry.thumbId, dataUrl);
+      } catch (_) { /* ignore */ }
+    }
     if (!dataUrl) return;
     if (onThumbClick) {
       onThumbClick(dataUrl, canvas);
@@ -4686,25 +4779,36 @@ function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
 
 function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
   if (!canvas?.parentNode) return;
+  // v1.41.2：frontend cache hit なら同期で <img> 置換
+  const _attach = (dataUrl) => {
+    if (!canvas?.parentNode) return;
+    const img = document.createElement("img");
+    img.className = "hist-card-thumb";
+    img.src = dataUrl;
+    img.title = "クリックで拡大";
+    img.style.cursor = "zoom-in";
+    img.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (onThumbClick) {
+        onThumbClick(dataUrl, img);
+      } else {
+        const _navData = _currentFilteredHistory ?? _historyData;
+        const gIdx = _navData.findIndex(h => h.id === entry.id);
+        showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
+      }
+    });
+    canvas.replaceWith(img);
+  };
+  const cached = _frontCacheGet(entry.thumbId);
+  if (cached) {
+    _attach(cached);
+    return;
+  }
   browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
     .then(r => {
       if (!r?.dataUrl) return;
-      const img = document.createElement("img");
-      img.className = "hist-card-thumb";
-      img.src = r.dataUrl;
-      img.title = "クリックで拡大";
-      img.style.cursor = "zoom-in";
-      img.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (onThumbClick) {
-          onThumbClick(r.dataUrl, img);
-        } else {
-          const _navData = _currentFilteredHistory ?? _historyData;
-          const gIdx = _navData.findIndex(h => h.id === entry.id);
-          showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
-        }
-      });
-      canvas.replaceWith(img);
+      _frontCachePut(entry.thumbId, r.dataUrl);
+      _attach(r.dataUrl);
     }).catch(() => {});
 }
 
@@ -4833,35 +4937,12 @@ function _buildHistCardInner(card, entry, onThumbClick) {
 
   // v1.41.0 GROUP-43 Phase 2 §5 案 A：thumbHtml が DOM に組み込まれた後に
   // サムネ読込を開始（GIF は canvas + Worker、非 GIF は <img> + dataUrl）
+  // v1.41.2 GROUP-43 Phase 2-cache：非 GIF は frontend cache hit なら同期描画
   if (entry.thumbId) {
     if (_isGifEntry(entry)) {
       _setupGifCanvasInPlaceholder(card, entry, onThumbClick);
     } else {
-      browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-        .then(r => {
-          if (r?.dataUrl) {
-            const placeholder = card.querySelector(".hist-card-thumb-placeholder");
-            if (placeholder) {
-              const img = document.createElement("img");
-              img.className = "hist-card-thumb";
-              img.src = r.dataUrl;
-              img.title = "クリックで拡大";
-              img.style.cursor = "zoom-in";
-              img.addEventListener("click", (e) => {
-                e.stopPropagation();
-                if (onThumbClick) {
-                  onThumbClick(r.dataUrl, img);
-                } else {
-                  // 全体ナビ付きでシングル表示（絞り込み中は絞り込み結果内でナビ）
-                  const _navData = _currentFilteredHistory ?? _historyData;
-                  const gIdx = _navData.findIndex(h => h.id === entry.id);
-                  showGroupLightbox([r.dataUrl], 0, [entry], { startEntryIndex: gIdx });
-                }
-              });
-              placeholder.replaceWith(img);
-            }
-          }
-        }).catch(() => {});
+      _setupNonGifThumbInPlaceholder(card, entry, onThumbClick);
     }
   }
 

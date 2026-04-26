@@ -5,6 +5,50 @@
 
 ---
 
+## [1.41.2] - 2026-04-26
+
+### Improved — settings.js プロセス内に frontend dataUrl LRU cache を導入し、非 GIF タイルの再表示空白を解消（GROUP-43 Phase 2-cache）
+
+#### 経緯
+v1.41.1 の reuse helper だけでは、絞り込み変更で page slice 構成が大きく変わるケース（reuse 候補がほぼ 0 件）と削除後の繰り上がりエントリで、新規生成パスを通るタイルの空白期間（dataUrl 取得 Promise 待ち）が解消されなかった。background.js 側の `_thumbCache`（v1.35.0）に dataUrl 自体は乗っているが、settings.js から sendMessage 往復しないと取れないため、新規生成タイルが必ず async 待ちで `<div class="hist-card-thumb-placeholder">🖼</div>` を一瞬見せていた。
+
+ユーザー報告：「v1.41.1 でも結果変わらず、調査対策してリリース」
+
+#### 修正内容
+**`src/settings/settings.js` プロセス内に dataUrl LRU cache を追加**：
+
+- `_frontDataUrlCache` Map（thumbId → dataUrl）。LRU 上限 300 件 / 100MB（background 側 `_thumbCache` と同形式）
+- `_frontCacheGet` / `_frontCachePut`：取得時は末尾移動、容量超過は先頭から evict
+- `_attachThumbImgFromDataUrl(card, entry, dataUrl, onThumbClick)`：dataUrl を持つ前提で `<img>` を作って placeholder と差し替え＋ click handler を attach する共通関数（hist-card 単独カード用）
+- `_setupNonGifThumbInPlaceholder(card, entry, onThumbClick)`：cache hit なら **同期で `_attachThumbImgFromDataUrl` を呼ぶ**（Promise 待ちゼロ）。miss なら従来通り sendMessage 後付け、完了時に `_frontCachePut` で cache 蓄積
+
+**サムネ取得 4 経路を cache 経由化**：
+- `_buildHistCardInner` 非 GIF パス → `_setupNonGifThumbInPlaceholder` 呼出に統合
+- `_buildGroupWrapperElement` 非 GIF パス（グループ代表カード）：cache get/put を直接挿入（allDataUrls への副作用があるため共通関数化せず）
+- `_setupGifCanvasInPlaceholder` の canvas クリック経路（Lightbox 起動）：cache 経由化
+- `_fallbackCanvasToImg`：cache 経由化
+
+#### 期待される改善
+- 一度表示したエントリの dataUrl は cache 蓄積（最大 100MB / 300 件）
+- 絞り込み変更で page slice 構成が変わっても、過去に表示したエントリなら **同期で `<img>` 即時表示 → 空白なし**
+- 削除後の繰り上がりエントリも、過去に表示されていれば同期表示
+- サムネ生成完了で thumbId が新しくなったエントリは初回のみ async 待ち、以降同期表示
+- GIF タイルの canvas + Worker INIT 待ちは別問題（Phase 3+）。dataUrl click 経路は cache hit ですぐ Lightbox 起動
+
+#### Files Changed
+- `manifest.json`：1.41.1 → 1.41.2
+- `src/settings/settings.js`：
+  - frontend dataUrl LRU cache helper（`_frontDataUrlCache` / `_frontCacheGet` / `_frontCachePut`）
+  - `_attachThumbImgFromDataUrl` / `_setupNonGifThumbInPlaceholder` 共通関数
+  - 非 GIF サムネ取得 4 経路を cache 経由化（`_buildHistCardInner` / `_buildGroupWrapperElement` / `_setupGifCanvasInPlaceholder` click / `_fallbackCanvasToImg`）
+
+#### Files Unchanged
+- v1.41.1 の reuse helper（`_renderHistoryGridNormalReuse`）はそのまま。reuse 効くケースは引き続き reuse、reuse 効かないケースで cache が補完
+- `modal.js`（保存ウィンドウ）の同経路は本リリース対象外。Phase 3 (M2 保存ウィンドウグリッドサムネ) で別途対応
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.41.1] - 2026-04-26
 
 ### Improved — 保存履歴グリッド通常モードの再描画を「既存タイル再利用」型に変更（GROUP-43 Phase 2-reuse）

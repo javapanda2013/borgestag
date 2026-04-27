@@ -5,6 +5,40 @@
 
 ---
 
+## [1.44.1] - 2026-04-27
+
+### Fixed — GROUP-16 表示文言を「識別情報」に統一（v1.44.0 文言不統一の hotfix）
+
+#### 経緯
+v1.44.0 で実装した GROUP-16 のコピーボタンと貼付反映 UI で、取得時は「識別情報」、使用時は「ID」「UUID」と表現が混在し統一されていなかった。ユーザー指摘：「取得時は識別情報、使用時は UUID で統一されていない」。
+
+#### 修正内容（表示文言のみ、内部識別子・クラス名・data-* 属性は変更なし）
+
+**`src/settings/settings.js`**
+- タイル「📋 識別情報をコピー」ボタンの title：「『📥 ID から反映』に貼付」→「『📥 識別情報から反映』に貼付」
+- 編集パネル：「📥 ID から反映」ラベル → 「📥 識別情報から反映」、placeholder「他エントリの ID（UUID）を貼付」→「他エントリの識別情報を貼付」、反映ボタン title「貼付した ID から…」→「貼付した識別情報から…」
+- showStatus エラー：「⚠️ ID を貼付してください」→「⚠️ 識別情報を貼付してください」
+- `_showIdPasteConfirmDialog` ヘッダ：「ID: `<code>`」→「識別情報: `<code>`」
+
+**`src/modal/modal.js`**
+- タイル「📋 ID」ボタン → 「📋 識別情報」、title「識別情報（UUID）をクリップボードにコピー」→「識別情報をクリップボードにコピー」
+- 編集パネル：settings.js と同様（ラベル「📥 識別情報から反映」、placeholder「他エントリの識別情報を貼付」、反映 title 修正）
+- showToast エラー：同様に「ID」→「識別情報」
+- `_showIdPasteConfirmDialog` ヘッダ：「ID:」→「識別情報:」
+
+#### Files Changed
+- `manifest.json`：1.44.0 → 1.44.1
+- `src/settings/settings.js`：表示文言 5 箇所統一
+- `src/modal/modal.js`：表示文言 5 箇所統一
+
+#### Files Unchanged
+- 内部識別子：クラス名（`hist-id-copy` / `history-btn-id-copy` / `hist-id-paste-input` 等）、data-* 属性（`data-copy-id`）、関数名（`_showIdPasteConfirmDialog`）はコード参照保持のため変更なし
+- `crypto.randomUUID()` 等の API 呼出はそのまま
+- 機能・データ構造変更なし
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.44.0] - 2026-04-27
 
 ### Added — 保存履歴の識別情報コピー＋ ID 貼付で情報流用（GROUP-16-a1 / a2）

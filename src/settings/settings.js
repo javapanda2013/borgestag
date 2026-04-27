@@ -4961,7 +4961,7 @@ function _showIdPasteConfirmDialog(src) {
     const hasPageUrl = !!src.pageUrl;
     let html = `
       <div style="font-size:15px;font-weight:700;color:#2c3e50;margin-bottom:8px;">📥 反映対象を選択</div>
-      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escHtml(src.filename || "(無名)")}<br>ID: <code>${escHtml(src.id)}</code></div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escHtml(src.filename || "(無名)")}<br>識別情報: <code>${escHtml(src.id)}</code></div>
     `;
     if (tags.length === 0 && authors.length === 0 && !hasPageUrl) {
       html += `<div style="color:#c53030;margin:8px 0;">この保存履歴にはコピー可能なフィールドがありません（タグ・権利者・ページ URL 全て空）。</div>`;
@@ -5116,7 +5116,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
           <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
         </div>
-        <button class="hist-card-btn hist-id-copy" title="識別情報（UUID）をクリップボードにコピー。別エントリの『📥 ID から反映』に貼付して情報を流用できます" data-copy-id="${escHtml(entry.id)}">📋 識別情報をコピー</button>
+        <button class="hist-card-btn hist-id-copy" title="識別情報をクリップボードにコピー。別エントリの『📥 識別情報から反映』に貼付して情報を流用できます" data-copy-id="${escHtml(entry.id)}">📋 識別情報をコピー</button>
       </div>
       <div class="hist-info-editor">
         <div class="hist-info-editor-inner">
@@ -5144,12 +5144,12 @@ function _buildHistCardInner(card, entry, onThumbClick) {
             <div class="hist-info-field-label">📁 保存先情報</div>
             <input type="text" class="hist-path-input" placeholder="保存先パス" />
           </div>
-          <!-- v1.44.0 GROUP-16-a2: ID 貼付して情報流用 -->
+          <!-- v1.44.0 GROUP-16-a2: 識別情報を貼付して情報流用（v1.44.1 文言統一） -->
           <div class="hist-info-field-group">
-            <div class="hist-info-field-label">📥 ID から反映</div>
+            <div class="hist-info-field-label">📥 識別情報から反映</div>
             <div style="display:flex;gap:6px;align-items:center;">
-              <input type="text" class="hist-id-paste-input" placeholder="他エントリの ID（UUID）を貼付" autocomplete="off" style="flex:1;font-size:11px;font-family:Consolas,monospace;" />
-              <button class="hist-id-paste-apply hist-card-btn" type="button" title="貼付した ID から情報を読み取り、反映対象を選択するダイアログを開く">📥 反映</button>
+              <input type="text" class="hist-id-paste-input" placeholder="他エントリの識別情報を貼付" autocomplete="off" style="flex:1;font-size:11px;font-family:Consolas,monospace;" />
+              <button class="hist-id-paste-apply hist-card-btn" type="button" title="貼付した識別情報から情報を読み取り、反映対象を選択するダイアログを開く">📥 反映</button>
             </div>
           </div>
           <div class="hist-info-editor-actions">
@@ -5429,7 +5429,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       e.stopPropagation();
       const pastedId = (idPasteInput.value || "").trim();
       if (!pastedId) {
-        showStatus("⚠️ ID を貼付してください", true);
+        showStatus("⚠️ 識別情報を貼付してください", true);
         return;
       }
       const src = (_historyData || []).find(h => h.id === pastedId);

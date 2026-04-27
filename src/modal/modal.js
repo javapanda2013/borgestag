@@ -2898,7 +2898,7 @@ function setupModalEvents(
               🧭 移動
             </button>
             <button class="history-btn history-btn-info-edit" title="情報を編集">✏️ 情報を編集</button>
-            <button class="history-btn history-btn-id-copy" title="識別情報（UUID）をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">📋 ID</button>
+            <button class="history-btn history-btn-id-copy" title="識別情報をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">📋 識別情報</button>
           </div>
           <div class="history-info-editor">
             <div class="history-info-editor-inner">
@@ -2929,12 +2929,12 @@ function setupModalEvents(
                 <div class="history-info-field-label">📁 保存先情報</div>
                 <input type="text" class="history-info-path-input" placeholder="保存先パス" />
               </div>
-              <!-- v1.44.0 GROUP-16-a2: ID 貼付して情報流用 -->
+              <!-- v1.44.0 GROUP-16-a2: 識別情報を貼付して情報流用（v1.44.1 文言統一） -->
               <div class="history-info-field-group">
-                <div class="history-info-field-label">📥 ID から反映</div>
+                <div class="history-info-field-label">📥 識別情報から反映</div>
                 <div style="display:flex;gap:6px;align-items:center;">
-                  <input type="text" class="history-id-paste-input" placeholder="他エントリの ID（UUID）を貼付" autocomplete="off" style="flex:1;font-size:11px;font-family:Consolas,monospace;padding:4px;border:1px solid rgba(255,255,255,0.3);background:rgba(0,0,0,0.2);color:#fff;border-radius:4px;" />
-                  <button class="history-id-paste-apply history-btn" type="button" title="貼付した ID から情報を読み取り、反映対象を選択するダイアログを開く">📥 反映</button>
+                  <input type="text" class="history-id-paste-input" placeholder="他エントリの識別情報を貼付" autocomplete="off" style="flex:1;font-size:11px;font-family:Consolas,monospace;padding:4px;border:1px solid rgba(255,255,255,0.3);background:rgba(0,0,0,0.2);color:#fff;border-radius:4px;" />
+                  <button class="history-id-paste-apply history-btn" type="button" title="貼付した識別情報から情報を読み取り、反映対象を選択するダイアログを開く">📥 反映</button>
                 </div>
               </div>
               <div class="history-info-editor-actions">
@@ -3188,7 +3188,7 @@ function setupModalEvents(
           e.stopPropagation();
           const pastedId = (idPasteInput.value || "").trim();
           if (!pastedId) {
-            showToast(shadow, "⚠️ ID を貼付してください", true);
+            showToast(shadow, "⚠️ 識別情報を貼付してください", true);
             return;
           }
           const src = (saveHistory || []).find(h => h.id === pastedId);
@@ -5939,7 +5939,7 @@ function _showIdPasteConfirmDialog(src) {
     const hasPageUrl = !!src.pageUrl;
     let html = `
       <div style="font-size:15px;font-weight:700;color:#2c3e50;margin-bottom:8px;">📥 反映対象を選択</div>
-      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escapeHtml(src.filename || "(無名)")}<br>ID: <code>${escapeHtml(src.id)}</code></div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escapeHtml(src.filename || "(無名)")}<br>識別情報: <code>${escapeHtml(src.id)}</code></div>
     `;
     if (tags.length === 0 && authors.length === 0 && !hasPageUrl) {
       html += `<div style="color:#c53030;margin:8px 0;">この保存履歴にはコピー可能なフィールドがありません（タグ・権利者・ページ URL 全て空）。</div>`;

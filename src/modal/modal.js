@@ -2898,6 +2898,7 @@ function setupModalEvents(
               🧭 移動
             </button>
             <button class="history-btn history-btn-info-edit" title="情報を編集">✏️ 情報を編集</button>
+            <button class="history-btn history-btn-id-copy" title="識別情報（UUID）をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">📋 ID</button>
           </div>
           <div class="history-info-editor">
             <div class="history-info-editor-inner">
@@ -2927,6 +2928,14 @@ function setupModalEvents(
               <div class="history-info-field-group">
                 <div class="history-info-field-label">📁 保存先情報</div>
                 <input type="text" class="history-info-path-input" placeholder="保存先パス" />
+              </div>
+              <!-- v1.44.0 GROUP-16-a2: ID 貼付して情報流用 -->
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">📥 ID から反映</div>
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <input type="text" class="history-id-paste-input" placeholder="他エントリの ID（UUID）を貼付" autocomplete="off" style="flex:1;font-size:11px;font-family:Consolas,monospace;padding:4px;border:1px solid rgba(255,255,255,0.3);background:rgba(0,0,0,0.2);color:#fff;border-radius:4px;" />
+                  <button class="history-id-paste-apply history-btn" type="button" title="貼付した ID から情報を読み取り、反映対象を選択するダイアログを開く">📥 反映</button>
+                </div>
               </div>
               <div class="history-info-editor-actions">
                 <button class="history-info-editor-cancel">✕</button>
@@ -3036,6 +3045,20 @@ function setupModalEvents(
         handleHistoryAction(paths, "nav", item);
       });
 
+      // ---- v1.44.0 GROUP-16-a1：識別情報（UUID）コピーボタン ----
+      const idCopyBtn = item.querySelector(".history-btn-id-copy");
+      if (idCopyBtn) {
+        idCopyBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(idCopyBtn.dataset.copyId || entry.id);
+            showToast(shadow, "📋 識別情報をコピーしました");
+          } catch (err) {
+            showToast(shadow, `❌ クリップボードにコピーできませんでした: ${err?.message || err}`, true);
+          }
+        });
+      }
+
       // ---- ✏️ 情報を編集ボタン ----
       const infoEditBtn   = item.querySelector(".history-btn-info-edit");
       const infoEditor    = item.querySelector(".history-info-editor");
@@ -3049,6 +3072,8 @@ function setupModalEvents(
       const infoThumb     = item.querySelector(".history-info-thumb");
       const cancelBtn     = item.querySelector(".history-info-editor-cancel");
       const saveBtn       = item.querySelector(".history-info-editor-save");
+      const idPasteInput  = item.querySelector(".history-id-paste-input");
+      const idPasteApply  = item.querySelector(".history-id-paste-apply");
 
       let pendingTags    = new Set(entry.tags || []);
       let pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
@@ -3156,6 +3181,49 @@ function setupModalEvents(
         e.stopPropagation();
         infoEditor.classList.remove("visible");
       });
+
+      // ── v1.44.0 GROUP-16-a2：ID 貼付反映 ──
+      if (idPasteApply && idPasteInput) {
+        idPasteApply.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const pastedId = (idPasteInput.value || "").trim();
+          if (!pastedId) {
+            showToast(shadow, "⚠️ ID を貼付してください", true);
+            return;
+          }
+          const src = (saveHistory || []).find(h => h.id === pastedId);
+          if (!src) {
+            showToast(shadow, `❌ 該当する保存履歴が見つかりません: ${pastedId.slice(0, 12)}…`, true);
+            return;
+          }
+          const result = await _showIdPasteConfirmDialog(src);
+          if (!result) return;
+          if (result.tags && result.tags.length > 0) {
+            const merged = [];
+            if (result.mainTag) merged.push(result.mainTag);
+            for (const t of result.tags) if (!merged.includes(t)) merged.push(t);
+            for (const t of pendingTags) if (!merged.includes(t)) merged.push(t);
+            pendingTags = new Set(merged);
+            renderInfoTagChips();
+          }
+          if (result.authors && result.authors.length > 0) {
+            for (const a of result.authors) {
+              if (!pendingAuthors.includes(a)) pendingAuthors.push(a);
+            }
+            renderInfoAuthorChips();
+          }
+          if (result.applyPageUrl && src.pageUrl) {
+            entry.pageUrl = src.pageUrl;
+            showToast(shadow, `📥 反映：tags ${result.tags.length} 件 / authors ${result.authors.length} 件 / pageUrl 上書き`);
+          } else {
+            showToast(shadow, `📥 反映：tags ${result.tags.length} 件 / authors ${result.authors.length} 件`);
+          }
+          idPasteInput.value = "";
+        });
+        idPasteInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); idPasteApply.click(); }
+        });
+      }
 
       // オーバーレイ背景クリックで閉じる
       infoEditor.addEventListener("click", (e) => {
@@ -5846,6 +5914,100 @@ function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// v1.44.0 GROUP-16-a2：ID 貼付確認ダイアログ（modal.js 用、settings.js と機能等価）
+function _showIdPasteConfirmDialog(src) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById("id-paste-confirm-overlay");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "id-paste-confirm-overlay";
+    overlay.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2147483647; font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic", sans-serif;
+    `;
+    const card = document.createElement("div");
+    card.style.cssText = `
+      background: #fff; border-radius: 10px; padding: 18px 22px;
+      min-width: 420px; max-width: 80vw; max-height: 80vh; overflow: auto;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.3); font-size: 13px; color: #333;
+    `;
+    const tags = Array.isArray(src.tags) ? src.tags : [];
+    const authors = Array.isArray(src.authors) ? src.authors.filter(Boolean) : [];
+    const hasPageUrl = !!src.pageUrl;
+    let html = `
+      <div style="font-size:15px;font-weight:700;color:#2c3e50;margin-bottom:8px;">📥 反映対象を選択</div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escapeHtml(src.filename || "(無名)")}<br>ID: <code>${escapeHtml(src.id)}</code></div>
+    `;
+    if (tags.length === 0 && authors.length === 0 && !hasPageUrl) {
+      html += `<div style="color:#c53030;margin:8px 0;">この保存履歴にはコピー可能なフィールドがありません（タグ・権利者・ページ URL 全て空）。</div>`;
+      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button id="id-paste-cancel" style="padding:6px 14px;font-size:13px;border:1px solid #999;background:#fff;color:#444;border-radius:6px;cursor:pointer;font-family:inherit;">閉じる</button></div>`;
+      card.innerHTML = html;
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      const close = () => { overlay.remove(); resolve(null); };
+      card.querySelector("#id-paste-cancel").addEventListener("click", close);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+      return;
+    }
+    if (tags.length > 0) {
+      html += `<div style="font-weight:600;margin:10px 0 4px;">🏷️ タグ（チェックで反映、ラジオでメインタグ指定）</div>`;
+      html += tags.map((t, i) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+          <input type="checkbox" class="id-paste-tag-cb" data-tag="${escapeHtml(t)}" checked />
+          <input type="radio" name="id-paste-main-tag" class="id-paste-tag-radio" value="${escapeHtml(t)}" ${i === 0 ? "checked" : ""} title="メインタグに指定" />
+          <span>${escapeHtml(t)}</span>
+        </div>`).join("");
+    }
+    if (authors.length > 0) {
+      html += `<div style="font-weight:600;margin:12px 0 4px;">✏️ 権利者</div>`;
+      html += authors.map((a) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+          <input type="checkbox" class="id-paste-author-cb" data-author="${escapeHtml(a)}" checked />
+          <span>${escapeHtml(a)}</span>
+        </div>`).join("");
+    }
+    if (hasPageUrl) {
+      html += `<div style="font-weight:600;margin:12px 0 4px;">🔗 ページ URL</div>`;
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+        <input type="checkbox" id="id-paste-pageurl-cb" />
+        <span style="word-break:break-all;font-size:11px;color:#555;">${escapeHtml(src.pageUrl)}</span>
+      </div>`;
+    }
+    html += `
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid #eee;padding-top:12px;">
+        <button id="id-paste-cancel" style="padding:6px 14px;font-size:13px;border:1px solid #999;background:#fff;color:#444;border-radius:6px;cursor:pointer;font-family:inherit;">キャンセル</button>
+        <button id="id-paste-apply" style="padding:6px 14px;font-size:13px;border:1px solid #4a90e2;background:#4a90e2;color:#fff;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:600;">📥 反映</button>
+      </div>
+    `;
+    card.innerHTML = html;
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    const cancel = () => { overlay.remove(); resolve(null); };
+    card.querySelector("#id-paste-cancel").addEventListener("click", cancel);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cancel(); });
+    card.querySelector("#id-paste-apply").addEventListener("click", () => {
+      const selectedTags = [...card.querySelectorAll(".id-paste-tag-cb")]
+        .filter(cb => cb.checked).map(cb => cb.dataset.tag);
+      const mainTagRadio = card.querySelector(".id-paste-tag-radio:checked");
+      const mainTag = mainTagRadio ? mainTagRadio.value : (selectedTags[0] || null);
+      const finalMain = (mainTag && selectedTags.includes(mainTag)) ? mainTag : (selectedTags[0] || null);
+      const selectedAuthors = [...card.querySelectorAll(".id-paste-author-cb")]
+        .filter(cb => cb.checked).map(cb => cb.dataset.author);
+      const pageUrlCb = card.querySelector("#id-paste-pageurl-cb");
+      const applyPageUrl = !!(pageUrlCb && pageUrlCb.checked);
+      overlay.remove();
+      resolve({
+        tags: selectedTags,
+        mainTag: finalMain,
+        authors: selectedAuthors,
+        applyPageUrl,
+      });
+    });
+  });
 }
 
 // =============================================================================

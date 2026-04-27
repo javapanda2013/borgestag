@@ -5,6 +5,48 @@
 
 ---
 
+## [1.44.0] - 2026-04-27
+
+### Added — 保存履歴の識別情報コピー＋ ID 貼付で情報流用（GROUP-16-a1 / a2）
+
+#### 経緯
+GROUP-16 は 2026-04-19 受領、Q16-1〜Q16-4 + Q16-2' で 2026-04-25 要件確定。Q-recheck-16-1 = a で `clipboardWrite` permission 追加採用、Q-recheck-16-2 = a で既存フィールド（tags / authors / pageUrl）のみコピー対象（memo は別 GROUP）。1 枚ずつ取込時などに従来の保存履歴のタグ・権利者情報を流用する想定ユースケース。
+
+#### 修正内容
+
+**`manifest.json`**
+- `clipboardWrite` permission 追加（既存ユーザーは権限再認可ダイアログ）
+
+**`src/settings/settings.js` / `src/modal/modal.js`** — 共通設計で両画面に同等機能
+- 保存履歴タイルに「📋 識別情報をコピー」ボタン追加（`hist-id-copy` / `history-btn-id-copy`）。`navigator.clipboard.writeText(entry.id)` で UUID を直接コピー、成功・失敗を showStatus / showToast で通知
+- 情報編集パネルに「📥 ID から反映」入力欄＋反映ボタンを追加（保存先パス入力欄の下、editor-actions の前）
+- `_showIdPasteConfirmDialog(src)` 共通関数（settings.js / modal.js それぞれに同等実装）：
+  - 元エントリの `tags` / `authors` / `pageUrl` から反映可能なフィールドのみ表示
+  - タグ：個別 ON/OFF チェックボックス＋メインタグ選択ラジオ（デフォルト先頭、Q16-3 追加要件）
+  - 権利者：個別 ON/OFF チェックボックス
+  - ページ URL：チェックボックス（デフォルト OFF、明示的に上書き選択）
+  - 全フィールド空の場合は「コピー可能なフィールドがありません」エラー表示で閉じる
+- 反映時：選択された tags を pendingTags に merge（メインタグを先頭に置き、既存タグも保持）、authors を pendingAuthors に merge、pageUrl チェック時は entry.pageUrl を直接上書き
+- showStatus / showToast で「📥 反映：tags N 件 / authors M 件 [/ pageUrl 上書き]」と件数フィードバック
+- Enter キーでも貼付反映を実行可能
+
+#### 期待される改善
+- 1 枚ずつ取込で前のエントリの情報をそのまま使いたいユースケースで、UUID コピー＋ ID 貼付＋確認ダイアログの 3 ステップで反映可能
+- 設定画面・保存ウィンドウの両画面で同じ操作感（Q16-4=a）
+- 個別 ON/OFF で必要なフィールドだけ反映（Q16-3）、メインタグも自由選択（Q16-3 追加要件）
+
+#### Files Changed
+- `manifest.json`：1.43.1 → 1.44.0、`clipboardWrite` permission 追加
+- `src/settings/settings.js`：タイル ID コピーボタン HTML / 編集パネル ID 貼付欄 HTML / 各 const 宣言 / ID コピーハンドラ / 貼付反映ハンドラ / `_showIdPasteConfirmDialog` 関数追加
+- `src/modal/modal.js`：同上（modal 用 class 名 `history-*` で実装、`_showIdPasteConfirmDialog` も独立追加）
+
+#### Files Unchanged
+- `saveHistory` データ構造変更なし（マイグレーション不要、新フィールド追加なし、UI 追加のみ）
+- 部分更新ハンドラ `_updateHistCardFields`（GROUP-42）への影響なし（新ボタンは `hist-card-actions` 内、`thumb-wrap` 非干渉）
+- `native/image_saver.py`：Native 変更なし（v1.30.7 のまま）
+
+---
+
 ## [1.43.1] - 2026-04-27
 
 ### Fixed — 完了ルートフォルダ履歴が「1 枚ずつ形式」モードでしか表示されない不具合を修正（GROUP-19 Phase D hotfix）

@@ -562,25 +562,45 @@
       text-decoration: none; display: block;
     }
     a.hist-card-pageurl:hover { color: #cde; text-decoration: underline; }
+    /* v1.45.0 GROUP-46：1 行 3 ボタンに統合（旧 .hist-card-actions-row 廃止）。
+       音声付エントリは padding-left:32px で左下 .hist-card-audio-icon との重複を回避（Q-46-5=c）。 */
     .hist-card-actions {
-      display: flex; flex-direction: column; gap: 4px;
-    }
-    .hist-card-actions-row {
       display: flex; gap: 4px;
     }
-    .hist-card-actions-row .hist-card-btn {
-      flex: 1; width: auto;
-    }
+    .hist-card-actions.has-audio { padding-left: 32px; }
     .hist-card-btn {
-      width: 100%;
+      flex: 1; min-width: 0;
       background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35); border-radius: 4px;
       padding: 5px 4px; font-size: 13px; cursor: pointer; color: #fff; font-family: inherit;
       transition: background .1s; text-align: center; line-height: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .hist-card-btn:hover { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.6); }
     .hist-card-btn.del { border-color: rgba(255,100,100,.6); color: #ffaaaa; }
     .hist-card-btn.del:hover { background: rgba(255,80,80,.25); }
     .hist-card-btn.addtag { font-size: 12px; }
+    /* v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、タイル :hover で opacity 制御）
+       右上の ❤️ (.hist-card-fav-btn at right:6) との競合回避のため right:36 を起点に左へ並ぶ。 */
+    .hist-card-icon-cluster {
+      position: absolute; top: 6px; right: 36px;
+      display: flex; gap: 4px;
+      z-index: 4;
+      opacity: 0; transition: opacity .2s;
+      pointer-events: none;
+    }
+    .hist-card:hover .hist-card-icon-cluster { opacity: 1; pointer-events: auto; }
+    .hist-card-icon-btn {
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; padding: 0;
+      line-height: 1; font-size: 13px;
+      transition: background .15s, transform .1s;
+    }
+    .hist-card-icon-btn:hover { background: rgba(80,140,220,0.85); transform: scale(1.08); }
+    .hist-card-icon-btn svg { width: 14px; height: 14px; }
 
     /* 作者チップ（履歴タイル） */
     .hist-card-author {

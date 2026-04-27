@@ -5,6 +5,51 @@
 
 ---
 
+## [1.45.0] - 2026-04-28
+
+### Changed — GROUP-46 設定画面・保存ウィンドウ 保存履歴タイル レイアウト改善
+
+#### 経緯
+v1.44.0 (GROUP-16) で識別情報コピー＋情報編集ボタンを追加した結果、設定画面の保存履歴タイルでアクション領域が肥大化し、押下プレビュー領域が狭くなった。同時に保存ウィンドウ側は下部 5 ボタン横並びで文字潰れ、左下の音声アイコン (`.history-audio-icon`) と下部ボタンが重複する問題も顕在化。
+
+#### 改修内容（settings.js / settings.html / modal.js）
+
+**1. 識別情報コピー・情報を編集ボタンを上部右側にアイコン化（hover 時のみ表示）**
+- BorgesTag 独自カスタム SVG コピーアイコン（24×24、2 ドキュメント横並び + 下部曲線矢印 + 三角矢じり）
+- ✏️ 情報を編集 は絵文字単独の丸ボタン
+- 右上の ❤️ お気に入りボタンの左隣に配置（`right: 36px`）
+- タイル `:hover` で opacity 0 → 1（旧アクションと同じ挙動）
+
+**2. 設定画面：下部アクションを 1 行 3 ボタンに統合**
+- Before：縦 4 行（保存先 / 保存した画像 / 削除＋情報を編集 / 識別情報をコピー）
+- After：1 行（🗂 保存先 / 🖼 原寸 / 🗑 削除）
+- 旧 `.hist-card-actions-row` 廃止
+
+**3. 保存ウィンドウ：下部アクションを 1 行 5 ボタン → 3 ボタンに削減**
+- Before：🗂 保存先 / 🖼 保存した画像 / 🧭 移動 / ✏️ 情報を編集 / 📋 識別情報（文字潰れ発生）
+- After：🗂 保存先 / 🖼 原寸 / 🧭 移動（文字潰れ解消）
+
+**4. 「保存した画像」を「原寸」に文言変更**（settings.js / modal.js 両方）
+
+**5. 音声付エントリの下部ボタン重複回避（Q-46-5=c）**
+- 音声付エントリのみ下部ボタン行に `padding-left: 32px` を追加
+- 左下 `.history-audio-icon` / `.hist-card-audio-icon`（24×24 at left:6 bottom:6）との重複を回避
+- CSS クラス `.has-audio` を audioFilename 有無で動的付与
+
+#### Files Changed
+- `manifest.json`：1.44.1 → 1.45.0
+- `src/settings/settings.html`：`.hist-card-actions` を 1 行構造に変更、`.hist-card-icon-cluster` / `.hist-card-icon-btn` 新設、`.hist-card-actions-row` 削除
+- `src/settings/settings.js`：`_buildHistCardInner` のタイル HTML を icon cluster 追加 + 1 行 3 ボタン構造に変更、`📋 識別情報をコピー` / `✏️ 情報を編集` ボタン削除、文言「保存した画像」→「原寸」
+- `src/modal/modal.js`：CSS に `.history-icon-cluster` / `.history-icon-btn` 新設、`_buildHistoryItem` のタイル HTML を icon cluster 追加 + 5 ボタン → 3 ボタン構造に変更、文言「保存した画像」→「原寸」、audio 付エントリに has-audio クラス付与
+
+#### Files Unchanged
+- イベントハンドラ：`.hist-id-copy` / `.info-edit` / `.history-btn-id-copy` / `.history-btn-info-edit` のクラス名を維持したため、既存 click ハンドラ・編集パネル開閉ロジックは無変更
+- 編集パネル本体（`.hist-info-editor` / `.history-info-editor`）の構造・機能：無変更
+- Native Messaging：本リリース変更なし
+- Python (`native/image_saver.py`)：本リリース変更なし
+
+---
+
 ## [1.44.1] - 2026-04-27
 
 ### Fixed — GROUP-16 表示文言を「識別情報」に統一（v1.44.0 文言不統一の hotfix）

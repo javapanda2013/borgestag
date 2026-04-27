@@ -5097,10 +5097,35 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     ? `<a class="hist-card-pageurl" href="${escHtml(entry.pageUrl)}" target="_blank" rel="noopener noreferrer" title="${escHtml(entry.pageUrl)}">${escHtml(entry.pageUrl)}</a>`
     : "";
 
+  // v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、card :hover で opacity 制御）
+  // コピー SVG はユーザー指定（Q-46-6=d、2 ドキュメント横並び + 下部曲線矢印 + 三角矢じり）
+  const iconClusterHtml = `
+    <div class="hist-card-icon-cluster">
+      <button class="hist-card-icon-btn hist-id-copy" title="識別情報をクリップボードにコピー。別エントリの『📥 識別情報から反映』に貼付して情報を流用できます" data-copy-id="${escHtml(entry.id)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M 2,3 L 2,13 L 9,13 L 9,5 L 7,3 Z M 7,3 L 7,5 L 9,5" />
+          <line x1="3.5" y1="6.5" x2="7.5" y2="6.5" />
+          <line x1="3.5" y1="8.5" x2="7.5" y2="8.5" />
+          <line x1="3.5" y1="10.5" x2="7.5" y2="10.5" />
+          <path d="M 13,3 L 13,13 L 20,13 L 20,5 L 18,3 Z M 18,3 L 18,5 L 20,5" />
+          <line x1="14.5" y1="6.5" x2="18.5" y2="6.5" />
+          <line x1="14.5" y1="8.5" x2="18.5" y2="8.5" />
+          <line x1="14.5" y1="10.5" x2="18.5" y2="10.5" />
+          <path d="M 5,17 Q 12,22 19,17" />
+          <polyline points="16,16 19,17 18,20" />
+        </svg>
+      </button>
+      <button class="hist-card-icon-btn info-edit" title="情報を編集">✏️</button>
+    </div>`;
+
+  // v1.45.0 GROUP-46：音声付エントリは下部ボタン行に padding-left:32px（Q-46-5=c）
+  const actionsClass = entry.audioFilename ? "hist-card-actions has-audio" : "hist-card-actions";
+
   card.innerHTML = `
     <input type="checkbox" class="hist-select-box" ${_histSelected.has(entry.id) ? "checked" : ""} />
     ${thumbHtml}
     <div class="hist-card-overlay">
+      ${iconClusterHtml}
       <div class="hist-card-body">
         <div class="hist-card-filename" title="${escHtml(entry.filename)}">${entry.source === "external_import" ? '<span class="hist-source-badge" title="外部取り込み">📥</span>' : ""}${escHtml(entry.filename)}</div>
         <div class="hist-card-path" title="${escHtml(primary)}">${escHtml(primary || "（パスなし）")}</div>
@@ -5109,14 +5134,10 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         <div class="hist-card-date">${escHtml(date)}</div>
         ${pageUrlHtml}
       </div>
-      <div class="hist-card-actions">
+      <div class="${actionsClass}">
         <button class="hist-card-btn open-folder" title="${escHtml(primary)}">🗂 保存先</button>
-        <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 保存した画像</button>
-        <div class="hist-card-actions-row">
-          <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
-          <button class="hist-card-btn info-edit" title="情報を編集">✏️ 情報を編集</button>
-        </div>
-        <button class="hist-card-btn hist-id-copy" title="識別情報をクリップボードにコピー。別エントリの『📥 識別情報から反映』に貼付して情報を流用できます" data-copy-id="${escHtml(entry.id)}">📋 識別情報をコピー</button>
+        <button class="hist-card-btn open-file" title="${escHtml(primary ? primary + '\\\\' + entry.filename : '')}">🖼 原寸</button>
+        <button class="hist-card-btn del delete-guarded" title="削除">🗑 削除</button>
       </div>
       <div class="hist-info-editor">
         <div class="hist-info-editor-inner">

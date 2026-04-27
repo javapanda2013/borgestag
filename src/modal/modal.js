@@ -1198,9 +1198,12 @@ function buildModalHTML(defaultFilename) {
     }
     .history-tag:hover { background: rgba(26,86,219,0.9); }
     .history-tag.filter-active { background: #1a56db; outline: 1px solid #fff; }
+    /* v1.45.0 GROUP-46：1 行 3 ボタンに削減（保存先 / 原寸 / 移動）。
+       音声付エントリは padding-left:32px で左下 .history-audio-icon との重複を回避（Q-46-5=c）。 */
     .history-actions {
       display: flex; margin-top: 5px; gap: 4px; position: relative;
     }
+    .history-actions.has-audio { padding-left: 32px; }
     .history-btn {
       flex: 1; background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.3);
       border-radius: 4px; cursor: pointer; padding: 4px 2px; font-size: 11px; color: #fff;
@@ -1209,7 +1212,28 @@ function buildModalHTML(defaultFilename) {
     }
     .history-btn:hover { background: rgba(255,255,255,0.32); }
     .history-btn-addtag { flex: 0 0 auto; padding: 4px 6px; }
-    .history-btn-info-edit { flex: 0 0 auto; padding: 4px 6px; }
+    /* v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、history-item :hover で opacity 制御）。
+       右上の ❤️ (.history-fav-btn at right:6) との競合回避のため right:36 を起点に左へ並ぶ。 */
+    .history-icon-cluster {
+      position: absolute; top: 6px; right: 36px;
+      display: flex; gap: 4px;
+      z-index: 4;
+      opacity: 0; transition: opacity .2s;
+      pointer-events: none;
+    }
+    .history-item:hover .history-icon-cluster { opacity: 1; pointer-events: auto; }
+    .history-icon-btn {
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; padding: 0;
+      line-height: 1; font-size: 13px;
+      transition: background .15s, transform .1s;
+    }
+    .history-icon-btn:hover { background: rgba(80,140,220,0.85); transform: scale(1.08); }
+    .history-icon-btn svg { width: 14px; height: 14px; }
 
     /* 履歴タイルの情報編集オーバーレイ */
     .history-info-editor {
@@ -2870,9 +2894,34 @@ function setupModalEvents(
       const isFav = !!entry.favorite;
       const favBtnHtml = `<button class="history-fav-btn" data-fav-entry-id="${escapeHtml(entry.id)}" data-fav="${isFav ? "1" : "0"}" title="${isFav ? "お気に入り解除" : "お気に入り登録"}" aria-pressed="${isFav}">${isFav ? "❤️" : "🤍"}</button>`;
 
+      // v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、item :hover で opacity 制御）
+      // コピー SVG はユーザー指定（Q-46-6=d、2 ドキュメント横並び + 下部曲線矢印 + 三角矢じり）
+      const iconClusterHtml = `
+        <div class="history-icon-cluster">
+          <button class="history-icon-btn history-btn-id-copy" title="識別情報をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M 2,3 L 2,13 L 9,13 L 9,5 L 7,3 Z M 7,3 L 7,5 L 9,5" />
+              <line x1="3.5" y1="6.5" x2="7.5" y2="6.5" />
+              <line x1="3.5" y1="8.5" x2="7.5" y2="8.5" />
+              <line x1="3.5" y1="10.5" x2="7.5" y2="10.5" />
+              <path d="M 13,3 L 13,13 L 20,13 L 20,5 L 18,3 Z M 18,3 L 18,5 L 20,5" />
+              <line x1="14.5" y1="6.5" x2="18.5" y2="6.5" />
+              <line x1="14.5" y1="8.5" x2="18.5" y2="8.5" />
+              <line x1="14.5" y1="10.5" x2="18.5" y2="10.5" />
+              <path d="M 5,17 Q 12,22 19,17" />
+              <polyline points="16,16 19,17 18,20" />
+            </svg>
+          </button>
+          <button class="history-icon-btn history-btn-info-edit" title="情報を編集">✏️</button>
+        </div>`;
+
+      // v1.45.0 GROUP-46：音声付エントリは下部ボタン行に padding-left:32px（Q-46-5=c）
+      const actionsClass = entry.audioFilename ? "history-actions has-audio" : "history-actions";
+
       item["innerHTML"] = `
         ${selectBoxHtml}
         ${favBtnHtml}
+        ${iconClusterHtml}
         <div class="history-thumb-placeholder" title="${escapeHtml(pathTitle)}"
           style="cursor:pointer">🖼</div>
         ${audioIconHtml}
@@ -2887,18 +2936,16 @@ function setupModalEvents(
               ${tagHtml}
             </div>
           </div>
-          <div class="history-actions">
+          <div class="${actionsClass}">
             <button class="history-btn history-btn-open" title="${escapeHtml(pathTitle)}">
               🗂 保存先
             </button>
             <button class="history-btn history-btn-open-file" title="${escapeHtml(pathTitle)}">
-              🖼 保存した画像
+              🖼 原寸
             </button>
             <button class="history-btn history-btn-nav" title="${escapeHtml(pathTitle)}">
               🧭 移動
             </button>
-            <button class="history-btn history-btn-info-edit" title="情報を編集">✏️ 情報を編集</button>
-            <button class="history-btn history-btn-id-copy" title="識別情報をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">📋 識別情報</button>
           </div>
           <div class="history-info-editor">
             <div class="history-info-editor-inner">

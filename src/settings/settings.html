@@ -23,8 +23,21 @@
       background: #fff; border-bottom: 1px solid #e0e0e0;
       position: sticky; top: 0; z-index: 10;
     }
-    .app-header h1 { font-size: 14px; font-weight: 700; flex: 1; }
+    .app-header h1 { font-size: 14px; font-weight: 700; flex: 0 0 auto; }
     .app-header .version { font-size: 11px; color: #aaa; }
+    /* v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory IDB 移送 UI */
+    .migrate-area { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+    .migrate-area button {
+      padding: 4px 12px; font-size: 11px; cursor: pointer; border-radius: 4px;
+      border: 1px solid #4a90e2; background: #fff; color: #1a4d8c; font-weight: 600; font-family: inherit;
+      white-space: nowrap;
+    }
+    .migrate-area button:hover:not(:disabled) { background: #e0efff; }
+    .migrate-area button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .migrate-area .migrate-status {
+      font-size: 10px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .migrate-area .migrate-status.migrated { color: #1a8a4a; font-weight: 600; }
     /* 削除処理有効化トグル */
     .delete-mode-toggle {
       display: flex; align-items: center; gap: 5px; cursor: pointer;
@@ -873,6 +886,11 @@
 
   <div class="app-header">
     <h1>🖼 BorgesTag 設定</h1>
+    <!-- v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory IDB 移送 UI（中央配置） -->
+    <div class="migrate-area">
+      <button id="btn-migrate-savehistory" type="button" title="保存履歴を IndexedDB のみで管理する形式へ移送します。移送後はメモリ消費が大幅減（broadcast コスト解消）">📦 saveHistory を IDB へ移送</button>
+      <span class="migrate-status" id="migrate-status">現在：storage.local + IDB shadow</span>
+    </div>
     <label class="delete-mode-toggle" id="delete-mode-label" title="ONにした場合のみ削除ボタンが活性化します">
       <input type="checkbox" id="chk-delete-mode" />
       <span>削除処理を有効にする</span>

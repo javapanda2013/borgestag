@@ -52,14 +52,55 @@ async function _mirrorSaveHistoryToIDB(history) {
 }
 
 async function _setStorageWithHistoryMirror(setObj) {
-  await browser.storage.local.set(setObj);
-  if (setObj && Array.isArray(setObj.saveHistory)) {
-    try {
-      await _mirrorSaveHistoryToIDB(setObj.saveHistory);
-    } catch (err) {
-      console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err);
+  if (!setObj || typeof setObj !== "object") return;
+  // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const { saveHistory, ...rest } = setObj;
+    if (rest && Object.keys(rest).length > 0) {
+      await browser.storage.local.set(rest);
+    }
+    if (Array.isArray(saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(saveHistory); }
+      catch (err) { console.warn("[Phase C-2] saveHistory IDB write 失敗", err); }
+    }
+  } else {
+    await browser.storage.local.set(setObj);
+    if (Array.isArray(setObj.saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory); }
+      catch (err) { console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err); }
     }
   }
+}
+
+// v1.45.5 Phase C-2: saveHistory 読込 helper
+async function _readSaveHistory() {
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    try {
+      const db = await _phaseC1OpenDB();
+      const entries = await new Promise((resolve, reject) => {
+        const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readonly");
+        const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+        const req   = store.getAll();
+        req.onsuccess = (e) => resolve(e.target.result || []);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      entries.sort((a, b) => {
+        const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+        const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+        return tb - ta;
+      });
+      return entries;
+    } catch (err) {
+      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local fallback", err);
+      const stored = await browser.storage.local.get("saveHistory");
+      return stored.saveHistory || [];
+    }
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return stored.saveHistory || [];
 }
 
 // ウィンドウが開いたら即座に初期化
@@ -2152,8 +2193,7 @@ function setupModalEvents(
 
     // ② 裏で永続化、失敗時はロールバック
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
+      const history = await _readSaveHistory();
       const e = history.find(h => h.id === entryId);
       if (!e) throw new Error("saveHistory にエントリが見つかりません");
       e.favorite = next;
@@ -2173,8 +2213,7 @@ function setupModalEvents(
   // v1.37.0 GROUP-36-fav-bulk：保存ウィンドウ側、選択した履歴の favorite を一括代入
   async function _modalSetBulkFavorite(targetIds, value, allEntries) {
     if (!targetIds || targetIds.length === 0) return 0;
-    const stored = await browser.storage.local.get("saveHistory");
-    const history = stored.saveHistory || [];
+    const history = await _readSaveHistory();
     const idSet = new Set(targetIds);
     let changed = 0;
     for (const h of history) {

@@ -1419,15 +1419,16 @@ async function setBookmarks(data) {
 
 // @spec 02_詳細設計書.md#1-6
 async function getSaveHistory() {
-  const stored = await browser.storage.local.get("saveHistory");
-  return { saveHistory: stored.saveHistory || [] };
+  // v1.45.5 Phase C-2: migration aware
+  const history = await _readSaveHistory();
+  return { saveHistory: history };
 }
 
 // @spec 02_詳細設計書.md#1-6
 async function updateHistoryEntryTags(id, newTags) {
   if (!id || !Array.isArray(newTags)) return { ok: false };
-  const stored  = await browser.storage.local.get("saveHistory");
-  const history = stored.saveHistory || [];
+  // v1.45.5 Phase C-2: migration aware read
+  const history = await _readSaveHistory();
   const idx     = history.findIndex(e => e.id === id);
   if (idx === -1) return { ok: false };
   history[idx]  = { ...history[idx], tags: newTags };
@@ -1437,8 +1438,9 @@ async function updateHistoryEntryTags(id, newTags) {
 
 async function updateHistoryEntry(id, newTags, newAuthors, newSavePaths) {
   if (!id) return { ok: false };
-  const stored  = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
-  const history = stored.saveHistory || [];
+  // v1.45.5 Phase C-2: saveHistory は migration aware、他 key は storage.local
+  const history = await _readSaveHistory();
+  const stored  = await browser.storage.local.get(["globalTags", "globalAuthors"]);
   const idx     = history.findIndex(e => e.id === id);
   if (idx === -1) return { ok: false };
   if (Array.isArray(newTags))      history[idx].tags      = newTags;
@@ -1777,18 +1779,62 @@ async function _mirrorSaveHistoryToIDB(history) {
 }
 
 // v1.45.2 GROUP-35-perf-A Phase C-1: 集約 helper。saveHistory を含む storage.local.set を全て本関数経由に統一。
-// C-3 切替時に本関数の中身（storage.local.set 削除＋ IDB のみへ書込＋差分通知）を差替えるだけで全 callsite が無改修で IDB-only 化。
+// v1.45.5 GROUP-35-perf-A Phase C-2: migration 状態に応じて write 経路を分岐。
+//   migration 前（saveHistoryMigrationStatus !== "migrated"）：dual write（storage.local + IDB shadow）
+//   migration 後（"migrated"）：saveHistory は IDB のみ、他 key は storage.local（broadcast 消失）
 // @spec 02_詳細設計書.md#1-6
 async function _setStorageWithHistoryMirror(setObj) {
-  await browser.storage.local.set(setObj);
-  if (setObj && Array.isArray(setObj.saveHistory)) {
-    try {
-      await _mirrorSaveHistoryToIDB(setObj.saveHistory);
-    } catch (err) {
-      // shadow なので機能影響はゼロ。エラーは記録のみ。C-2 の移送ボタン実行時に整合修復。
-      console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err);
+  if (!setObj || typeof setObj !== "object") return;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const { saveHistory, ...rest } = setObj;
+    if (rest && Object.keys(rest).length > 0) {
+      await browser.storage.local.set(rest);
+    }
+    if (Array.isArray(saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(saveHistory); }
+      catch (err) { console.warn("[Phase C-2] saveHistory IDB write 失敗", err); }
+    }
+  } else {
+    await browser.storage.local.set(setObj);
+    if (Array.isArray(setObj.saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory); }
+      catch (err) { console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err); }
     }
   }
+}
+
+// v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory 読込 helper。migration 状態に応じて分岐。
+//   migration 後：IDB から savedAt index 降順で取得（Q-35-perfA-6=a 全件 await）
+//   migration 前：storage.local["saveHistory"]（従来挙動）
+// @spec 02_詳細設計書.md#1-6
+async function _readSaveHistory() {
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    try {
+      const db = await openThumbDB();
+      const entries = await new Promise((resolve, reject) => {
+        const tx    = db.transaction(IDB_HISTORY_STORE, "readonly");
+        const store = tx.objectStore(IDB_HISTORY_STORE);
+        const req   = store.getAll();
+        req.onsuccess = (e) => resolve(e.target.result || []);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      entries.sort((a, b) => {
+        const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+        const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+        return tb - ta;
+      });
+      return entries;
+    } catch (err) {
+      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local fallback", err);
+      const stored = await browser.storage.local.get("saveHistory");
+      return stored.saveHistory || [];
+    }
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return stored.saveHistory || [];
 }
 
 // @spec 02_詳細設計書.md#1-6
@@ -2288,8 +2334,8 @@ async function _clearExtStatsEntry(rootPath) {
  */
 // @spec 02_詳細設計書.md#1-6
 async function generateMissingThumbs(targetIds = null, overwrite = false) {
-  const stored  = await browser.storage.local.get("saveHistory");
-  const history = stored.saveHistory || [];
+  // v1.45.5 Phase C-2: migration aware read
+  const history = await _readSaveHistory();
 
   // targetIds が指定された場合はその ID のみ対象
   // overwrite=true なら既存サムネイルも含む、false ならサムネイルなしのみ
@@ -2696,8 +2742,9 @@ async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pag
 // @spec 02_詳細設計書.md#1-2
 async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
   // v1.41.7 hznhv3 C-β + C-γ：authors 系も含めて 1 回の set に集約
-  const stored  = await browser.storage.local.get(["saveHistory", "globalAuthors", "recentAuthors"]);
-  const history = stored.saveHistory || [];
+  // v1.45.5 Phase C-2: saveHistory は migration aware、他 key は storage.local
+  const history = await _readSaveHistory();
+  const stored  = await browser.storage.local.get(["globalAuthors", "recentAuthors"]);
 
   // サムネイル：modal 由来 thumbBlob > thumbDataUrl > Native fallback (XHR)
   // v1.41.8 R-B：modal が thumbBlob を直送した場合は atob を skip して直接 IDB 保存（btoa/atob 削減）

@@ -5,6 +5,44 @@
 
 ---
 
+## [1.45.5] - 2026-04-30
+
+### Added — GROUP-35-perf-A Phase C-2：saveHistory IDB 主・移送ボタン化（onChanged 巨大 broadcast 解消準備）
+
+#### 経緯
+GROUP-35-perf-A は `storage.local.set({saveHistory: ...})` のたびに発生する onChanged 全 context broadcast（Parent +1.5GB / Web Content +2GB ピーク）を段階解消するシリーズ。Phase A（write 経路最適化、v1.45.0）→ Phase B（read 経路 helper 化、v1.45.1）→ Phase C-1（IDB shadow 二重書き、v1.45.2）と進めてきた。本リリースは Phase C-2：手動移送ボタンを設定画面ヘッダーに配置し、ユーザー操作で `_legacySaveHistory_v1` へリネーム → `saveHistoryMigrationStatus = "migrated"` フラグ書込 → 以降は IDB 主読込・shadow 経路継続、で `storage.local` の saveHistory 巨大化を断ち切るための移送 UX。
+
+Phase C-3（差分通知 + エクスポート V2）と Phase C-4（旧 saveHistory key 削除）は別リリースで実施予定。
+
+#### 実装内容
+
+**migration aware helper 化**
+- `_readSaveHistory()` ヘルパー新設（settings / background / modal の 3 ファイル）：`saveHistoryMigrationStatus === "migrated"` なら IDB 主、それ以外は storage.local 主。IDB 取得失敗時は storage.local fallback（安全弁）
+- 全 saveHistory 読取サイトを `_readSaveHistory()` 経由に統一（settings.js: 約 20 サイト、background.js: 主要 read、modal.js: showSaveHistory）
+- 既存の `_setStorageWithHistoryMirror()` を migration aware 化：migrated 後は IDB のみ書込（storage.local には書込まない、broadcast 抑止の本目的）
+
+**移送 UX**
+- `src/settings/settings.html`：`.app-header` 中央に `📦 saveHistory を IDB へ移送` ボタン＋ステータス文言を配置（`.migrate-area` で flex 中央寄せ）
+- `_runSaveHistoryMigration()`：①移送実行確認ダイアログ → ②IDB 全件 shadow 確認 → ③`_legacySaveHistory_v1` リネーム → ④`saveHistoryMigrationStatus = "migrated"` フラグ書込 → ⑤UI 状態更新（busy modal で進捗表示、失敗時は自動 rollback）
+- `_updateMigrationStatusUI()`：page load 時にステータスバッジ更新（「未移送 (n 件)」/「移送済み」）
+
+#### 検証結果
+- node --check：4 ファイル（background / modal / settings / content）すべて PASS
+- 残存直接 `browser.storage.local.get("saveHistory")` 呼出：6 箇所のみ（すべて helper 内 fallback or migration UI 専用、意図通り）
+- spec-linter validate：エラー 0
+- trace-linter validate：broken 0
+
+#### Files Changed
+- `manifest.json`：1.45.4 → 1.45.5
+- `src/settings/settings.js`：`_readSaveHistory` ＋ `_runSaveHistoryMigration` ＋ `_updateMigrationStatusUI` 追加、約 20 read サイトを helper 経由に統一、`_setStorageWithHistoryMirror` を migration aware 化
+- `src/settings/settings.html`：`.app-header` の flex 調整、`.migrate-area` CSS 追加、移送ボタン HTML 追加
+- `src/background/background.js`：`_readSaveHistory` helper 追加、主要 read サイトを helper 経由に統一、`_setStorageWithHistoryMirror` migration aware 化
+- `src/modal/modal.js`：`_readSaveHistory` helper 追加、`showSaveHistory` 等を helper 経由に統一、`_setStorageWithHistoryMirror` migration aware 化
+
+#### Native 変更なし（image_saver.py 据え置き）
+
+---
+
 ## [1.45.4] - 2026-04-29
 
 ### Added — GROUP-46 Phase 4 全工程完了：trace-extractor / trace-linter ＋ コード ↔ 設計書 トレーサビリティ

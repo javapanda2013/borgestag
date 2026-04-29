@@ -66,13 +66,161 @@ async function _mirrorSaveHistoryToIDB(history) {
 }
 
 async function _setStorageWithHistoryMirror(setObj) {
-  await browser.storage.local.set(setObj);
-  if (setObj && Array.isArray(setObj.saveHistory)) {
-    try {
-      await _mirrorSaveHistoryToIDB(setObj.saveHistory);
-    } catch (err) {
-      console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err);
+  if (!setObj || typeof setObj !== "object") return;
+  // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const { saveHistory, ...rest } = setObj;
+    if (rest && Object.keys(rest).length > 0) {
+      await browser.storage.local.set(rest);
     }
+    if (Array.isArray(saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(saveHistory); }
+      catch (err) { console.warn("[Phase C-2] saveHistory IDB write 失敗", err); }
+    }
+  } else {
+    await browser.storage.local.set(setObj);
+    if (Array.isArray(setObj.saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory); }
+      catch (err) { console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err); }
+    }
+  }
+}
+
+// v1.45.5 Phase C-2: saveHistory 読込 helper（migration aware）
+async function _readSaveHistory() {
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    try {
+      const db = await _phaseC1OpenDB();
+      const entries = await new Promise((resolve, reject) => {
+        const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readonly");
+        const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+        const req   = store.getAll();
+        req.onsuccess = (e) => resolve(e.target.result || []);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      entries.sort((a, b) => {
+        const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+        const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+        return tb - ta;
+      });
+      return entries;
+    } catch (err) {
+      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local fallback", err);
+      const stored = await browser.storage.local.get("saveHistory");
+      return stored.saveHistory || [];
+    }
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return stored.saveHistory || [];
+}
+
+// v1.45.5 Phase C-2: migration ボタンの実行ロジック
+async function _runSaveHistoryMigration(buttonEl, statusEl) {
+  // 多重押下防止
+  if (buttonEl && buttonEl.disabled) return;
+  if (buttonEl) buttonEl.disabled = true;
+
+  // 1. 確認ダイアログ
+  const stored = await browser.storage.local.get(["saveHistory", "saveHistoryMigrationStatus"]);
+  if (stored.saveHistoryMigrationStatus === "migrated") {
+    alert("既に移送済みです。");
+    return;
+  }
+  const history = stored.saveHistory || [];
+  const n = history.length;
+  const ok = confirm(
+    `保存履歴 ${n} 件を IndexedDB へ移送します。\n\n` +
+    `移送中はタブを閉じないでください（途中閉鎖時は自動ロールバック）。\n` +
+    `移送後は storage.local の broadcast コストが消失し、メモリ消費が大幅に減少します。\n\n` +
+    `実行しますか？`
+  );
+  if (!ok) {
+    if (buttonEl) buttonEl.disabled = false;
+    return;
+  }
+
+  // 2. beforeunload 警告（移送中はタブクローズで警告）
+  const beforeUnloadHandler = (e) => {
+    e.preventDefault();
+    e.returnValue = "saveHistory IDB 移送中です。閉じるとデータ整合性が壊れます。";
+    return e.returnValue;
+  };
+  window.addEventListener("beforeunload", beforeUnloadHandler);
+
+  // 3. busy modal 表示（既存の処理中モーダル準拠）
+  if (typeof showBusyModal === "function") {
+    showBusyModal(`saveHistory を IDB へ移送中…`, `0 / ${n} 件`);
+  }
+
+  try {
+    // 4. IDB に clear → bulk put
+    if (typeof updateBusyMessage === "function") {
+      updateBusyMessage(`saveHistory を IDB へ移送中…`, `${n} / ${n} 件 書込中`);
+    }
+    await _mirrorSaveHistoryToIDB(history);
+
+    // 5. legacy にコピー保全 ＋ 元キー削除
+    await browser.storage.local.set({
+      _legacySaveHistory_v1: history,
+      saveHistoryMigrationStatus: "migrated",
+    });
+    await browser.storage.local.remove("saveHistory");
+
+    // 6. 完了表示
+    if (typeof completeBusyModal === "function") {
+      completeBusyModal(`✅ ${n} 件を IndexedDB へ移送しました。以降の保存は IDB のみで動作します。`);
+    } else {
+      alert(`✅ ${n} 件を IndexedDB へ移送しました。`);
+    }
+    if (statusEl) {
+      statusEl.textContent = `現在：IDB 専用（移送済 ${n} 件）`;
+      statusEl.classList.add("migrated");
+    }
+  } catch (err) {
+    // 7. エラー時は自動 rollback（Q-35-perfC2-4=a）
+    console.error("[Phase C-2] saveHistory 移送失敗、rollback します", err);
+    try {
+      // status をクリア（migration 前の状態に戻す）
+      await browser.storage.local.remove(["saveHistoryMigrationStatus"]);
+      // saveHistory を legacy から復元（または元データ維持）
+      const legacy = await browser.storage.local.get("_legacySaveHistory_v1");
+      if (legacy._legacySaveHistory_v1) {
+        await browser.storage.local.set({ saveHistory: legacy._legacySaveHistory_v1 });
+        await browser.storage.local.remove("_legacySaveHistory_v1");
+      }
+    } catch (rollbackErr) {
+      console.error("[Phase C-2] rollback 自体も失敗", rollbackErr);
+    }
+    alert(`❌ 移送失敗：${err.message || err}\n自動ロールバックを試みました。コンソールログを確認してください。`);
+    if (buttonEl) buttonEl.disabled = false;
+  } finally {
+    window.removeEventListener("beforeunload", beforeUnloadHandler);
+    if (typeof hideBusyModal === "function") setTimeout(hideBusyModal, 1500);
+  }
+}
+
+// v1.45.5 Phase C-2: 移送 UI の状態表示更新
+async function _updateMigrationStatusUI() {
+  const btn = document.getElementById("btn-migrate-savehistory");
+  const statusEl = document.getElementById("migrate-status");
+  if (!btn || !statusEl) return;
+  const stored = await browser.storage.local.get(["saveHistoryMigrationStatus", "saveHistory", "_legacySaveHistory_v1"]);
+  if (stored.saveHistoryMigrationStatus === "migrated") {
+    btn.disabled = true;
+    btn.textContent = "✅ 移送済";
+    btn.title = "saveHistory は IndexedDB のみで管理されています";
+    const legacy = stored._legacySaveHistory_v1 || [];
+    statusEl.textContent = `現在：IDB 専用（移送済、legacy 保全 ${legacy.length} 件）`;
+    statusEl.classList.add("migrated");
+  } else {
+    btn.disabled = false;
+    btn.textContent = "📦 saveHistory を IDB へ移送";
+    const cur = (stored.saveHistory || []).length;
+    statusEl.textContent = `現在：storage.local + IDB shadow（${cur} 件）`;
+    statusEl.classList.remove("migrated");
   }
 }
 
@@ -164,7 +312,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 過去の import（v1.32.0 以前）で順序が乱れたデータを自動修復する one-time 修正。
   // 既に降順なら何もしない（冪等）、何度実行しても安全。
   try {
-    const { saveHistory } = await browser.storage.local.get("saveHistory");
+    // v1.45.5 Phase C-2: migration aware read
+    const saveHistory = await _readSaveHistory();
     if (Array.isArray(saveHistory) && saveHistory.length >= 2) {
       let outOfOrder = false;
       for (let i = 0; i < saveHistory.length - 1; i++) {
@@ -256,6 +405,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     const verEl = document.getElementById("app-version");
     if (verEl) verEl.textContent = `v${manifest.version}`;
   } catch {}
+
+  // v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory 移送ボタン
+  const migBtn = document.getElementById("btn-migrate-savehistory");
+  const migStatus = document.getElementById("migrate-status");
+  if (migBtn) {
+    migBtn.addEventListener("click", async () => {
+      await _runSaveHistoryMigration(migBtn, migStatus);
+      await _updateMigrationStatusUI();
+    });
+    // 起動時に状態を反映（Q-35-perfC2-6=c：ステータス文字 + ボタン disable 両方）
+    _updateMigrationStatusUI().catch(() => {});
+  }
 
   // ---- タグ並び順セレクター ----
   const tagSortSelect = document.getElementById("tag-sort-select");
@@ -468,8 +629,7 @@ function buildTagRow(tag) {
 
     // saveHistoryのtags内のタグ名を変更
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
+      const history = await _readSaveHistory();
       let changed = 0;
       history.forEach(entry => {
         if (Array.isArray(entry.tags) && entry.tags.includes(tag)) {
@@ -762,7 +922,9 @@ async function exportData() {
   // storage.local のバックアップ対象キー
   // GROUP-26-mem (v1.29.2): const → let、json 作成後に null 化で V8 allocation 余地確保
   // v1.41.6 hznhv3 C-α：tagRecords をエクスポート対象から除外（write-only 監査記録、機能経路ゼロ、saveHistory に冗長）
-  let stored = await browser.storage.local.get([
+  // v1.45.5 Phase C-2: saveHistory は migration aware（IDB 主・shadow 経由）
+  const _hist = await _readSaveHistory();
+  let stored = { saveHistory: _hist, ...(await browser.storage.local.get([
     "tagDestinations",
     "globalTags",
     "lastSaveDir",
@@ -773,7 +935,6 @@ async function exportData() {
     "explorerFolderSort",
     "recentTags",
     "modalSize",
-    "saveHistory",
     "exportPath",
     "exportAutoSave",
     "historyDisplayMode",
@@ -793,7 +954,7 @@ async function exportData() {
     "diffExportEnabled",
     "exportThumbsEnabled",
     "lastExportedAt",
-  ]);
+  ])) };
   log("📦 設定データ取得完了");
 
   // GROUP-26-mem-2 (v1.31.0 Phase A'): 全サムネ一括取得（EXPORT_IDB_THUMBS, 〜350MB）を廃止、
@@ -2507,8 +2668,8 @@ function setupHistoryTab() {
     if (!confirm(`選択した ${n} 件を削除しますか？`)) return;
     showBusyModal("削除中…", `${n} 件`);
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = (stored.saveHistory || []).filter(e => !_histSelected.has(e.id));
+      const allHist = await _readSaveHistory();
+      const history = allHist.filter(e => !_histSelected.has(e.id));
       await _setStorageWithHistoryMirror({ saveHistory: history });
       _histSelected.clear();
       await renderHistoryTab();
@@ -2530,8 +2691,7 @@ function setupHistoryTab() {
     // v1.37.0 GROUP-38：処理中モーダル＋先行で選択を視覚クリア
     showBusyModal("グループ解除中…", `${ids.length} 件`);
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
+      const history = await _readSaveHistory();
       // 選択エントリのみを個別解除（他のメンバーはグループのまま残る）
       const targets = history.filter(e => ids.includes(e.id) && e.sessionId);
       if (targets.length === 0) { showStatus("グループに属する履歴が選択されていません", true); return; }
@@ -2572,8 +2732,7 @@ function setupHistoryTab() {
     // v1.37.0 GROUP-38：処理中モーダル
     showBusyModal("グループ化中…", `${ids.length} 件`);
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
+      const history = await _readSaveHistory();
       const newSessionId = crypto.randomUUID();
 
       const targets = history
@@ -2730,8 +2889,7 @@ function setupHistoryTab() {
       // v1.37.0 GROUP-38：処理中モーダル
       showBusyModal("タグ追加中…", `${targetIds.length} 件`);
       try {
-        const stored = await browser.storage.local.get("saveHistory");
-        const history = stored.saveHistory || [];
+        const history = await _readSaveHistory();
         let changed = false;
         for (const entry of history) {
           if (!targetIds.includes(entry.id)) continue;
@@ -2859,8 +3017,7 @@ function setupHistoryTab() {
       // v1.37.0 GROUP-38：処理中モーダル
       showBusyModal("権利者追加中…", `${targetIds.length} 件`);
       try {
-        const stored = await browser.storage.local.get("saveHistory");
-        const history = stored.saveHistory || [];
+        const history = await _readSaveHistory();
         let changed = false;
         for (const entry of history) {
           if (!targetIds.includes(entry.id)) continue;
@@ -3003,8 +3160,7 @@ function setupHistoryTab() {
       const verbLabel = isReplace ? "置換" : "除去";
       showBusyModal(`${verbLabel}中…`, `${targetIds.length} 件`);
       try {
-        const stored = await browser.storage.local.get("saveHistory");
-        const history = stored.saveHistory || [];
+        const history = await _readSaveHistory();
         let processed = 0;
         for (const entry of history) {
           if (!targetSet.has(entry.id)) continue;
@@ -3103,8 +3259,8 @@ function setupHistoryTab() {
         overwrite,
       });
       if (res?.ok && res.generated > 0) {
-        const stored = await browser.storage.local.get("saveHistory");
-        _historyData = stored.saveHistory || [];
+        // v1.45.5 Phase C-2: saveHistory は migration aware
+        _historyData = await _readSaveHistory();
         renderHistoryGrid();
       }
     } finally {
@@ -3354,7 +3510,9 @@ function setupHistoryTab() {
 
 // @spec 02_詳細設計書.md#4-3
 async function renderHistoryTab() {
-  const stored = await browser.storage.local.get(["saveHistory", "settingsHistoryPageSize"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["settingsHistoryPageSize"])) };
   _historyData  = stored.saveHistory              || [];
   _histPageSize = stored.settingsHistoryPageSize  || 100;
   // セレクトの値も同期
@@ -4098,8 +4256,7 @@ function _updateHistCardFields(card, entry) {
         e.stopPropagation();
         const tag = btn.dataset.tag;
         if (!confirm(`「${tag}」をこの履歴から削除しますか？`)) return;
-        const stored = await browser.storage.local.get("saveHistory");
-        const history = stored.saveHistory || [];
+        const history = await _readSaveHistory();
         const target = history.find(h => h.id === entry.id);
         if (target) {
           target.tags = (target.tags || []).filter(t => t !== tag);
@@ -4521,8 +4678,8 @@ async function _toggleEntryFavorite(entryId) {
 
   // ② 裏で永続化、失敗時はロールバック
   try {
-    const stored = await browser.storage.local.get("saveHistory");
-    const history = stored.saveHistory || [];
+    // v1.45.5 Phase C-2: saveHistory は migration aware
+    const history = await _readSaveHistory();
     const entry = history.find(e => e.id === entryId);
     if (!entry) {
       // ストレージ側にエントリが見つからない（削除済み等）→ ロールバックして警告
@@ -4549,8 +4706,8 @@ async function _toggleEntryFavorite(entryId) {
 // v1.39.1 GROUP-42-b：fav-filter ON で外れた場合、全体再描画ではなく該当タイルのみ除去
 async function _setBulkFavorite(targetIds, value) {
   if (!targetIds || targetIds.length === 0) return 0;
-  const stored = await browser.storage.local.get("saveHistory");
-  const history = stored.saveHistory || [];
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const history = await _readSaveHistory();
   const idSet = new Set(targetIds);
   let changed = 0;
   for (const e of history) {
@@ -5429,8 +5586,9 @@ function _buildHistCardInner(card, entry, onThumbClick) {
 
   // ---- リアルタイム保存 ----
   async function saveEntryNow() {
-    const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
-    const history = stored.saveHistory || [];
+    // v1.45.5 Phase C-2: saveHistory は migration aware
+    const history = await _readSaveHistory();
+    const stored = await browser.storage.local.get(["globalTags", "globalAuthors"]);
     const target  = history.find(h => h.id === entry.id);
     if (!target) return;
     target.tags    = [...pendingTags];
@@ -5647,8 +5805,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       e.stopPropagation();
       const tag = btn.dataset.tag;
       if (!confirm(`「${tag}」をこの履歴から削除しますか？`)) return;
-      const stored = await browser.storage.local.get("saveHistory");
-      const history = stored.saveHistory || [];
+      const history = await _readSaveHistory();
       const target = history.find(h => h.id === entry.id);
       if (target) {
         target.tags = (target.tags || []).filter(t => t !== tag);
@@ -6254,7 +6411,9 @@ function _extRenderChips(arr, container, onUpdate) {
 
 /** 外部取り込みタブの初期化 */
 async function setupExternalImportTab() {
-  const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "saveHistory"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate"])) };
   let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
 
   // BorgesTag 最古保存日ヒント（外部取り込みエントリを除外して算出）
@@ -6473,7 +6632,8 @@ async function scanExternal(savedExcludes) {
   }
 
   // 重複チェック（savePaths 配列・savePath 単数の両形式に対応）
-  const { saveHistory } = await browser.storage.local.get("saveHistory");
+  // v1.45.5 Phase C-2: migration aware
+  const saveHistory = await _readSaveHistory();
   const existingKeys = new Set(
     (saveHistory || []).map(e => {
       const p = Array.isArray(e.savePaths) ? (e.savePaths[0] || "") : (e.savePath || "");
@@ -6817,7 +6977,9 @@ async function executeExternalImport() {
   }
 
   // saveHistory にマージ（savedAt 降順でソートして時系列の正しい位置に挿入）
-  const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["globalTags", "globalAuthors"])) };
   const existing = stored.saveHistory || [];
   const merged   = [...pendingEntries, ...existing]
     .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
@@ -6910,7 +7072,8 @@ async function executeExternalImport() {
 
     // saveHistory から取り消し対象を除去
     const idSet = new Set(_lastImportIds);
-    const { saveHistory: sh } = await browser.storage.local.get("saveHistory");
+    // v1.45.5 Phase C-2: migration aware
+    const sh = await _readSaveHistory();
     const filtered = (sh || []).filter(e => !idSet.has(e.id));
     await _setStorageWithHistoryMirror({ saveHistory: filtered });
     _historyData   = filtered;
@@ -7560,7 +7723,9 @@ async function _extScanMultiRootForBatch(selEntries) {
   const log = (msg) => { if (resultEl) resultEl.innerHTML += escHtml(msg) + "\n"; };
 
   // 除外ワードを収集
-  const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "saveHistory"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate"])) };
   const savedExcludes  = stored.extImportExcludes || [];
   const allExcludes    = [...savedExcludes, ..._extTempExcludes];
   const excludesNorm   = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
@@ -8313,7 +8478,9 @@ async function _extStartSessionFromFolderList(folderListItem, rootPath, subfolde
   }
 
   showStatus("⏳ スキャン中...");
-  const stored = await browser.storage.local.get(["extImportExcludes", "saveHistory"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes"])) };
   const excludes = stored.extImportExcludes || [];
   let scanRes;
   try {
@@ -9100,8 +9267,9 @@ async function _extB1LoadCurrent() {
   // 完了済み表示の場合は保存済みエントリから値を復元
   if (!isPending && cur2?.entryId) {
     try {
-      const stored = await browser.storage.local.get("saveHistory");
-      const hist = (stored.saveHistory || []).find(e => e.id === cur2.entryId);
+      // v1.45.5 Phase C-2: saveHistory は migration aware
+      const _hist = await _readSaveHistory();
+      const hist = _hist.find(e => e.id === cur2.entryId);
       if (hist) {
         _extB1MainTags = [...(hist.tags || [])];
         _extB1Authors  = [...(hist.authors || [])];
@@ -9356,7 +9524,9 @@ async function _extB1SaveAndNext() {
     source:     "external_import",
   };
 
-  const stored = await browser.storage.local.get(["saveHistory", "globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"]);
+  // v1.45.5 Phase C-2: saveHistory は migration aware
+  const _hist = await _readSaveHistory();
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"])) };
   const merged = [...(stored.saveHistory || []), entry]
     .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
   const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);

@@ -5,6 +5,56 @@
 
 ---
 
+## [1.46.1] - 2026-05-01
+
+### Fixed — GROUP-58：保存ウィンドウ起動直後の auto-focus race condition
+
+#### 経緯
+ユーザー報告（2026-05-01）：「保存ウィンドウに遷移後、メインタグを入力しようとすると遷移直後の処理が遅れて動作するのか、ファイル名の入力欄にフォーカスが移る」。
+
+[modal.js:5781-5782](src/modal/modal.js:5781) の `setTimeout(() => filenameInput.focus(), 50)` が起源（first commit からの仕様、コメントなし）。50ms 経過前にユーザーがタグ入力欄等にフォーカスしてキー入力を始めると、timer 発火で focus が filename へ強制移動する race condition。
+
+#### 修正内容
+- 50ms 経過時点で `document.activeElement` をチェック：`body` / `filenameInput` 自身 / `null` のいずれかなら従来どおり filename へ focus、それ以外（ユーザーが既に他要素にフォーカス）なら skip
+- auto-focus の意図（modal 起動直後に filename を打てる UX）を維持しつつ、ユーザー意図を尊重
+
+### Changed — GROUP-46-T6-integration：skill 出力に「応答送信前の必須 step」フッタを内蔵化
+
+#### 経緯
+v1.45.5 saveHistory 全消失事案 / GROUP-57 調査時の skill 手動呼出忘れを構造的に予防。Phase 5 で 6 カテゴリ scan-response gating ＋ workflow-stamp ＋ migration-matrix を整備したが、いずれも「Claude が手動で呼ばないと発動しない」設計。応答テンプレートの一部として常時組込まないと、忘れた瞬間に違反が応答に混入し送信される（不可逆）。
+
+GROUP-46-T6-integration の plan log 記述「question-builder / plan-snapshot 等が compose を内部から自動呼出し、ヘッダ ＋ 漏れチェックを skill 出力に直接含める」を実装。
+
+#### 実装内容
+- [_config.py](.claude/skills/spec-driven/_config.py)：共通 helper `emit_next_step_footer(pattern_num, section_label, skill_used)` を新設。skill 実行末尾で「応答送信前の必須 3 step」（compose / scan-response / 検出補正）を print
+- 5 skill の主要 cmd 末尾でフッタ内蔵：
+  - `question-builder issue` → pattern #3
+  - `question-builder answer` → pattern #4
+  - `group-id-allocator next` → pattern #2
+  - `migration-matrix audit` → pattern #16
+  - `error-triage triage` → pattern #14
+  - `release-flow preflight` → pattern #15
+  - `release-flow uat-checklist` → pattern #17
+- skill を呼ぶたびに「次に何をすべきか」が出力末尾に表示され、Claude が compose / scan-response を skip する経路を構造的に塞ぐ
+
+#### 検証
+- 全 skill の `node`/`python` syntax ＋ 動作テスト（実 grep / 出力確認）
+- migration-matrix audit saveHistory：leak 0 件継続
+
+#### Files Changed
+- `manifest.json`：1.46.0 → 1.46.1
+- `src/modal/modal.js`：filenameInput auto-focus 条件付き化（4 行追加）
+- `.claude/skills/spec-driven/_config.py`：`emit_next_step_footer` 追加（38 行）
+- `.claude/skills/spec-driven/question-builder/question_builder.py`：cmd_issue / cmd_answer 末尾に footer 呼出
+- `.claude/skills/spec-driven/group-id-allocator/id_allocator.py`：cmd_next 末尾に footer 呼出
+- `.claude/skills/spec-driven/migration-matrix/migration_matrix.py`：cmd_audit 末尾に footer 呼出
+- `.claude/skills/spec-driven/error-triage/error_triage.py`：cmd_triage 末尾に footer 呼出
+- `.claude/skills/spec-driven/release-flow/release_flow.py`：cmd_preflight / cmd_uat_checklist 末尾に footer 呼出
+
+#### Native 変更なし
+
+---
+
 ## [1.46.0] - 2026-04-30
 
 ### Memory — extension process メモリ retain の根本対策（GROUP-56 + GROUP-57 + GROUP-35-perf-C-2 一括）

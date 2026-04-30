@@ -5779,7 +5779,17 @@ function setupModalEvents(
 
   // ================================================================
   filenameInput.value = defaultFilename;
-  setTimeout(() => filenameInput.focus(), 50);
+  // GROUP-58 (v1.46.x)：保存ウィンドウ起動直後の auto-focus race を解消。
+  // 50ms 経過時点でユーザーが既に他要素（タグ入力欄等）にフォーカスしていれば skip し、
+  // body or filename 自身がフォーカス対象であれば従来どおり filename へ移動する。
+  // 経緯：first commit から無条件 setTimeout focus、ユーザー報告で「タグ入力中に
+  // ファイル名欄へ focus が奪われる」事象（modal.js:5781-5782 race condition）
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (active === document.body || active === filenameInput || active === null) {
+      filenameInput.focus();
+    }
+  }, 50);
 
 }
 

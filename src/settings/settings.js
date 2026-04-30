@@ -1364,13 +1364,15 @@ async function importData(e) {
   let current;
   try {
     // v1.41.6 hznhv3 C-α：tagRecords を取得対象から除外（インポート時のマージも廃止）
-    current = await browser.storage.local.get([
+    // v1.45.6 hotfix：saveHistory は migration aware（移送後は IDB 主、storage.local には無い）
+    const _hist = await _readSaveHistory();
+    current = { saveHistory: _hist, ...(await browser.storage.local.get([
       "tagDestinations", "globalTags", "lastSaveDir",
       "folderBookmarks", "explorerRootPath", "explorerViewMode",
-      "explorerStartPriority", "recentTags", "modalSize", "saveHistory",
+      "explorerStartPriority", "recentTags", "modalSize",
       "globalAuthors", "authorDestinations",
-    ]);
-    log(`✅ 現在の storage.local 取得成功`);
+    ])) };
+    log(`✅ 現在の storage.local + IDB 取得成功（既存 saveHistory ${_hist.length} 件）`);
   } catch (err) {
     logError(`storage.local の取得に失敗: ${err.message}`);
     return;

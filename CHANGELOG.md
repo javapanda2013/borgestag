@@ -5,6 +5,48 @@
 
 ---
 
+## [1.45.6] - 2026-04-30
+
+### Fixed — 🚨 重大 hotfix：移送後のインポートが上書きになるバグ（saveHistory 全消失）
+
+#### 経緯
+v1.45.5（Phase C-2）で `saveHistory` IDB 主・移送ボタン化を導入したが、**インポート関数の `current` 取得経路の migration aware 化が漏れていた**。本ユーザー実機テスト中、移送ボタン押下 → 差分 zip インポートで「3239 件 → 11 件」の上書きが発生し報告。
+
+##### 再現条件
+v1.45.5 で **移送ボタン押下後**に zip インポートを実行した場合：
+1. [settings.js:1367](src/settings/settings.js:1367) `current = await browser.storage.local.get([..., "saveHistory", ...])` で `current.saveHistory = undefined`（移送後 storage.local の saveHistory は `_legacySaveHistory_v1` にリネーム済）
+2. [settings.js:1659](src/settings/settings.js:1659) `existing = current.saveHistory || []` → 空配列
+3. `existingIds = new Set([])` → 空 Set
+4. `newItems = parsed.saveHistory.filter(...)` → dedup 効かず全件通過
+5. `merged = [...newItems, ...existing]` → imported のみ
+6. `_setStorageWithHistoryMirror({ saveHistory: merged })` → `_mirrorSaveHistoryToIDB` 内で `store.clear()` ＋ put → **IDB の既存履歴消失**
+
+#### 修正内容
+- [settings.js:1367](src/settings/settings.js:1367)：`current` 取得を `_readSaveHistory()` 経由に変更（migration aware）。`saveHistory` は IDB / storage.local どちらが主かを `saveHistoryMigrationStatus` フラグで自動判別
+
+#### 検証結果
+- node --check 全 4 ファイル PASS
+- 残存直接 `browser.storage.local.get(..."saveHistory"...)` 呼出：**インポート関数以外に漏れなし**（grep で全件再走査済）
+
+#### Files Changed
+- `manifest.json`：1.45.5 → 1.45.6
+- `src/settings/settings.js`：インポート関数 `importJsonOrZip` の `current` 取得経路を `_readSaveHistory()` 経由に修正
+
+#### 運用違反の振り返り
+v1.45.5 の CHANGELOG で「saveHistory 全 read 経路を helper 経由に統一」と記載したが、実際には import 経路の漏れを実コード検証していなかった。CLAUDE.md「自分が直近のターンで設計・実装したロジックの挙動も含む grep+Read 必須」に違反。今後 Phase C 系の修正後は **`current.saveHistory` / `stored.saveHistory` を全件 grep し、`{ saveHistory: _hist, ...}` パターンか `_readSaveHistory()` 経由で構築されたものか個別検証**すること。
+
+#### 影響を受けたユーザー向け：データ復旧手順
+v1.45.5 で移送ボタン押下後に zip インポートを実行した場合、IDB の既存 saveHistory が消失している可能性がある。復旧は以下：
+1. v1.45.6 へアップデート（本リリース）
+2. 移送前の最新フルバックアップ zip（`borgestag-export-*.zip`）を保存履歴タブの「インポート」ボタンから取り込む
+3. 必要に応じて、それ以降の差分 zip を順次インポート（v1.45.6 の修正済 import 経路で正しく差分マージされる）
+
+最後の手段として、`storage.local` の `_legacySaveHistory_v1` キーには移送時点の saveHistory がそのまま保全されているため、開発者ツール経由で復元することも可能。
+
+#### Native 変更なし
+
+---
+
 ## [1.45.5] - 2026-04-30
 
 ### Added — GROUP-35-perf-A Phase C-2：saveHistory IDB 主・移送ボタン化（onChanged 巨大 broadcast 解消準備）

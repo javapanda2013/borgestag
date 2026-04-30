@@ -31,6 +31,12 @@ let watchTimer   = null;
 let lastMouseX   = 0;
 let lastMouseY   = 0;
 
+// v1.46.5 GROUP-66：content.js 起動時に前 context の orphan wrap を全件除去
+// （拡張機能 reload / SPA DOM 入替 / 複数 inject 経路で蓄積した zombie wrap を清掃）
+try {
+  document.querySelectorAll("#__image-saver-wrap__").forEach(el => el.remove());
+} catch (_) {}
+
 // 即保存ボタンを表示するか（設定から取得）
 let instantSaveEnabled = true;
 browser.storage.local.get("instantSaveEnabled").then(r => {
@@ -64,7 +70,13 @@ function updateInstantBtn() {
 }
 
 function getWrap() {
-  if (hoverWrap) return hoverWrap;
+  // v1.46.5 GROUP-66：JS 参照が DOM detached（SPA 入替・page mutation）になっていれば作り直し
+  if (hoverWrap && hoverWrap.isConnected) return hoverWrap;
+  // 念押しの zombie 除去（id 重複の可能性に備える）
+  try {
+    document.querySelectorAll("#__image-saver-wrap__").forEach(el => el.remove());
+  } catch (_) {}
+  hoverWrap = null;
 
   const wrap = document.createElement("div");
   wrap.id = "__image-saver-wrap__";

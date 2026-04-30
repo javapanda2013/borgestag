@@ -5,6 +5,39 @@
 
 ---
 
+## [1.46.5] - 2026-05-01
+
+### Fixed — GROUP-66：content.js ホバー保存ボタン残留 hotfix（複数 wrap zombie 化）
+
+#### 経緯
+ユーザー報告（2026-05-01、screenshot 添付）：「マウスオーバー時の保存ボタンが残留する※複数発生」。X 画像上に「⚡ 即保存」「💾 保存」が複数組オーバーレイ状に残留、ホバー解除後も DOM から消えない。
+
+#### 根本原因（仮説、防御的 fix で網羅）
+content.js は `#__image-saver-wrap__` を id 持ちで `document.body` に append、JS 側は module-level `hoverWrap` 変数で singleton 管理。以下経路で zombie 化：
+- **(A) 拡張機能 reload**：前 context の wrap が DOM 残留、新 context は新規 wrap を append → 累積
+- **(B) SPA DOM 入替**：X 等が aggressive な mutation で wrap を detach、JS 参照は生存 → `style.opacity = "1"` 操作は detached node に向き視覚は変化なし、その間に新 wrap が別経路で作られる
+- **(C) id 重複**：複数 wrap が同 id で並列存在しても querySelector は先頭のみ返す、残りは zombie
+
+#### 修正内容
+
+**GROUP-66-cleanup-on-init：起動時 zombie 全件除去**
+- [src/content/content.js:34-37](src/content/content.js:34)：content.js head で `document.querySelectorAll("#__image-saver-wrap__")` を全件 `.remove()`。前 context / 別経路で残った zombie wrap を新 context が起動した瞬間に清掃
+
+**GROUP-66-isConnected-guard：getWrap で DOM 接続性チェック**
+- [src/content/content.js:73-79](src/content/content.js:73)：`hoverWrap.isConnected` で DOM 接続を確認、detached なら null 化＋ querySelectorAll で zombie 除去後に新規作成。SPA 入替で wrap が消えても次 hover で正しく作り直し
+
+#### 検証
+- node --check：content.js PASS
+- 防御的 fix のため、(A)(B)(C) いずれの経路にも対応
+
+#### Files Changed
+- `manifest.json`：1.46.4 → 1.46.5
+- `src/content/content.js`：起動時 cleanup ＋ getWrap 内 isConnected チェック追加（合計 12 行追加）
+
+#### Native 変更なし
+
+---
+
 ## [1.46.4] - 2026-05-01
 
 ### Fixed — GROUP-63：modal.js / settings.js 編集パネル全統一漏れ hotfix（pattern #21 適用、Tier 1 構造的予防）

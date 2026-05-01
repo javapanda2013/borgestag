@@ -110,13 +110,16 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // background.js から新しい画像が届いた場合（ウィンドウ再利用）
+// v1.46.6 GROUP-62 (b) page reload 方式：
+//   minimizeAfterSave / 連続保存で同一 modal を再利用するたびに initModal() を重ね呼びすると、
+//   document/window/runtime に登録された 165 個の addEventListener と setupModalEvents の closure
+//   （saveHistory + globalTags + globalAuthors 等を保持）が累積し、メモリ蔓延（5GB+ 級）を招く。
+//   profile.json で `Timeout::SetWhenOrTimeRemaining` 358MB 累積を確認、modal を閉じると解放される現象とも整合。
+//   window.location.reload() で JS context を完全 reset、_pendingModal storage は新画像情報を保持済のため
+//   再 init 時に正しく読み出される（__fromConversion の場合も background の stash が初回 CLAIM で消費される）。
 browser.runtime.onMessage.addListener((message) => {
-  if (message.type === "MODAL_NEW_IMAGE") {
-    initModal();
-  }
-  // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の再初期化通知
-  if (message.type === "MODAL_NEW_FROM_CONVERSION") {
-    initModal();
+  if (message.type === "MODAL_NEW_IMAGE" || message.type === "MODAL_NEW_FROM_CONVERSION") {
+    window.location.reload();
   }
 });
 

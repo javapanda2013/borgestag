@@ -5,6 +5,46 @@
 
 ---
 
+## [1.46.6] - 2026-05-01
+
+### Fixed — GROUP-62：minimizeAfterSave ON 状態での連続保存メモリ蔓延 hotfix（page reload 方式）
+
+#### 経緯
+ユーザー報告（2026-05-01、Firefox profile.json + screenshot 添付）：「保存後にウィンドウを閉じずに最小化して待機」設定 ON で連続保存すると拡張機能プロセスのメモリ使用量が 5 GB+ まで蓄積、GC 効かず、保存ウィンドウを閉じるとメモリ使用量が減少する現象。
+
+#### 根本原因（spec-cite + profile.json 解析）
+- `minimizeAfterSave` ON ＋連続右クリック保存で、同一 modal インスタンスが再利用される（background.js:138-160 で `modalWindowId` 既存時は `MODAL_NEW_IMAGE` 送信して reuse）
+- modal.js は `MODAL_NEW_IMAGE` 受信ごとに `initModal()` を再呼び出し、`document.getElementById("modal-root").innerHTML = buildModalHTML(...)` で DOM を入替えるが、**document / window / runtime に登録された 165 個の addEventListener と setupModalEvents の closure 群（saveHistory + globalTags + globalAuthors の 3 配列を保持）は cleanup されず累積**
+- 各 init で `setTimeout(updateTitle, 100)` 等の繰返し timer も新規登録、profile.json で `mozilla::dom::Timeout::SetWhenOrTimeRemaining` 358 MB 累積を確認（5 分 profile span で）
+- 閉じると解放されるのは modal の JS context が一括 GC されるため
+
+#### 修正内容（Q-62 想定 (b) page reload 方式、UX 影響最小）
+
+**GROUP-62-page-reload：MODAL_NEW_IMAGE で window.location.reload()**
+- [src/modal/modal.js:112-126](src/modal/modal.js:112)：`browser.runtime.onMessage` の MODAL_NEW_IMAGE / MODAL_NEW_FROM_CONVERSION ハンドラを `initModal()` から `window.location.reload()` に置換
+- JS context を完全 reset → 165 listener / closure 群 / setTimeout 累積をすべて GC
+- `_pendingModal` storage は新画像情報を保持済のため、reload 後の新 init で正しく読み出される
+- `__fromConversion` の場合も background の `_pendingConversionStash` が初回 CLAIM で消費されるため整合性維持
+
+#### 採用しなかった代替案
+- (a) Listener cleanup pattern：165 箇所の調査＋ refactor が必要、漏れ 1 つで再発リスク
+- (c) Modal 閉じて再開く：window が一瞬消える UX ＋ background 側 modalWindowId 管理ロジック改修必要
+
+#### トレードオフ
+- reload flash が一瞬発生（UX 影響）：minimizeAfterSave で modal が最小化状態から復帰するタイミングなので影響最小
+- in-flight な save の SAVE_RESULT dialog が失われる可能性：実 save は background が fire-and-forget で完了するため保存自体は成功、ユーザーは保存履歴タブで確認可能
+
+#### 検証
+- node --check：modal.js PASS
+
+#### Files Changed
+- `manifest.json`：1.46.5 → 1.46.6
+- `src/modal/modal.js`：MODAL_NEW_IMAGE / MODAL_NEW_FROM_CONVERSION ハンドラを reload 方式に変更（5 行変更、コメント追加 6 行）
+
+#### Native 変更なし
+
+---
+
 ## [1.46.5] - 2026-05-01
 
 ### Fixed — GROUP-66：content.js ホバー保存ボタン残留 hotfix（複数 wrap zombie 化）

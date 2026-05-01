@@ -2607,6 +2607,14 @@ function setupHistoryTab() {
     _busyForceHide();
   }
 
+  // v1.46.7 GROUP-54-bulk-audio-busy fix：
+  // setupHistoryTab スコープ外の top-level 関数（例：_toggleAudioSelected at line 4612）から
+  // 呼ばれた際に ReferenceError にならないよう、showBusyModal / completeBusyModal /
+  // hideBusyModal を window 経由で exposure。setupHistoryTab 内では従来通り local scope で解決。
+  window.showBusyModal     = showBusyModal;
+  window.completeBusyModal = completeBusyModal;
+  window.hideBusyModal     = hideBusyModal;
+
   // v1.35.0 GROUP-35-perf-B：選択クリア＋一括ボタン無効化を一箇所に集約。
   // グループ化／解除でも再利用、renderHistoryGrid を経由しない軽量経路を提供。
   function _clearSelectionAndDisableBulkButtons() {
@@ -2817,7 +2825,7 @@ function setupHistoryTab() {
             display:flex;flex-wrap:wrap;gap:4px;align-items:center;cursor:text" id="atd-chip-area">
             <input id="atd-input" type="text" autocomplete="off"
               style="border:none;outline:none;font-size:13px;min-width:80px;flex:1;font-family:inherit"
-              placeholder="タグを入力…" />
+              placeholder="タグを入力（Enter でチップ化）…" />
           </div>
           <div id="atd-suggestions" style="border:1px solid #e0e0e0;border-radius:6px;background:#fff;
             max-height:100px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none;margin-top:2px"></div>
@@ -2945,7 +2953,7 @@ function setupHistoryTab() {
             display:flex;flex-wrap:wrap;gap:4px;align-items:center;cursor:text" id="aad-chip-area">
             <input id="aad-input" type="text" autocomplete="off"
               style="border:none;outline:none;font-size:13px;min-width:80px;flex:1;font-family:inherit"
-              placeholder="権利者名を入力…" />
+              placeholder="権利者名を入力（Enter でチップ化）…" />
           </div>
           <div id="aad-suggestions" style="border:1px solid #e0e0e0;border-radius:6px;background:#fff;
             max-height:100px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none;margin-top:2px"></div>

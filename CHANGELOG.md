@@ -5,6 +5,48 @@
 
 ---
 
+## [1.46.7] - 2026-05-01
+
+### Fixed — GROUP-54：一括音声 ON 時の ReferenceError: showBusyModal is not defined
+
+#### 経緯
+ユーザー報告（2026-05-01、stack trace 添付）：保存履歴タブで複数選択時に「🔊 音声 ON」ボタン押下 → `Uncaught (in promise) ReferenceError: showBusyModal is not defined / _toggleAudioSelected (settings.js:4617) / setupHistoryTab (settings.js:2640)`。単体音声 ON は問題なし。
+
+#### 根本原因（spec-cite で再特定）
+- `_toggleAudioSelected` は **top-level 関数**（settings.js:4612）
+- `showBusyModal` は **setupHistoryTab 関数内 local 定義**（settings.js:2545、indent 2）
+- top-level 関数から function-scope local 関数を呼び出せず ReferenceError
+- `setupSaveHistoryMigration` も同問題に対し `if (typeof showBusyModal === "function")` で defensive 回避していたが、`_toggleAudioSelected` には適用漏れ（v1.41.4 GROUP-44 移植時に見落とし）
+
+初回診断で modal.js のみ調査して「現コードで発生し得ない」と誤判定（GROUP-54 状態列に記録した想定）→ ユーザー追加 stack trace で settings.js が真の現場と判明、再診断で fix。
+
+#### 修正内容
+- [src/settings/settings.js:2611-2616](src/settings/settings.js:2611)：setupHistoryTab 末尾に `window.showBusyModal = showBusyModal; window.completeBusyModal = completeBusyModal; window.hideBusyModal = hideBusyModal;` の 3 行 exposure を追加。setupHistoryTab 内では従来通り local scope で解決し、top-level 関数（`_toggleAudioSelected` 等）からは window 経由で呼出可能に
+
+### Changed — GROUP-52：タグ追加 / 権利者追加ダイアログのプレースホルダー文言改善
+
+#### 経緯
+plan log GROUP-52-tag-placeholder「タグ追加 / 権利者追加ダイアログのプレースホルダーに『Enterで入力内容をチップ化』追記」を本セッション後半の小タスク消化で対応。stale 候補削減も兼ねる。
+
+#### 実装内容
+- [src/settings/settings.js:2820](src/settings/settings.js:2820)：タグ追加ダイアログの input placeholder を `タグを入力…` → `タグを入力（Enter でチップ化）…` に変更
+- [src/settings/settings.js:2948](src/settings/settings.js:2948)：権利者追加ダイアログの input placeholder を `権利者名を入力…` → `権利者名を入力（Enter でチップ化）…` に変更
+
+#### 備考
+- ダイアログ上部に既に「追加するタグ（カンマ・スペース・Enterで区切り）」「追加する権利者名（カンマ・Enterで区切り）」の説明があるが、ユーザーの視線が input 欄から離れにくい状況（最初に入力欄をクリックした際）でも操作方法が見えるよう placeholder にも明記
+- 同コードベース内 `modal.js` / `settings.js` の inline editor 系プレースホルダー（`タグを入力...` / `追加(Enter)...` 等）はダイアログではないため変更対象外（plan log GROUP-52 の指定範囲外）
+
+#### 検証
+- node --check：settings.js PASS
+
+#### Files Changed
+- `manifest.json`：1.46.6 → 1.46.7
+- `src/settings/settings.js`：placeholder 2 箇所変更（合計 2 行）＋ window exposure 3 行（GROUP-54 fix）＋ コメント 4 行
+
+#### Native 変更なし
+
+---
+
 ## [1.46.6] - 2026-05-01
 
 ### Fixed — GROUP-62：minimizeAfterSave ON 状態での連続保存メモリ蔓延 hotfix（page reload 方式）

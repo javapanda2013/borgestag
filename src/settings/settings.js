@@ -2158,6 +2158,8 @@ let _histFilterTagChips    = [];
 let _histFilterAuthorChips = [];
 let _histFilterTag = "";
 let _histFilterMode = "or"; // "or" | "and"
+// v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+let _histFilenameFilter = "";
 let _histScrollPos = 0; // 絞り込みなし時のスクロール位置
 let _histPage     = 0;   // 現在ページ（0始まり）
 let _histPageSize = 100; // 1ページの表示件数
@@ -2267,6 +2269,7 @@ function _setupHistChipInput({
       const btn = document.createElement("button");
       btn.textContent = "×";
       btn.title = "削除";
+      btn.tabIndex = -1; // v1.46.10 GROUP-22-tab：Tab で chip × を skip して次の入力欄へ
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         e.preventDefault();
@@ -2391,7 +2394,8 @@ function setupHistoryTab() {
       _histFilterAuthorChips.length === 0 &&
       !_histSourceFilter &&
       _histFormatFilter === "all" &&
-      !_histFavFilter; // v1.37.0 GROUP-36-fav-filter
+      !_histFavFilter && // v1.37.0 GROUP-36-fav-filter
+      !_histFilenameFilter; // v1.46.10 GROUP-21-a
   }
   _updateSelectAllBtn = updateSelectAllBtn; // グローバル参照を更新
 
@@ -2403,6 +2407,31 @@ function setupHistoryTab() {
       browser.storage.local.set({ histFilterMode: _histFilterMode }).catch(() => {});
       _histPage = 0;
       if (_histFilterTagChips.length || _histFilterAuthorChips.length) renderHistoryGrid();
+    });
+  }
+
+  // v1.46.10 GROUP-21-a：ファイル名絞り込み input の input event + clear button
+  const filenameFilterInput = document.getElementById("hist-filename-filter");
+  const filenameFilterClear = document.getElementById("hist-filename-filter-clear");
+  if (filenameFilterInput) {
+    filenameFilterInput.addEventListener("input", () => {
+      _histFilenameFilter = filenameFilterInput.value || "";
+      browser.storage.local.set({ histFilenameFilter: _histFilenameFilter }).catch(() => {});
+      if (filenameFilterClear) filenameFilterClear.style.display = _histFilenameFilter ? "" : "none";
+      _histPage = 0;
+      updateSelectAllBtn();
+      renderHistoryGrid();
+    });
+  }
+  if (filenameFilterClear) {
+    filenameFilterClear.addEventListener("click", () => {
+      _histFilenameFilter = "";
+      if (filenameFilterInput) filenameFilterInput.value = "";
+      browser.storage.local.set({ histFilenameFilter: "" }).catch(() => {});
+      filenameFilterClear.style.display = "none";
+      _histPage = 0;
+      updateSelectAllBtn();
+      renderHistoryGrid();
     });
   }
 
@@ -2472,12 +2501,14 @@ function setupHistoryTab() {
   // 全選択（絞り込み中の全件）
   selectAllBtn.addEventListener("click", () => {
     // v1.33.2：updateSelectAllBtn の 4 種フィルタ判定と条件を揃える（形式フィルタ漏れを修正）
+    // v1.46.10 GROUP-21-a：filename filter も判定対象に追加
     if (
       _histFilterTagChips.length === 0 &&
       _histFilterAuthorChips.length === 0 &&
       !_histSourceFilter &&
       _histFormatFilter === "all" &&
-      !_histFavFilter
+      !_histFavFilter &&
+      !_histFilenameFilter
     ) return;
     const filtered = _historyData.filter(e => _entryMatchesCurrentFilter(e));
     filtered.forEach(e => _histSelected.add(e.id));
@@ -3534,6 +3565,8 @@ async function renderHistoryTab() {
     "settingsHistoryPageSize",
     // v1.46.8 GROUP-67：保存履歴フィルター 4 要素の永続値も同時取得
     "histFilterMode", "histFormatFilter", "histSourceFilter", "histFavFilter",
+    // v1.46.10 GROUP-21-a：ファイル名絞り込みも永続化
+    "histFilenameFilter",
   ])) };
   _historyData  = stored.saveHistory              || [];
   _histPageSize = stored.settingsHistoryPageSize  || 100;
@@ -3548,12 +3581,19 @@ async function renderHistoryTab() {
   if (typeof stored.histFormatFilter === "string") _histFormatFilter = stored.histFormatFilter;
   if (typeof stored.histSourceFilter === "string") _histSourceFilter = stored.histSourceFilter;
   if (typeof stored.histFavFilter === "boolean") _histFavFilter = stored.histFavFilter;
+  // v1.46.10 GROUP-21-a：histFilenameFilter 反映
+  if (typeof stored.histFilenameFilter === "string") _histFilenameFilter = stored.histFilenameFilter;
   const filterModeSelEl = document.getElementById("hist-filter-mode");
   if (filterModeSelEl) filterModeSelEl.value = _histFilterMode;
   const formatFilterSelEl = document.getElementById("hist-format-filter");
   if (formatFilterSelEl) formatFilterSelEl.value = _histFormatFilter;
   const sourceFilterSelEl = document.getElementById("hist-source-filter");
   if (sourceFilterSelEl) sourceFilterSelEl.value = _histSourceFilter;
+  // v1.46.10 GROUP-21-a：filename filter input + clear button の初期表示反映
+  const filenameFilterInputEl = document.getElementById("hist-filename-filter");
+  if (filenameFilterInputEl) filenameFilterInputEl.value = _histFilenameFilter;
+  const filenameFilterClearEl = document.getElementById("hist-filename-filter-clear");
+  if (filenameFilterClearEl) filenameFilterClearEl.style.display = _histFilenameFilter ? "" : "none";
   const favFilterBtnEl = document.getElementById("hist-fav-filter-toggle");
   if (favFilterBtnEl) {
     favFilterBtnEl.setAttribute("aria-pressed", _histFavFilter ? "true" : "false");
@@ -3585,15 +3625,17 @@ function renderHistoryGrid() {
   const hasSourceFilter = !!_histSourceFilter;
   const hasFormatFilter = _histFormatFilter !== "all";
   const hasFavFilter    = _histFavFilter; // v1.37.0 GROUP-36-fav-filter
+  const hasFilenameFilter = !!_histFilenameFilter; // v1.46.10 GROUP-21-a
 
-  const filtered = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter)
+  const anyFilter = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter || hasFilenameFilter;
+  const filtered = anyFilter
     ? _historyData.filter(e => _entryMatchesCurrentFilter(e))
     : _historyData;
 
   // 絞り込み結果をライトボックスのグローバルナビ用に保持
-  _currentFilteredHistory = (hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter) ? filtered : null;
+  _currentFilteredHistory = anyFilter ? filtered : null;
 
-  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter;
+  const isFiltering = anyFilter;
   const totalFiltered = filtered.length;
 
   // ページ範囲補正
@@ -4024,7 +4066,8 @@ function _partialRefreshGroupedDom(targetIds, prevSessionIds) {
   const hasSourceFilter = !!_histSourceFilter;
   const hasFormatFilter = _histFormatFilter !== "all";
   const hasFavFilter    = _histFavFilter;
-  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter;
+  const hasFilenameFilter = !!_histFilenameFilter; // v1.46.10 GROUP-21-a
+  const isFiltering = hasTagFilter || hasAuthorFilter || hasSourceFilter || hasFormatFilter || hasFavFilter || hasFilenameFilter;
   const filtered = isFiltering
     ? _historyData.filter(e => _entryMatchesCurrentFilter(e))
     : _historyData;
@@ -4204,7 +4247,9 @@ function _entryMatchesCurrentFilter(entry) {
   const hasSourceFilter = !!_histSourceFilter;
   const hasFormatFilter = _histFormatFilter !== "all";
   const hasFavFilter    = _histFavFilter; // v1.37.0 GROUP-36-fav-filter
-  if (!hasTagFilter && !hasAuthorFilter && !hasSourceFilter && !hasFormatFilter && !hasFavFilter) return true;
+  // v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+  const hasFilenameFilter = !!_histFilenameFilter;
+  if (!hasTagFilter && !hasAuthorFilter && !hasSourceFilter && !hasFormatFilter && !hasFavFilter && !hasFilenameFilter) return true;
 
   // v1.37.0 GROUP-36-fav-filter：お気に入りフィルタ（AND 結合）
   if (hasFavFilter && !entry.favorite) return false;
@@ -4212,6 +4257,12 @@ function _entryMatchesCurrentFilter(entry) {
   // v1.32.2 GROUP-28 mvdl：形式フィルター
   if (_histFormatFilter === "gif" && !/\.gif$/i.test(entry.filename || "")) return false;
   if (_histFormatFilter === "audio" && !entry.audioFilename) return false;
+
+  // v1.46.10 GROUP-21-a：filename 部分一致（AND 結合、他フィルタと並列）
+  if (hasFilenameFilter) {
+    const fname = (entry.filename || "").toLowerCase();
+    if (!fname.includes(_histFilenameFilter.toLowerCase())) return false;
+  }
 
   const entryTags = (entry.tags || []).map(t => t.toLowerCase());
   const tagMatch = !hasTagFilter || (
@@ -5420,17 +5471,19 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           </div>
           <div class="hist-info-field-group">
             <div class="hist-info-field-label">🏷️ タグ</div>
-            <div class="hist-tag-editor-chips"></div>
-            <div class="hist-tag-editor-input-row">
-              <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" />
+            <!-- v1.46.10 GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+            <div class="hist-tag-editor-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.4);border-radius:4px;background:rgba(255,255,255,0.1);max-width:500px;position:relative;">
+              <div class="hist-tag-editor-chips" style="display:contents;"></div>
+              <input type="text" class="hist-tag-editor-input" placeholder="タグを入力..." autocomplete="off" style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:11px;padding:1px 4px;outline:none;font-family:inherit;" />
               <div class="hist-tag-editor-suggestions"></div>
             </div>
           </div>
           <div class="hist-info-field-group">
             <div class="hist-info-field-label">✏️ 権利者</div>
-            <div class="hist-author-chips"></div>
-            <div class="hist-author-input-row">
-              <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" />
+            <!-- v1.46.10 GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+            <div class="hist-author-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.3);border-radius:4px;background:rgba(255,255,255,0.08);max-width:500px;position:relative;">
+              <div class="hist-author-chips" style="display:contents;"></div>
+              <input type="text" class="hist-author-input" placeholder="追加(Enter)..." autocomplete="off" style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:10px;padding:1px 4px;outline:none;font-family:inherit;" />
               <div class="hist-author-suggestions"></div>
             </div>
           </div>
@@ -5552,6 +5605,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       chip.textContent = t;
       const del = document.createElement("button");
       del.textContent = "×";
+      del.tabIndex = -1; // v1.46.10 GROUP-22-tab：Tab で chip × を skip して次の input へ
       del.addEventListener("click", (e) => {
         e.stopPropagation();
         _undoStack.push({ type: "deleteTag", tag: t });
@@ -5599,6 +5653,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       chip.textContent = a;
       const del = document.createElement("button");
       del.textContent = "×";
+      del.tabIndex = -1; // v1.46.10 GROUP-22-tab：Tab で chip × を skip して次の input へ
       del.addEventListener("click", (e) => {
         e.stopPropagation();
         _undoStack.push({ type: "deleteAuthor", author: a });

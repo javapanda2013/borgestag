@@ -1625,20 +1625,30 @@ function buildModalHTML(defaultFilename) {
             <!-- 残置：旧コード参照箇所を移行完了後に完全削除 -->
             <div id="main-chip-area" style="display:none;"></div>
 
-            <!-- 保存履歴フィルター（変更なし） -->
-            <div class="history-filter-wrap" id="history-filter-wrap">
+            <!-- v1.46.10 GROUP-22 + GROUP-21：保存履歴フィルターを 2 段に分離（入力型 / pulldown + button 型）、ファイル名絞り込み追加、背景色で視覚区分 -->
+            <!-- 1 段目：入力型フィルター（chip + input row、薄青背景） -->
+            <div class="history-filter-wrap" id="history-filter-wrap" style="background:#eef5ff;border:1px solid #a5c8ee;border-radius:4px;padding:4px 6px;">
               <div class="hist-chip-box" id="history-filter-box">
                 <input type="text" id="history-filter-input" class="hist-chip-input"
                   placeholder="🔍 タグで絞り込み" autocomplete="off" />
                 <div class="hist-chip-suggest" id="history-filter-suggest"></div>
               </div>
               <button class="history-filter-clear" id="history-filter-clear" title="クリア">✕</button>
+              <!-- v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive） -->
+              <div class="hist-chip-box" id="history-filename-filter-box">
+                <input type="text" id="history-filename-filter" class="hist-chip-input"
+                  placeholder="📄 ファイル名で絞り込み" autocomplete="off" />
+              </div>
+              <button class="history-filter-clear" id="history-filename-filter-clear" title="ファイル名フィルタークリア">✕</button>
               <div class="hist-chip-box" id="history-author-filter-box">
                 <input type="text" id="history-author-filter" class="hist-chip-input"
                   placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
                 <div class="hist-chip-suggest" id="history-author-filter-suggest"></div>
               </div>
               <button class="history-filter-clear" id="history-author-filter-clear" title="クリア">✕</button>
+            </div>
+            <!-- 2 段目：pulldown / toggle / bulk action 型（薄緑背景） -->
+            <div class="history-filter-wrap" style="background:#f0f7ee;border:1px solid #b9d8a8;border-radius:4px;padding:4px 6px;margin-top:4px;">
               <select id="history-filter-mode" class="history-filter-mode-select" title="タグ・作者の絞り込みモード">
                 <option value="and">AND</option>
                 <option value="or">OR</option>
@@ -2064,9 +2074,12 @@ function setupModalEvents(
   // v1.32.2 GROUP-28 mvdl：GIF のみ → プルダウン化
   // "all" | "gif" | "audio"
   let historyFormatFilter = "all";
+  // GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+  let historyFilenameFilter = "";
   // v1.46.8 GROUP-67：保存履歴フィルター 3 要素（filter mode / format filter / fav toggle）の永続値を初期化時に読込
   // settings.js と共有 storage key を使用、Firefox bfcache の visual restore による状態乖離を解消
-  browser.storage.local.get(["histFilterMode", "histFormatFilter", "histFavFilter"]).then(r => {
+  // GROUP-21-a：histFilenameFilter も追加
+  browser.storage.local.get(["histFilterMode", "histFormatFilter", "histFavFilter", "histFilenameFilter"]).then(r => {
     if (typeof r.histFilterMode === "string") {
       historyFilterMode = r.histFilterMode;
       const sel = document.getElementById("history-filter-mode");
@@ -2084,6 +2097,13 @@ function setupModalEvents(
         btn.setAttribute("aria-pressed", _modalHistFavFilter ? "true" : "false");
         btn.textContent = _modalHistFavFilter ? "❤️ お気に入りのみ" : "🤍 お気に入りのみ";
       }
+    }
+    if (typeof r.histFilenameFilter === "string") {
+      historyFilenameFilter = r.histFilenameFilter;
+      const inp = document.getElementById("history-filename-filter");
+      if (inp) inp.value = historyFilenameFilter;
+      const clr = document.getElementById("history-filename-filter-clear");
+      if (clr) clr.style.display = historyFilenameFilter ? "" : "none";
     }
     // 既に初期 render 済の可能性があるため再描画
     if (typeof renderHistory === "function") renderHistory();
@@ -2359,7 +2379,8 @@ function setupModalEvents(
     historyFilterTagChips.forEach((chip, idx) => {
       const el = document.createElement("span");
       el.className = "hist-chip";
-      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" title="削除">×</button>`;
+      // GROUP-22-tab：✕ ボタンに tabindex="-1"（Tab focus 遷移防止）
+      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" tabindex="-1" title="削除">×</button>`;
       historyFilterBox.insertBefore(el, historyFilterInput);
     });
     historyFilterClear.classList.toggle("visible", historyFilterTagChips.length > 0);
@@ -2369,7 +2390,8 @@ function setupModalEvents(
     historyFilterAuthorChips.forEach((chip, idx) => {
       const el = document.createElement("span");
       el.className = "hist-chip author";
-      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" title="削除">×</button>`;
+      // GROUP-22-tab：✕ ボタンに tabindex="-1"（Tab focus 遷移防止）
+      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" tabindex="-1" title="削除">×</button>`;
       historyAuthorFilterBox.insertBefore(el, historyAuthorFilter);
     });
     historyAuthorFilterClear.classList.toggle("visible", historyFilterAuthorChips.length > 0);
@@ -2580,6 +2602,29 @@ function setupModalEvents(
   historyFilterClear.addEventListener("click", () => setHistoryTagChips([]));
   historyAuthorFilterClear.addEventListener("click", () => setHistoryAuthorChips([]));
 
+  // GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+  const historyFilenameFilterInput = document.getElementById("history-filename-filter");
+  const historyFilenameFilterClear = document.getElementById("history-filename-filter-clear");
+  if (historyFilenameFilterInput) {
+    historyFilenameFilterInput.addEventListener("input", () => {
+      historyFilenameFilter = historyFilenameFilterInput.value || "";
+      browser.storage.local.set({ histFilenameFilter: historyFilenameFilter }).catch(() => {});
+      if (historyFilenameFilterClear) historyFilenameFilterClear.style.display = historyFilenameFilter ? "" : "none";
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+  if (historyFilenameFilterClear) {
+    historyFilenameFilterClear.addEventListener("click", () => {
+      historyFilenameFilter = "";
+      if (historyFilenameFilterInput) historyFilenameFilterInput.value = "";
+      browser.storage.local.set({ histFilenameFilter: "" }).catch(() => {});
+      historyFilenameFilterClear.style.display = "none";
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+
   if (historyFilterModeSelect) {
     historyFilterModeSelect.addEventListener("change", () => {
       historyFilterMode = historyFilterModeSelect.value;
@@ -2721,6 +2766,11 @@ function setupModalEvents(
     if (_modalHistFavFilter) {
       filtered = filtered.filter(e => !!e.favorite);
     }
+    // GROUP-21-a：ファイル名部分一致（case insensitive）
+    if (historyFilenameFilter) {
+      const needle = historyFilenameFilter.toLowerCase();
+      filtered = filtered.filter(e => (e.filename || "").toLowerCase().includes(needle));
+    }
     return filtered;
   }
 
@@ -2786,6 +2836,11 @@ function setupModalEvents(
     // v1.37.0 GROUP-36-fav-filter：お気に入りのみ表示
     if (_modalHistFavFilter) {
       filtered = filtered.filter(e => !!e.favorite);
+    }
+    // GROUP-21-a：ファイル名部分一致（case insensitive）
+    if (historyFilenameFilter) {
+      const needle = historyFilenameFilter.toLowerCase();
+      filtered = filtered.filter(e => (e.filename || "").toLowerCase().includes(needle));
     }
     const isFiltered = hasTagFilter || hasAuthFilter || historyFormatFilter !== "all" || _modalHistFavFilter;
 
@@ -3126,19 +3181,23 @@ function setupModalEvents(
               </div>
               <div class="history-info-field-group">
                 <div class="history-info-field-label">🏷️ タグ</div>
-                <div class="history-tag-editor-chips"></div>
-                <div class="history-tag-editor-input-row">
+                <!-- GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+                <div class="history-tag-editor-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.4);border-radius:4px;background:rgba(255,255,255,0.1);max-width:500px;position:relative;">
+                  <div class="history-tag-editor-chips" style="display:contents;"></div>
                   <input type="text" class="history-tag-editor-input"
-                    placeholder="タグを入力..." autocomplete="off" />
+                    placeholder="タグを入力..." autocomplete="off"
+                    style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:11px;padding:1px 4px;outline:none;font-family:inherit;" />
                   <div class="history-tag-suggestions"></div>
                 </div>
               </div>
               <div class="history-info-field-group">
                 <div class="history-info-field-label">✏️ 権利者</div>
-                <div class="history-info-author-chips"></div>
-                <div class="history-info-author-input-row">
+                <!-- GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+                <div class="history-info-author-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.3);border-radius:4px;background:rgba(255,255,255,0.08);max-width:500px;position:relative;">
+                  <div class="history-info-author-chips" style="display:contents;"></div>
                   <input type="text" class="history-info-author-input"
-                    placeholder="追加(Enter)..." autocomplete="off" />
+                    placeholder="追加(Enter)..." autocomplete="off"
+                    style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:10px;padding:1px 4px;outline:none;font-family:inherit;" />
                   <div class="history-info-author-suggestions"></div>
                 </div>
               </div>
@@ -3387,7 +3446,9 @@ function setupModalEvents(
           const chip = document.createElement("span");
           chip.className = "history-tag-editor-chip";
           chip.innerHTML = `${escapeHtml(t)}<button type="button" title="削除">×</button>`;
-          chip.querySelector("button").addEventListener("click", (ev) => {
+          const delBtn = chip.querySelector("button");
+          delBtn.tabIndex = -1; // GROUP-22-tab：Tab で chip ✕ にフォーカス遷移しない
+          delBtn.addEventListener("click", (ev) => {
             ev.stopPropagation();
             // v1.46.4 GROUP-63 (a)：undo stack 記録 ＋ 自動保存
             _undoStack.push({ type: "deleteTag", tag: t });
@@ -3431,7 +3492,9 @@ function setupModalEvents(
           const chip = document.createElement("span");
           chip.className = "history-info-author-chip";
           chip.innerHTML = `${escapeHtml(a)}<button type="button" title="削除">×</button>`;
-          chip.querySelector("button").addEventListener("click", (ev) => {
+          const delBtn = chip.querySelector("button");
+          delBtn.tabIndex = -1; // GROUP-22-tab：Tab で chip ✕ にフォーカス遷移しない
+          delBtn.addEventListener("click", (ev) => {
             ev.stopPropagation();
             // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
             _undoStack.push({ type: "deleteAuthor", author: a });

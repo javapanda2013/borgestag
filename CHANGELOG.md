@@ -5,6 +5,52 @@
 
 ---
 
+## [1.46.10] - 2026-05-02
+
+### Added / Changed — GROUP-22 / GROUP-21：保存履歴のフィルター UI 整理＋編集パネル box 統合（双子 UI 修正）
+
+#### 概要
+保存履歴のフィルター行を「入力型 / pulldown・toggle 型」の 2 段に分離（背景色で視覚区分）し、ファイル名絞り込み入力欄を追加。情報編集パネルではタグ／権利者を chip + input 統合 box 化（max-width 500px、chip 数に応じ自動折返し）。Tab キーで chip × ボタンに焦点が遷移しないよう tabindex="-1" を付与。
+
+#### 仕様確定（GROUP-22 / GROUP-21）
+- Q-22-1：権利者入力欄を chip + input row 統合 box 化、max-width 500px、settings + modal 双方
+- Q-22-2：max-width 500px、flex-wrap で chip 数に応じ折返し（box が伸び切らない）
+- Q-22-3：chips → input の並び順を維持しつつ、Tab キーで chip × にフォーカスが奪われる挙動を修正
+- Q-21-1：ファイル名で絞り込み input 欄を追加（settings + modal 双方、tag filter 隣、case insensitive）
+
+#### 修正内容（settings 側）
+- `src/settings/settings.html`：保存履歴フィルター行を 2 段に分離。1 段目（薄青背景）に tag chip + filename input + author chip、2 段目（薄緑背景）に filter mode / source / format pulldown + fav toggle
+- `src/settings/settings.js`：
+  - `_histFilenameFilter` state 変数追加、`renderHistoryTab` の load 時に `histFilenameFilter` を storage から復元 ＋ DOM 反映
+  - `_entryMatchesCurrentFilter` / `renderHistoryGrid` / `_partialRefreshGroupedDom` / `updateSelectAllBtn` / select-all click handler に filename フィルタ判定追加（部分一致、case insensitive）
+  - filename input の input/clear handler 追加（state 更新＋永続化＋ ✕ ボタン visibility）
+  - 編集パネル：タグ／権利者 chip + input を統合 box 化（max-width 500px、display:flex flex-wrap）
+  - chip × ボタン：`renderEditorChips` / `renderAuthorEditorChips` / `_setupHistChipInput` の 3 箇所で `tabIndex = -1`
+
+#### 修正内容（modal 側）
+- `src/modal/modal.js`：
+  - 保存履歴フィルター行を 2 段に分離（settings.html と同 layout、薄青／薄緑背景）
+  - `historyFilenameFilter` state 変数追加、初期 storage.local.get block に `histFilenameFilter` 追加
+  - filename input の input/clear handler 追加
+  - `_modalComputeFiltered` / `renderHistory` に filename フィルタ判定追加
+  - 編集パネル：タグ／権利者 chip + input 統合 box 化
+  - chip × ボタン：`renderInfoTagChips` / `renderInfoAuthorChips` で `tabIndex = -1`、フィルター行 chip（`renderTagChips` / `renderAuthorChips`）の HTML テンプレに `tabindex="-1"` 追加
+
+#### 検証
+- node --check：settings.js / modal.js PASS
+- delta-audit hist-info-editor：button leak 0 / input leak 0 / handler leak 0
+- preflight：6 項目確認
+
+#### Files Changed
+- `manifest.json`：1.46.9 → 1.46.10
+- `src/settings/settings.html`：保存履歴フィルター行 2 段分離 + filename input
+- `src/settings/settings.js`：filename filter state/handler/persistence、編集パネル box 統合、chip tabindex
+- `src/modal/modal.js`：保存履歴フィルター行 2 段分離、filename filter、編集パネル box 統合、chip tabindex
+
+#### Native 変更なし
+
+---
+
 ## [1.46.9] - 2026-05-01
 
 ### Fixed — GROUP-68：保存ウィンドウ 引き継ぎ設定 OFF 時の入力欄クリアを廃止（リセットボタン専用化）

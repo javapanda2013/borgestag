@@ -1204,24 +1204,34 @@
           <button id="hist-delete-period" class="hist-btn danger delete-guarded">期間削除</button>
           <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
         </div>
-        <!-- 下段：絞り込みフィルター -->
-        <div class="hist-toolbar-filters-row">
-          <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
-            <option value="or">OR</option>
-            <option value="and">AND</option>
-          </select>
+        <!-- v1.46.10 GROUP-22 + GROUP-21：絞り込みフィルターを 2 段に分離（入力型 / pulldown 型）、ファイル名絞り込み追加、背景色で視覚区分 -->
+        <!-- 中段：入力型フィルター（chip + input row、薄青背景） -->
+        <div class="hist-toolbar-filters-row" style="background:#eef5ff;border:1px solid #a5c8ee;border-radius:4px;padding:4px 6px;">
           <div id="hist-filter-wrap" class="hist-chip-wrap" title="タグで絞り込み（複数チップで OR/AND 切替）">
             <input type="text" id="hist-filter" class="hist-chip-input"
               placeholder="🔍 タグで絞り込み" autocomplete="off" />
             <div id="hist-filter-suggest" class="hist-chip-suggest"></div>
           </div>
           <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
+          <!-- v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive） -->
+          <div id="hist-filename-filter-wrap" class="hist-chip-wrap" title="ファイル名で絞り込み（部分一致、大文字小文字区別なし）">
+            <input type="text" id="hist-filename-filter" class="hist-chip-input"
+              placeholder="📄 ファイル名で絞り込み" autocomplete="off" />
+          </div>
+          <button id="hist-filename-filter-clear" class="hist-btn-sm" title="ファイル名フィルタークリア" style="display:none">✕</button>
           <div id="hist-author-filter-wrap" class="hist-chip-wrap" title="権利者で絞り込み">
             <input type="text" id="hist-author-filter" class="hist-chip-input"
               placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
             <div id="hist-author-filter-suggest" class="hist-chip-suggest"></div>
           </div>
           <button id="hist-author-filter-clear" class="hist-btn-sm" title="権利者フィルタークリア" style="display:none">✕</button>
+        </div>
+        <!-- 下段：pulldown / toggle 型フィルター（薄緑背景） -->
+        <div class="hist-toolbar-filters-row" style="background:#f0f7ee;border:1px solid #b9d8a8;border-radius:4px;padding:4px 6px;margin-top:4px;">
+          <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+            <option value="or">OR</option>
+            <option value="and">AND</option>
+          </select>
           <select id="hist-source-filter" title="取り込み元で絞り込み" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
             <option value="">取り込み元: すべて</option>
             <option value="external_import">📥 外部取り込みのみ</option>

@@ -5,6 +5,45 @@
 
 ---
 
+## [1.46.13] - 2026-05-02
+
+### Fixed — GROUP-71：保存ウィンドウ dest-tabbar の chip × ボタンに tabindex="-1" 漏れ（v1.46.10 GROUP-22-tab 見落とし）
+
+#### 経緯
+ユーザー報告（2026-05-02、devtools inspector screenshot 添付）：「『Tab focus を chip ✕ に奪われない（tabindex="-1" 付与）』対応済のはずだが、チップの削除ボタンにフォーカスが奪われる」。
+
+#### 根本原因
+v1.46.10 GROUP-22-tab で 7 箇所の chip × ボタンに tabindex="-1" を付与したが、**保存ウィンドウの保存先選択ペイン（dest-tabbar）側のメインタグ／サブタグ／権利者 chip** という別カテゴリの 3 箇所を見落としていた。inspector で確認できる DOM は `<button type="button" title="削除">×</button>`（tabindex 属性なし）。
+
+v1.46.10 で修正した chip 種別：
+- 保存履歴フィルター chip（settings + modal）
+- 保存履歴 編集パネルの tag chip / author chip（settings + modal）
+
+v1.46.10 で見落とした chip 種別：
+- **保存ウィンドウ dest-tabbar の main タグ chip**（`addTag` / modal.js:4807）
+- **保存ウィンドウ dest-tabbar の subtag chip**（`addSubTag` / modal.js:4841）
+- **保存ウィンドウ dest-tabbar の author chip**（`renderAuthorChips` / modal.js:5662）
+
+#### 修正内容
+- `src/modal/modal.js`：dest-tabbar の chip 描画 3 箇所すべてに `tabindex="-1"` を付与
+  - 4807（addTag）／4841（addSubTag）：HTML テンプレート文字列に `tabindex="-1"` 追加
+  - 5662（renderAuthorChips）：`delBtn.tabIndex = -1;` 追加
+
+#### 振り返り
+v1.46.10 の delta-audit hist-info-editor は「保存履歴 info edit 編集パネル」の双子 UI のみ走査対象で、保存ウィンドウ dest-tabbar はカバー外だった。chip × の tabindex 付与のような「全 chip 種別を横断する観点」は、ペア比較ではなく **`class*="chip"` で全 chip render 関数を grep し、× button への tabindex 付与を全件確認** する横断走査が必要。今回 3 箇所漏れたのは、ペアで揃っているか（双子 UI）のみで判断し、chip 種別の網羅を確認しなかった反省。
+
+#### 検証
+- node --check：modal.js PASS
+- grep `class.*chip`／`addTag`／`renderAuthorChips` で chip 描画 callsite を全件列挙、× button への `tabindex` 付与を全件確認
+
+#### Files Changed
+- `manifest.json`：1.46.12 → 1.46.13
+- `src/modal/modal.js`：3 箇所の chip × button に `tabindex="-1"` 追加
+
+#### Native 変更なし
+
+---
+
 ## [1.46.12] - 2026-05-02
 
 ### Fixed — GROUP-70：エクスポート／インポートボタンのラベルを「JSONファイル」→「ZIPファイル」に修正

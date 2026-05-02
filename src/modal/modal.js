@@ -4806,7 +4806,8 @@ function setupModalEvents(
     const chip = document.createElement("span");
     chip.className = "tag-chip";
     chip.dataset.type = "main";
-    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
+    // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側の chip × にも tabindex=-1
+    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" tabindex="-1" title="削除">×</button>`;
     chipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
@@ -4841,7 +4842,8 @@ function setupModalEvents(
     chip.className = "tag-chip";
     chip.dataset.type = "sub";
     chip.style.cssText = "background:#ede9f9;border-color:#c3b1e1;color:#5a3fa0;";
-    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" title="削除">×</button>`;
+    // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側の chip × にも tabindex=-1
+    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" tabindex="-1" title="削除">×</button>`;
     chipArea.appendChild(chip);
     chip.querySelector("button").addEventListener("click", () => {
       chip.remove();
@@ -5671,6 +5673,7 @@ function setupModalEvents(
       delBtn.style.cssText = "background:none;border:none;cursor:pointer;color:#8a9adc;" +
         "font-size:12px;padding:0 0 0 2px;line-height:1;";
       delBtn.title = `${a} を削除`;
+      delBtn.tabIndex = -1; // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側
       delBtn.addEventListener("click", () => {
         selectedAuthors = selectedAuthors.filter(x => x !== a);
         renderAuthorChips();

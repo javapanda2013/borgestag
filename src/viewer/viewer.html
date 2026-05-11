@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>BorgesTag Image Viewer</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #111; min-height: 100vh; }
+    body { display: flex; align-items: center; justify-content: center; }
+    #status {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.7); color: #eee; padding: 8px 14px;
+      border-radius: 14px; font: 13px/1.4 -apple-system, "Segoe UI", sans-serif;
+      display: none;
+    }
+    #img { max-width: 100%; max-height: 100vh; object-fit: contain; }
+    #img.loading { opacity: .4; }
+    .error {
+      color: #ff8b78; padding: 24px; font: 14px/1.6 -apple-system, "Segoe UI", sans-serif;
+      background: #222; border-radius: 8px; border: 1px solid #533;
+      max-width: 600px; margin: 24px;
+    }
+    .error strong { color: #ffc0b5; display: block; margin-bottom: 6px; }
+    /* v1.32.0 GROUP-28 mvdl Phase 2：音声ボタン */
+    #audio-btn {
+      position: fixed; right: 20px; bottom: 20px;
+      width: 48px; height: 48px;
+      display: none; /* audioPath 指定時のみ表示 */
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.7); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 22px;
+      line-height: 1; padding: 0;
+      z-index: 10;
+      transition: background 0.15s;
+    }
+    #audio-btn:hover { background: rgba(40,90,180,0.85); }
+    #audio-btn[data-muted="0"] { background: rgba(40,120,60,0.85); }
+    #audio-btn:disabled { opacity: 0.5; cursor: wait; }
+  </style>
+</head>
+<body>
+  <div id="status"></div>
+  <img id="img" alt="" />
+  <button id="audio-btn" data-muted="1" title="音声再生">🔇</button>
+  <script src="viewer.js"></script>
+</body>
+</html>

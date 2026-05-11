@@ -1,0 +1,154 @@
+# ==============================================================================
+# BorgesTag — Firefox 拡張の署名自動化ワークフロー（個人用・unlisted）
+#
+# トリガー：v*.*.* 形式のタグ push、または手動実行
+# 動作   ：web-ext で lint → sign（AMO unlisted）→ Artifacts 保存 ＋ Release 添付
+# 失敗時 ：unsigned ZIP を fallback で生成し Artifacts に残す
+#
+# 配置場所：image_saver_with_tags/.github/workflows/ffext_build.yml
+# 前提   ：
+#   1. GitHub Secrets に以下 2 件を登録済
+#      - WEB_EXT_API_KEY     （AMO の JWT issuer）
+#      - WEB_EXT_API_SECRET  （AMO の JWT secret）
+#   2. manifest.json の browser_specific_settings.gecko.id が設定済
+#      （現行：image-saver-tags@example.com、仮 ID のまま unlisted で運用）
+# ==============================================================================
+
+name: CI/CD for web-ext
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'            # タグ push で自動実行
+  workflow_dispatch: {}     # 手動実行も許可
+
+jobs:
+  build-and-sign:
+    runs-on: ubuntu-latest
+
+    # GitHub Release 作成＋タグへの .xpi アップロードに必要な権限
+    # （2023 年以降 GITHUB_TOKEN デフォルトは read-only のため明示）
+    permissions:
+      contents: write
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. リポジトリをチェックアウト
+      #    （image_saver_with_tags/ がリポジトリルート）
+      # ---------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # ---------------------------------------------------------------
+      # 2. Node.js セットアップ（web-ext 実行に必要）
+      # ---------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      # ---------------------------------------------------------------
+      # 3. devDependencies インストール（ESLint 等）
+      #    GROUP-74-eslint（v1.46.17）：package.json devDependencies の eslint をインストール。
+      #    package-lock.json は git 追跡しているため `npm ci` で deterministic。
+      # ---------------------------------------------------------------
+      - name: Install dev dependencies (ESLint)
+        run: npm ci
+
+      # ---------------------------------------------------------------
+      # 3-bis. web-ext をグローバルインストール（後段 lint / sign で利用）
+      # ---------------------------------------------------------------
+      - name: Install web-ext
+        run: npm install --global web-ext
+
+      # ---------------------------------------------------------------
+      # 4-a. ESLint（GROUP-74-eslint v1.46.17）：no-undef / no-redeclare などの
+      #     構造的バグを CI で機械検出。0 errors を要求、warning は許容。
+      #     v1.46.14 closure scope バグ（暗黙的 global、undefined function 呼出）の再発防止。
+      # ---------------------------------------------------------------
+      - name: Run ESLint (errors fail the build)
+        run: npx eslint src/ --max-warnings=999
+
+      # ---------------------------------------------------------------
+      # 4-b. web-ext lint（manifest 検証など、警告で CI を止めない既存運用）
+      # ---------------------------------------------------------------
+      - name: web-ext lint
+        run: web-ext lint --source-dir . --warnings-as-errors=false
+        continue-on-error: true
+
+      # ---------------------------------------------------------------
+      # 5. AMO へ署名リクエスト（unlisted channel）
+      #    web-ext は WEB_EXT_API_KEY / WEB_EXT_API_SECRET 環境変数を
+      #    自動認識するため --api-key / --api-secret 引数は不要。
+      #    タイムアウトは 15 分（AMO queue 混雑時の保険）。
+      # ---------------------------------------------------------------
+      - name: Sign with AMO (unlisted)
+        id: sign
+        run: |
+          web-ext sign \
+            --source-dir . \
+            --artifacts-dir dist \
+            --channel=unlisted \
+            --timeout=900000
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+
+      # ---------------------------------------------------------------
+      # 6. 署名失敗時のみ unsigned ZIP を生成（fallback）
+      #    AMO 側障害や rate limit で sign が落ちても
+      #    手元で手動提出できるよう ZIP を残す。
+      # ---------------------------------------------------------------
+      - name: Build unsigned fallback (on sign failure)
+        if: failure()
+        run: |
+          web-ext build \
+            --source-dir . \
+            --artifacts-dir dist \
+            --overwrite-dest
+
+      # ---------------------------------------------------------------
+      # 6b. 成果物ファイル名を `borgestag-v<version>.xpi/.zip` に統一
+      #     AMO 側 slug 由来のファイル名（例：image_tag-1.28.1.xpi）を、
+      #     配布物としてユニーク性のある `borgestag-v1.28.1.xpi` に揃える。
+      #     tag push / workflow_dispatch どちらでも manifest.json の
+      #     version を直接読むので確実。jq は ubuntu-latest 既定搭載。
+      # ---------------------------------------------------------------
+      - name: Rename artifacts for distribution
+        if: always()
+        run: |
+          VERSION=$(jq -r '.version' manifest.json)
+          cd dist
+          for f in *.xpi *.zip; do
+            if [ -f "$f" ]; then
+              ext="${f##*.}"
+              mv "$f" "borgestag-v${VERSION}.${ext}"
+            fi
+          done 2>/dev/null || true
+          ls -la
+
+      # ---------------------------------------------------------------
+      # 7. 成果物（署名済 .xpi or unsigned .zip）を Actions Artifacts に保存
+      #    成功・失敗問わず必ず保存。デフォルト保持 90 日。
+      # ---------------------------------------------------------------
+      - name: Upload to Actions Artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: borgestag-${{ github.ref_name }}
+          path: dist/*
+          retention-days: 90
+
+      # ---------------------------------------------------------------
+      # 8. タグ push 時のみ GitHub Release を作成し .xpi を添付
+      #    workflow_dispatch（手動実行）では Release は作らない。
+      #    リリースノートは前回 Release 以降のコミット／PR から自動生成。
+      # ---------------------------------------------------------------
+      - name: Create GitHub Release
+        if: success() && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.xpi
+          draft: false
+          prerelease: false
+          generate_release_notes: true

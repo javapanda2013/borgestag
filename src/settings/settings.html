@@ -1,0 +1,1822 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BorgesTag 設定</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100%; max-width: 720px; margin: 0 auto; min-height: 100vh;
+      font-family: "Segoe UI", -apple-system, sans-serif;
+      font-size: 13px; color: #1a1a1a; background: #f7f9fc;
+    }
+    /* v1.25.0 GROUP-12-width: 外部取り込みタブ表示時のみ body.wide-tab を付与し、
+       ビューポート幅に応じて段階的に max-width を拡張（C 案採用）。
+       breakpoints: 1000 / 1280 / 1600 px、max-width: 720 / 960 / 1200 / 1480 px */
+    body.wide-tab { max-width: 720px; }
+    @media (min-width: 1000px) { body.wide-tab { max-width: 960px; } }
+    @media (min-width: 1280px) { body.wide-tab { max-width: 1200px; } }
+    @media (min-width: 1600px) { body.wide-tab { max-width: 1480px; } }
+    .app-header {
+      display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+      background: #fff; border-bottom: 1px solid #e0e0e0;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .app-header h1 { font-size: 14px; font-weight: 700; flex: 0 0 auto; }
+    .app-header .version { font-size: 11px; color: #aaa; }
+    /* v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory IDB 移送 UI */
+    .migrate-area { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+    .migrate-area button {
+      padding: 4px 12px; font-size: 11px; cursor: pointer; border-radius: 4px;
+      border: 1px solid #4a90e2; background: #fff; color: #1a4d8c; font-weight: 600; font-family: inherit;
+      white-space: nowrap;
+    }
+    .migrate-area button:hover:not(:disabled) { background: #e0efff; }
+    .migrate-area button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .migrate-area .migrate-status {
+      font-size: 10px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .migrate-area .migrate-status.migrated { color: #1a8a4a; font-weight: 600; }
+    /* 削除処理有効化トグル */
+    .delete-mode-toggle {
+      display: flex; align-items: center; gap: 5px; cursor: pointer;
+      font-size: 12px; font-weight: 600; color: #888; margin-right: 14px;
+      user-select: none;
+    }
+    .delete-mode-toggle input[type="checkbox"] {
+      accent-color: #e74c3c; width: 14px; height: 14px; cursor: pointer;
+    }
+    body.delete-mode .delete-mode-toggle { color: #e74c3c; }
+    /* 削除ボタン：通常時は非活性 */
+    .delete-guarded {
+      opacity: 0.35 !important; pointer-events: none !important; cursor: not-allowed !important;
+    }
+    body.delete-mode .delete-guarded {
+      opacity: 1 !important; pointer-events: auto !important; cursor: pointer !important;
+    }
+    .tab-bar-wrap {
+      position: sticky; top: 41px; z-index: 9; background: #fff;
+    }
+    .tab-bar {
+      display: flex; background: #fff; border-bottom: 2px solid #e0e0e0;
+      padding: 0 16px;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .tab-bar::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px;
+      padding: 10px 18px; font-size: 12px; font-weight: 600; cursor: pointer;
+      color: #888; font-family: inherit; white-space: nowrap;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: #4a90e2; }
+    .tab-btn.active { color: #1a56db; border-bottom-color: #4a90e2; }
+    /* タブスクロールインジケーター */
+    .tab-scroll-indicator {
+      position: absolute; top: 0; bottom: 2px;
+      width: 32px; display: flex; align-items: center; justify-content: center;
+      font-size: 16px; color: #aaa; pointer-events: none;
+      opacity: 0; transition: opacity .15s; z-index: 1;
+    }
+    .tab-scroll-indicator.visible { opacity: 1; }
+    .tab-scroll-left  { left:  0; background: linear-gradient(to right, rgba(255,255,255,.96) 55%, transparent); }
+    .tab-scroll-right { right: 0; background: linear-gradient(to left,  rgba(255,255,255,.96) 55%, transparent); }
+    .tab-panel { display: none; padding: 16px; flex-direction: column; gap: 14px; }
+    .tab-panel.active { display: flex; }
+    .section-title {
+      font-size: 11px; font-weight: 700; color: #555;
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px;
+    }
+    .tag-list { display: flex; flex-direction: column; gap: 4px; }
+    .tag-row { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .tag-row-header {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      cursor: pointer; user-select: none; transition: background .1s;
+    }
+    .tag-row-header:hover { background: #f5f8ff; }
+    .tag-row-toggle { font-size: 10px; color: #aaa; transition: transform .15s; }
+    .tag-row-toggle.open { transform: rotate(90deg); }
+    .tag-row-name { flex: 1; font-size: 13px; font-weight: 700; color: #1a56db; }
+    .tag-row-count { font-size: 11px; color: #999; }
+    .tag-row-edit {
+      margin-left: auto; background: none;
+      border: 1px solid #c0cfe8; cursor: pointer; color: #4a6fa5;
+      font-size: 11px; padding: 2px 8px; border-radius: 4px;
+      font-family: inherit; white-space: nowrap;
+    }
+    .tag-row-edit:hover { color: #1a56db; background: #eef3ff; border-color: #b0c8f0; }
+    .tag-row-del {
+      background: none; border: none; cursor: pointer;
+      font-size: 14px; color: #ccc; padding: 2px 4px; border-radius: 3px;
+    }
+    .tag-row-del:hover { color: #e74c3c; background: #fde; }
+    .dest-list { border-top: 1px solid #f0f0f0; display: none; flex-direction: column; }
+    .dest-list.open { display: flex; }
+    .dest-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 12px 7px 28px; border-bottom: 1px solid #f5f5f5; background: #fafbff;
+    }
+    .dest-item:last-child { border-bottom: none; }
+    .dest-item-icon { font-size: 14px; flex-shrink: 0; }
+    .dest-item-body { flex: 1; overflow: hidden; }
+    .dest-item-label-wrap { display: flex; align-items: center; gap: 4px; }
+    .dest-item-label {
+      font-size: 12px; font-weight: 600; color: #333;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+    }
+    .dest-item-label-input {
+      font-size: 12px; font-weight: 600; border: 1px solid #d0d0d0;
+      border-radius: 4px; padding: 2px 6px; outline: none; font-family: inherit; width: 180px;
+    }
+    .dest-item-label-input:focus { border-color: #4a90e2; }
+    .dest-item-path {
+      font-size: 11px; color: #999; font-family: "Consolas", monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .dest-item-drag { cursor: grab; font-size: 14px; color: #ccc; flex-shrink: 0; padding: 0 2px; }
+    .dest-item-drag:active { cursor: grabbing; }
+    .dest-item.dragging { opacity: .4; }
+    .dest-item.drag-over { border-top: 2px solid #4a90e2; }
+    .dest-item-actions { display: flex; gap: 3px; flex-shrink: 0; }
+    .dest-item-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 13px; color: #bbb; padding: 3px 5px; border-radius: 3px;
+    }
+    .dest-item-btn:hover { background: #f0f0f0; color: #555; }
+    .dest-item-btn.del:hover { background: #fde; color: #e74c3c; }
+
+    /* 保存先追加ボタン・フォーム */
+    .dest-add-btn {
+      display: block; width: 100%; padding: 6px 0; margin-top: 2px;
+      background: none; border: 1px dashed #ccc; border-radius: 5px;
+      color: #888; font-size: 12px; cursor: pointer; transition: all .15s;
+    }
+    .dest-add-btn:hover { background: #f5f8ff; border-color: #4a90e2; color: #4a90e2; }
+    .dest-add-form {
+      display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+      border-top: 1px solid #eee;
+    }
+    .dest-add-input {
+      flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid #ccc;
+      border-radius: 4px; font-family: inherit;
+    }
+    .dest-add-input:focus { border-color: #4a90e2; outline: none; }
+    .dest-add-confirm, .dest-add-cancel {
+      padding: 4px 10px; font-size: 12px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #ccc; background: #f8f8f8; color: #555;
+    }
+    .dest-add-confirm:hover { background: #4a90e2; color: #fff; border-color: #4a90e2; }
+    .dest-add-cancel:hover { background: #eee; }
+
+    /* 新規タグ追加ボタン・フォーム */
+    .tag-add-btn {
+      display: block; width: 100%; padding: 8px 0; margin-bottom: 6px;
+      background: none; border: 1px dashed #b0c8f0; border-radius: 6px;
+      color: #4a90e2; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s;
+    }
+    .tag-add-btn:hover { background: #eef3ff; border-color: #4a90e2; }
+    .tag-add-form {
+      display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; margin-bottom: 6px;
+      background: #f9fbff; border: 1px solid #d0ddf0; border-radius: 6px;
+    }
+    .tag-add-name, .tag-add-path {
+      flex: 1; min-width: 120px; padding: 5px 8px; font-size: 12px;
+      border: 1px solid #ccc; border-radius: 4px; font-family: inherit;
+    }
+    .tag-add-name:focus, .tag-add-path:focus { border-color: #4a90e2; outline: none; }
+    .tag-add-actions { display: flex; gap: 6px; }
+    .tag-add-confirm, .tag-add-cancel {
+      padding: 5px 12px; font-size: 12px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #ccc; background: #f8f8f8; color: #555;
+    }
+    .tag-add-confirm:hover { background: #4a90e2; color: #fff; border-color: #4a90e2; }
+    .tag-add-cancel:hover { background: #eee; }
+
+    .empty-state { text-align: center; padding: 32px 16px; color: #aaa; font-size: 12px; line-height: 1.8; }
+    .empty-state .emoji { font-size: 32px; display: block; margin-bottom: 8px; }
+    .bm-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .bm-list { display: flex; flex-direction: column; }
+    .bm-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-bottom: 1px solid #f5f5f5; background: #fffdf5;
+    }
+    .bm-item:last-child { border-bottom: none; }
+    .bm-item-icon { font-size: 15px; flex-shrink: 0; }
+    .bm-item-body { flex: 1; overflow: hidden; }
+    .bm-item-label {
+      font-size: 12px; font-weight: 600; color: #7a5500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bm-item-label-input {
+      font-size: 12px; font-weight: 600; border: 1px solid #d0d0d0;
+      border-radius: 4px; padding: 2px 6px; outline: none; font-family: inherit; width: 180px; color: #7a5500;
+    }
+    .bm-item-label-input:focus { border-color: #e8a000; }
+    .bm-item-path {
+      font-size: 10px; color: #bbb; font-family: "Consolas", monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bm-item-actions { display: flex; gap: 3px; flex-shrink: 0; }
+    .bm-item-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 13px; color: #bbb; padding: 3px 5px; border-radius: 3px;
+    }
+    .bm-item-btn:hover { background: #f0f0f0; color: #555; }
+    .bm-item-btn.del:hover { background: #fde; color: #e74c3c; }
+    .bm-item-drag { cursor: grab; font-size: 14px; color: #ccc; flex-shrink: 0; }
+    .bm-item-drag:active { cursor: grabbing; }
+    .bm-item.dragging { opacity: .4; }
+    .bm-item.drag-over { border-top: 2px solid #e8a000; }
+    .bm-add-row {
+      display: flex; gap: 6px; padding: 8px 12px;
+      border-top: 1px solid #e8e8e8; background: #fafafa;
+    }
+    .bm-add-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 5px 8px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .bm-add-input:focus { border-color: #e8a000; }
+    .bm-add-btn {
+      background: #e8a000; color: #fff; border: none; border-radius: 5px;
+      padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .bm-add-btn:hover { background: #cc8f00; }
+    .root-path-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+    .root-path-row {
+      display: flex; gap: 6px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #f0f0f0;
+    }
+    .root-path-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 6px 9px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .root-path-input:focus { border-color: #4a90e2; }
+    .root-path-btn {
+      background: #4a90e2; color: #fff; border: none; border-radius: 5px;
+      padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .root-path-btn:hover:not(:disabled) { background: #3a7fd5; }
+    .root-path-btn:disabled { background: #b0c8e8; color: #fff; cursor: not-allowed; opacity: .6; }
+    .root-path-clear {
+      background: #f0f0f0; color: #555; border: 1px solid #d0d0d0;
+      border-radius: 5px; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .root-path-clear:hover { background: #e0e0e0; }
+    .priority-row {
+      display: flex; align-items: center; gap: 16px; padding: 9px 12px; font-size: 12px; color: #555;
+    }
+    .priority-label { font-weight: 600; color: #444; white-space: nowrap; }
+    .priority-option { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+    .priority-option input[type="radio"] { accent-color: #4a90e2; cursor: pointer; }
+    .backup-section {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .backup-note {
+      font-size: 11px; color: #e07800; background: #fff8ee;
+      border: 1px solid #f5d08a; border-radius: 5px; padding: 7px 10px; line-height: 1.6;
+    }
+    .export-path-row {
+      display: flex; flex-direction: column; gap: 5px;
+      background: #f8faff; border: 1px solid #dde8f8; border-radius: 6px; padding: 9px 11px;
+    }
+    .export-path-label {
+      font-size: 11px; font-weight: 700; color: #555;
+    }
+    .export-path-inputs {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .export-path-inputs input[type="text"] {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 5px 8px; font-size: 12px; outline: none; font-family: inherit;
+    }
+    .export-path-inputs input[type="text"]:focus { border-color: #4a90e2; }
+    .export-path-inputs button {
+      background: #4a90e2; color: #fff; border: none; border-radius: 5px;
+      padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .export-path-inputs button:disabled { background: #b0c8e8; cursor: not-allowed; opacity: .6; }
+    .export-path-inputs button:last-child {
+      background: #f0f0f0; color: #555; border: 1px solid #d0d0d0;
+    }
+    .export-path-inputs button:hover:not(:disabled) { opacity: .85; }
+    .export-auto-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: #444; cursor: pointer; user-select: none;
+    }
+    .export-auto-label input[type="checkbox"] { accent-color: #4a90e2; cursor: pointer; }
+    .backup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .backup-btn {
+      display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px; border-radius: 6px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      border: 1px solid transparent; font-family: inherit; transition: opacity .15s;
+    }
+    .backup-btn:hover { opacity: .85; }
+    .backup-btn.export { background: #4a90e2; color: #fff; }
+    .backup-btn.import { background: #f0f0f0; color: #444; border-color: #d0d0d0; }
+
+    /* v1.27.0 GROUP-19 Phase A: 取り込み予定フォルダリストのタブバー */
+    .ext-fl-tab {
+      background: #eef2f7; border: 1px solid #c0cee0; border-bottom: none;
+      border-radius: 5px 5px 0 0;
+      padding: 4px 12px; font-size: 12px; font-family: inherit;
+      color: #5b6a80; cursor: pointer;
+      position: relative; top: 1px;
+      max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ext-fl-tab:hover { background: #f5f8fc; color: #2c3e50; }
+    .ext-fl-tab.active {
+      background: #fff; color: #1a56db; font-weight: 600;
+      border-bottom: 1px solid #fff;
+      z-index: 1;
+    }
+    /* v1.28.0 GROUP-19 Phase C: ルート別タブの D&D 並び替え用 */
+    .ext-fl-tab[draggable="true"] { cursor: grab; }
+    .ext-fl-tab[draggable="true"]:active { cursor: grabbing; }
+    /* v1.43.0 GROUP-19 Phase D: 完了履歴タブの D&D 並び替え用（同パターン） */
+    .ext-completed-tab[draggable="true"] { cursor: grab; }
+    .ext-completed-tab[draggable="true"]:active { cursor: grabbing; }
+    .ext-fl-tab.dragging { opacity: 0.5; }
+    .ext-fl-tab.drag-over { border-left: 3px solid #4a90e2; }
+    .import-result {
+      font-size: 11px; padding: 8px 12px; border-radius: 5px;
+      display: none; line-height: 1.8; white-space: pre-wrap; font-family: "Consolas", monospace;
+    }
+    .import-result.success { display: block; background: #eafaf1; color: #1a7a40; border: 1px solid #a3d9b8; }
+    .import-result.error   { display: block; background: #fdf0f0; color: #c0392b; border: 1px solid #f5b8b8; }
+    .log-section { background: #111; border-radius: 8px; overflow: hidden; font-family: "Consolas", "Courier New", monospace; }
+    .log-toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+      background: #222; border-bottom: 1px solid #333;
+    }
+    .log-toolbar-title { font-size: 11px; font-weight: 700; color: #aaa; flex: 1; }
+    .log-btn {
+      background: #333; border: 1px solid #444; border-radius: 4px;
+      color: #ccc; font-size: 11px; font-weight: 600; padding: 3px 10px; cursor: pointer; font-family: inherit;
+    }
+    .log-btn:hover { background: #444; color: #fff; }
+    .log-btn.danger:hover { background: #c0392b; border-color: #e74c3c; }
+    .log-list { max-height: 420px; overflow-y: auto; padding: 6px 0; }
+    .log-list::-webkit-scrollbar { width: 6px; }
+    .log-list::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+    .log-entry {
+      display: flex; gap: 8px; padding: 3px 12px; font-size: 11px; line-height: 1.5;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: #666; flex-shrink: 0; white-space: nowrap; }
+    .log-level { font-weight: 700; flex-shrink: 0; width: 38px; text-align: center; }
+    .log-level.INFO  { color: #4a9; }
+    .log-level.WARN  { color: #ea0; }
+    .log-level.ERROR { color: #e55; }
+    .log-msg { color: #ddd; flex: 1; word-break: break-all; }
+    .log-detail { color: #777; font-size: 10px; word-break: break-all; }
+    .log-empty { padding: 20px; text-align: center; color: #555; font-size: 11px; }
+    /* ================================================================
+       保存履歴タブ
+       ================================================================ */
+    #tab-history { height: calc(100vh - 90px); }
+    .history-toolbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 14px; background: #f3f4f8; border-bottom: 1px solid #dde2f0;
+      flex-shrink: 0; position: sticky; top: 41px; z-index: 5;
+    }
+    .history-toolbar-info {
+      display: flex; gap: 10px; align-items: center; font-size: 11px; color: #888; flex: 1;
+    }
+    .history-toolbar-info span { color: #4a90e2; font-weight: 600; }
+    .history-toolbar-actions {
+      display: flex; flex-direction: column; gap: 5px; width: 100%;
+    }
+    .hist-toolbar-btns-row {
+      display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    }
+    .hist-toolbar-filters-row {
+      display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+    }
+    .hist-toolbar-filters-row input[type="text"] {
+      width: 160px; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
+    }
+    .hist-toolbar-filters-row input[type="text"]:focus { border-color: #4a90e2; }
+    /* v1.32.2 GROUP-28 mvdl：形式フィルタープルダウン（旧 GIF のみチェックボックス） */
+    .hist-format-filter {
+      font-size: 11px; color: #444; cursor: pointer;
+      border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 8px; background: #fff; white-space: nowrap;
+    }
+    .hist-format-filter:focus { border-color: #4a90e2; outline: none; }
+    /* 絞り込みチップ化（v1.21.1） */
+    .hist-chip-wrap {
+      position: relative;
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center;
+      min-width: 160px; max-width: 360px;
+      border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 2px 4px; background: #fff; cursor: text;
+    }
+    .hist-chip-wrap.focused { border-color: #4a90e2; }
+    .hist-chip-wrap input[type="text"].hist-chip-input {
+      border: none !important; padding: 2px 4px !important;
+      width: auto !important; min-width: 60px; flex: 1;
+      font-size: 11px; font-family: inherit; outline: none;
+    }
+    .hist-chip-wrap input[type="text"].hist-chip-input:focus { border-color: transparent !important; }
+    .hist-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: #ddeaff; border: 1px solid #4a90e2; color: #2c5aa0;
+      border-radius: 10px; padding: 1px 6px; font-size: 11px;
+      white-space: nowrap;
+    }
+    .hist-chip.author { background: #e8f5e9; border-color: #4caf50; color: #2e6e3c; }
+    .hist-chip button {
+      background: none; border: none; cursor: pointer;
+      color: inherit; font-size: 11px; padding: 0; line-height: 1;
+    }
+    .hist-chip button:hover { color: #e74c3c; }
+    .hist-chip-suggest {
+      position: absolute; top: 100%; left: 0; z-index: 20;
+      min-width: 160px; max-width: 280px;
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+      max-height: 160px; overflow-y: auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,.12);
+      display: none; margin-top: 2px;
+    }
+    .hist-chip-suggest.visible { display: block; }
+    .hist-chip-suggest .hist-sug-item {
+      padding: 5px 10px; cursor: pointer; font-size: 12px; color: #1a1a1a;
+    }
+    .hist-chip-suggest .hist-sug-item:hover,
+    .hist-chip-suggest .hist-sug-item.active { background: #f0f4ff; }
+    .hist-btn-sm {
+      background: none; border: none; cursor: pointer;
+      font-size: 11px; color: #aaa; padding: 2px 5px; border-radius: 3px;
+    }
+    .hist-btn-sm:hover { color: #e74c3c; }
+    .hist-btn {
+      background: #f0f0f0; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .hist-btn.danger { background: #fde; border-color: #f5b8b8; color: #c0392b; }
+    .hist-btn.danger:hover { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+    .hist-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .hist-pager {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; padding: 5px 14px; background: #f8f9fd;
+      border-bottom: 1px solid #e8ecf5; font-size: 11px; color: #666;
+    }
+    .hist-pager:empty { display: none; }
+    .hist-pager-btn {
+      background: #fff; border: 1px solid #c8d0e8; border-radius: 5px;
+      padding: 3px 10px; font-size: 11px; cursor: pointer; color: #4a90e2; font-family: inherit;
+    }
+    .hist-pager-btn:disabled { opacity: .4; cursor: default; }
+    .hist-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .hist-pager-btn.current { background: #4a90e2; color: #fff; border-color: #3a7fd2; }
+    .hist-pager-dots { color: #aaa; font-size: 12px; padding: 0 2px; user-select: none; }
+    .hist-pager-info { color: #888; white-space: nowrap; }
+    .hist-page-size-select {
+      border: 1px solid #c8d0e8; border-radius: 4px; padding: 2px 4px;
+      font-size: 11px; background: #fff; color: #444; cursor: pointer; font-family: inherit;
+    }
+    .history-grid {
+      flex: 1; overflow-y: auto;
+      display: flex; flex-wrap: wrap; align-content: flex-start;
+      gap: 10px; padding: 10px 8px;  /* GROUP-75-grid-margin v1.46.19：14px→8px、左右合計 12px 余裕、modal 側 padding=8px と整合 */
+      background: #f5f6fa;
+      /* GROUP-78 v1.46.20：v1.46.19 の `resize: horizontal` を撤去（右下角のみのハンドル制約）、
+         左右 edge に custom drag handle を配置（.history-grid-handle-left/right）。
+         max-width も `100%` から `calc(100vw - 40px)` に緩和し、親エリア（body.wide-tab 720〜1480px）
+         超過の拡大を許可。min-width 480px は 2 列維持の最小（v1.46.19 継承）。
+         幅は ResizeObserver で settingsHistGridWidth に永続化、起動時に復元（_setupHistGridResize 参照）。 */
+      min-width: 480px;
+      max-width: calc(100vw - 40px);
+      position: relative;  /* handle 位置決め用 */
+    }
+    /* GROUP-78 v1.46.20：保存履歴 grid 左右 edge ドラッグハンドル */
+    .history-grid-handle-left,
+    .history-grid-handle-right {
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 6px;
+      cursor: col-resize;
+      background: transparent;
+      z-index: 2;
+      user-select: none;
+    }
+    .history-grid-handle-left  { left: -3px; }
+    .history-grid-handle-right { right: -3px; }
+    .history-grid-handle-left:hover,
+    .history-grid-handle-right:hover,
+    .history-grid-handle-left.dragging,
+    .history-grid-handle-right.dragging {
+      background: rgba(74, 144, 226, .35);
+    }
+    .hist-card {
+      background: #fff; border: 1px solid #e0e4f0; border-radius: 8px;
+      width: 220px; height: 360px; overflow: hidden; cursor: pointer; position: relative;
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .hist-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,.1); border-color: #b0c4f0; }
+    .hist-card.selected { border-color: #4a90e2; box-shadow: 0 0 0 2px rgba(74,144,226,.3); }
+    .hist-card-thumb {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+      background: #f0f2f5;
+    }
+    .hist-card-thumb-placeholder {
+      width: 100%; height: 100%; display: flex; align-items: center;
+      justify-content: center; font-size: 40px; background: #f0f2f5; color: #ccc;
+    }
+    /* v1.31.4 GROUP-28 mvdl：動画→GIF 変換エントリ用の音声アイコン */
+    .hist-card-thumb-wrap {
+      width: 100%; height: 100%; position: relative;
+    }
+    .hist-card-audio-icon {
+      position: absolute; left: 6px; bottom: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 2;
+      transition: background 0.15s;
+    }
+    .hist-card-audio-icon:hover { background: rgba(40,90,180,0.85); }
+    .hist-card-audio-icon[data-muted="0"] { background: rgba(40,120,60,0.85); }
+    /* v1.37.0 GROUP-36-fav-tile：お気に入りハートボタン（右上、チェックボックスは左上に統一） */
+    .hist-card-fav-btn {
+      position: absolute; right: 6px; top: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 3;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .hist-card-fav-btn:hover { background: rgba(220,40,80,0.85); transform: scale(1.08); }
+    .hist-card-fav-btn[data-fav="1"] { background: rgba(220,40,80,0.85); }
+    .hist-card-overlay {
+      position: absolute; inset: 0;
+      background: linear-gradient(transparent 30%, rgba(0,0,0,0.78));
+      opacity: 0; transition: opacity .2s;
+      display: flex; flex-direction: column; justify-content: flex-end;
+      padding: 8px; pointer-events: none;
+    }
+    .hist-card:hover .hist-card-overlay { opacity: 1; }
+    .hist-card:hover .hist-card-overlay * { pointer-events: auto; }
+    .hist-card-body {
+      display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px;
+    }
+    .hist-card-filename {
+      font-size: 11px; font-weight: 700; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-source-badge {
+      font-size: 10px; margin-right: 3px; vertical-align: middle; opacity: 0.9;
+    }
+    .hist-card-path {
+      font-size: 10px; color: rgba(255,255,255,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-card-tags { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 2px; }
+    .hist-card-tag {
+      background: rgba(255,255,255,.2); color: #fff; border-radius: 3px;
+      padding: 1px 5px; font-size: 9px; font-weight: 600; cursor: pointer;
+      border: 1px solid rgba(255,255,255,.4);
+      display: inline-flex; align-items: center; gap: 2px;
+    }
+    .hist-card-tag:hover { background: rgba(255,255,255,.4); }
+    .hist-tag-del-btn {
+      display: none; background: none; border: none; color: #ffaaaa;
+      font-size: 10px; cursor: pointer; padding: 0; line-height: 1;
+      font-weight: 700;
+    }
+    body.delete-mode .hist-tag-del-btn { display: inline; }
+    .hist-card-date { font-size: 9px; color: rgba(255,255,255,.55); }
+    .hist-card-pageurl {
+      font-size: 10px; color: #9ab; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+      text-decoration: none; display: block;
+    }
+    a.hist-card-pageurl:hover { color: #cde; text-decoration: underline; }
+    /* v1.45.0 GROUP-46：1 行 3 ボタンに統合（旧 .hist-card-actions-row 廃止）。
+       音声付エントリは padding-left:32px で左下 .hist-card-audio-icon との重複を回避。 */
+    .hist-card-actions {
+      display: flex; gap: 4px;
+    }
+    .hist-card-actions.has-audio { padding-left: 32px; }
+    .hist-card-btn {
+      flex: 1; min-width: 0;
+      background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35); border-radius: 4px;
+      padding: 5px 4px; font-size: 13px; cursor: pointer; color: #fff; font-family: inherit;
+      transition: background .1s; text-align: center; line-height: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-card-btn:hover { background: rgba(255,255,255,.3); border-color: rgba(255,255,255,.6); }
+    .hist-card-btn.del { border-color: rgba(255,100,100,.6); color: #ffaaaa; }
+    .hist-card-btn.del:hover { background: rgba(255,80,80,.25); }
+    .hist-card-btn.addtag { font-size: 12px; }
+    /* v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、タイル :hover で opacity 制御）
+       右上の ❤️ (.hist-card-fav-btn at right:6) との競合回避のため right:36 を起点に左へ並ぶ。 */
+    .hist-card-icon-cluster {
+      position: absolute; top: 6px; right: 36px;
+      display: flex; gap: 4px;
+      z-index: 4;
+      opacity: 0; transition: opacity .2s;
+      pointer-events: none;
+    }
+    .hist-card:hover .hist-card-icon-cluster { opacity: 1; pointer-events: auto; }
+    .hist-card-icon-btn {
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; padding: 0;
+      line-height: 1; font-size: 13px;
+      transition: background .15s, transform .1s;
+    }
+    .hist-card-icon-btn:hover { background: rgba(80,140,220,0.85); transform: scale(1.08); }
+    .hist-card-icon-btn svg { width: 14px; height: 14px; }
+
+    /* 作者チップ（履歴タイル） */
+    .hist-card-author {
+      display: inline-flex; align-items: center;
+      background: rgba(139,92,246,.3); color: #e9d5ff;
+      border-radius: 4px; padding: 1px 6px; font-size: 10px;
+      cursor: pointer; font-weight: 600; margin-bottom: 2px;
+    }
+    .hist-card-author:hover { background: rgba(139,92,246,.5); }
+    .hist-card-author.filter-active { background: rgba(139,92,246,.7); }
+
+    /* 履歴タイル インラインタグエディタ */
+    .hist-tag-editor {
+      margin-top: 5px; background: rgba(0,0,0,0.45);
+      border-radius: 5px; padding: 5px 6px;
+      display: none; flex-direction: column; gap: 4px;
+    }
+    .hist-tag-editor.visible { display: flex; }
+    .hist-tag-editor-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 20px;
+    }
+    .hist-tag-editor-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(74,144,226,0.85); color: #fff;
+      border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 600;
+    }
+    .hist-tag-editor-chip button {
+      background: none; border: none; cursor: pointer; color: #fff;
+      font-size: 11px; line-height: 1; padding: 0;
+    }
+    .hist-tag-editor-chip button:hover { color: #faa; }
+    .hist-tag-editor-input-row {
+      display: flex; gap: 4px; align-items: center; position: relative;
+    }
+    .hist-tag-editor-input {
+      flex: 1; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px;
+      background: rgba(255,255,255,0.15); color: #fff; font-size: 11px;
+      padding: 2px 6px; outline: none; font-family: inherit;
+    }
+    .hist-tag-editor-input::placeholder { color: rgba(255,255,255,0.5); }
+    .hist-tag-editor-input:focus { border-color: rgba(255,255,255,0.7); }
+    .hist-tag-editor-confirm {
+      background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
+      padding: 2px 7px; font-family: inherit; transition: background .1s; white-space: nowrap;
+    }
+    .hist-tag-editor-confirm:hover { background: rgba(255,255,255,0.4); }
+    .hist-tag-editor-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 100px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px;
+    }
+    .hist-tag-editor-suggestions.visible { display: block; }
+    .hist-tag-editor-suggestions .suggestion-item {
+      padding: 5px 9px; cursor: pointer; font-size: 11px; color: #1a1a1a;
+    }
+    .hist-tag-editor-suggestions .suggestion-item:hover { background: #f0f4ff; }
+
+    /* 情報を編集 オーバーレイ */
+    .hist-info-editor {
+      display: none; position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.65);
+      align-items: center; justify-content: center;
+    }
+    .hist-info-editor.open { display: flex; }
+    .hist-info-editor-inner {
+      background: #263545; border-radius: 10px;
+      padding: 18px 22px; max-width: 500px; width: 92%;
+      max-height: 85vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+      color: #fff; font-size: 12px;
+    }
+    .hist-info-editor-title {
+      font-size: 13px; font-weight: 700; color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 8px; margin-bottom: 2px;
+    }
+    .hist-info-editor-preview {
+      display: flex; justify-content: center;
+    }
+    .hist-info-thumb {
+      width: 220px; max-width: 100%; border-radius: 6px;
+      object-fit: contain; background: rgba(0,0,0,.3);
+      aspect-ratio: 11/18;
+    }
+    .hist-info-field-group {
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .hist-info-field-label {
+      font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600;
+    }
+    .hist-author-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 16px;
+    }
+    .hist-author-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(200,220,255,0.25); color: #d0e8ff;
+      border-radius: 10px; padding: 1px 6px; font-size: 10px;
+    }
+    .hist-author-chip button {
+      background: none; border: none; cursor: pointer;
+      color: rgba(200,200,255,0.7); font-size: 11px; padding: 0 0 0 2px; line-height: 1;
+    }
+    .hist-author-chip button:hover { color: #faa; }
+    .hist-author-input-row {
+      display: flex; align-items: center; gap: 4px; position: relative;
+    }
+    .hist-author-input {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; color: #fff; font-size: 10px;
+      padding: 2px 6px; font-family: inherit; outline: none; flex: 1; min-width: 0;
+    }
+    .hist-author-input::placeholder { color: rgba(255,255,255,0.5); }
+    .hist-author-input:focus { border-color: rgba(255,255,255,0.7); }
+    .hist-author-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 100px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px;
+    }
+    .hist-path-input {
+      background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; color: #fff; font-size: 10px;
+      padding: 2px 6px; font-family: inherit; outline: none; width: 100%; box-sizing: border-box;
+    }
+    .hist-path-input::placeholder { color: rgba(255,255,255,0.5); }
+    .hist-path-input:focus { border-color: rgba(255,255,255,0.7); }
+    .hist-info-editor-actions {
+      display: flex; gap: 5px; justify-content: flex-end; margin-top: 2px;
+    }
+    .hist-info-editor-cancel {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; cursor: pointer; color: rgba(255,255,255,0.7); font-size: 10px;
+      padding: 2px 8px; font-family: inherit;
+    }
+    .hist-info-editor-cancel:hover { background: rgba(255,255,255,0.2); }
+    .hist-info-editor-save {
+      background: rgba(100,200,100,0.3); border: 1px solid rgba(100,200,100,0.5);
+      border-radius: 4px; cursor: pointer; color: #aeffa0; font-size: 10px;
+      padding: 2px 8px; font-family: inherit; font-weight: 600;
+    }
+    .hist-info-editor-save:hover { background: rgba(100,200,100,0.5); }
+
+    /* 作者タブ */
+    .author-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+    .author-empty { padding: 24px; text-align: center; font-size: 12px; color: #bbb; }
+    .author-row {
+      border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;
+    }
+    .author-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; background: #f8f9fa; cursor: pointer;
+    }
+    .author-name {
+      font-size: 13px; font-weight: 600; color: #1a1a1a; flex: 1;
+    }
+    .author-dest-toggle {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; color: #666; cursor: pointer;
+    }
+    .author-dest-toggle input[type="checkbox"] { accent-color: #7c3aed; }
+    .author-del-btn {
+      background: none; border: none; cursor: pointer; color: #e74c3c;
+      font-size: 12px; padding: 2px 6px; border-radius: 4px;
+    }
+    .author-del-btn:hover { background: #fde; }
+    .author-dest-list {
+      padding: 8px 12px; border-top: 1px solid #f0f0f0; display: flex; flex-direction: column; gap: 4px;
+    }
+    .author-dest-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 6px; font-size: 11px; background: #fafafa; border-radius: 4px;
+    }
+    .author-dest-item .dest-path { flex: 1; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .author-dest-item .dest-del-btn {
+      background: none; border: none; cursor: pointer; color: #e74c3c; font-size: 11px; padding: 0 4px;
+    }
+    .author-add-dest-row {
+      display: flex; gap: 4px; padding: 6px 12px; border-top: 1px solid #f0f0f0;
+    }
+    .author-add-dest-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 4px;
+      padding: 3px 7px; font-size: 11px; outline: none; font-family: inherit;
+    }
+    .author-add-dest-btn {
+      background: #7c3aed; color: #fff; border: none; border-radius: 4px;
+      padding: 3px 10px; font-size: 11px; cursor: pointer; font-family: inherit;
+    }
+    .author-add-dest-btn:hover { background: #6d28d9; }
+    .hist-select-box {
+      position: absolute; top: 6px; left: 6px;
+      width: 16px; height: 16px; accent-color: #4a90e2; cursor: pointer;
+      z-index: 3;
+    }
+    .hist-empty {
+      width: 100%; padding: 40px; text-align: center; color: #aaa; font-size: 12px;
+    }
+
+    .status-bar {
+      position: sticky; bottom: 0; padding: 8px 16px; background: #fff;
+      border-top: 1px solid #e8e8e8; font-size: 11px; color: #27ae60;
+      min-height: 32px; display: flex; align-items: center; transition: opacity .3s;
+    }
+    .status-bar.hidden { opacity: 0; }
+
+    /* ⑤ ライトボックス */
+    .lightbox-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.82);
+      z-index: 9999; display: flex; align-items: center; justify-content: center;
+      cursor: zoom-out;
+    }
+    .lightbox-overlay img {
+      max-width: 90vw; max-height: 90vh;
+      border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+      object-fit: contain; cursor: default;
+    }
+    .lightbox-overlay .lb-close {
+      position: fixed; top: 18px; right: 22px;
+      background: rgba(255,255,255,.15); border: none; color: #fff;
+      font-size: 22px; width: 36px; height: 36px; border-radius: 50%;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background .15s;
+    }
+    .lightbox-overlay .lb-close:hover { background: rgba(255,255,255,.3); }
+    .lightbox-overlay .lb-info {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 5px 14px;
+      border-radius: 20px; white-space: nowrap; max-width: 80vw;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* ⑥ 期間削除ダイアログ */
+    .period-dialog-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      z-index: 9998; display: flex; align-items: center; justify-content: center;
+    }
+    .period-dialog {
+      background: #fff; border-radius: 10px; padding: 22px 26px 18px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.25); width: 340px;
+      font-family: inherit;
+    }
+    .period-dialog h3 { margin: 0 0 14px; font-size: 14px; color: #2c3e50; }
+    .period-dialog .pd-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px;
+    }
+    .period-dialog .pd-row label { color: #555; width: 60px; flex-shrink: 0; }
+    .period-dialog .pd-row input[type=date] {
+      flex: 1; border: 1px solid #ccc; border-radius: 5px;
+      padding: 5px 8px; font-size: 13px; font-family: inherit;
+    }
+    .period-dialog .pd-preview {
+      font-size: 12px; color: #e67e22; font-weight: 600;
+      min-height: 18px; margin: 6px 0 14px;
+    }
+    .period-dialog .pd-footer {
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    .period-dialog .pd-footer button {
+      padding: 7px 18px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid transparent;
+    }
+    .pd-cancel { background: #f0f0f0; color: #555; border-color: #ddd !important; }
+    .pd-ok     { background: #e74c3c; color: #fff; font-weight: 600; }
+    .pd-ok:disabled { background: #f0b0a8; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+  <div class="app-header">
+    <h1>🖼 BorgesTag 設定</h1>
+    <!-- v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory IDB 移送 UI（中央配置） -->
+    <div class="migrate-area">
+      <button id="btn-migrate-savehistory" type="button" title="保存履歴を IndexedDB のみで管理する形式へ移送します。移送後はメモリ消費が大幅減（broadcast コスト解消）">📦 saveHistory を IDB へ移送</button>
+      <span class="migrate-status" id="migrate-status">現在：storage.local + IDB shadow</span>
+    </div>
+    <label class="delete-mode-toggle" id="delete-mode-label" title="ONにした場合のみ削除ボタンが活性化します">
+      <input type="checkbox" id="chk-delete-mode" />
+      <span>削除処理を有効にする</span>
+    </label>
+    <span class="version" id="app-version">v…</span>
+  </div>
+
+  <div class="tab-bar-wrap">
+    <div class="tab-bar">
+      <!-- v1.23.3: GROUP-9-order タブ順を「全般 → 保存履歴 → 外部取り込み → ブックマーク → タグ・保存先 → 権利者 → SNS連携」に変更 -->
+      <button class="tab-btn active" data-tab="general">⚙️ 全般</button>
+      <button class="tab-btn"        data-tab="history">📋 保存履歴</button>
+      <button class="tab-btn"        data-tab="external-import">📥 外部取り込み</button>
+      <button class="tab-btn"        data-tab="bookmarks">⭐ ブックマーク</button>
+      <button class="tab-btn"        data-tab="tags">🏷 タグ・保存先</button>
+      <button class="tab-btn"        data-tab="authors">👤 権利者</button>
+      <button class="tab-btn"        data-tab="sns">🔗 SNS連携</button>
+    </div>
+    <div class="tab-scroll-indicator tab-scroll-left">‹</div>
+    <div class="tab-scroll-indicator tab-scroll-right">›</div>
+  </div>
+
+  <!-- ① 全般タブ（バックアップ・初期フォルダ・ログ） -->
+  <div class="tab-panel active" id="tab-general">
+
+    <div>
+      <div class="section-title">バックアップ・復元</div>
+      <div class="backup-section">
+        <div class="backup-note" id="tmp-addon-note" style="display:none">
+          ⚠️ 「一時的なアドオン」としてインストールした場合、Firefox を閉じると
+          保存先候補のデータが消えます。<br>
+          更新前に <strong>エクスポート</strong> し、再読み込み後に <strong>インポート</strong> してください。
+        </div>
+        <!-- エクスポート先フォルダ設定 -->
+        <div class="export-path-row">
+          <label class="export-path-label">標準エクスポート先フォルダ</label>
+          <div class="export-path-inputs">
+            <input type="text" id="export-path-input"
+              placeholder="例: C:\Users\foo\Documents（空欄でブラウザの保存先ダイアログ）" />
+            <button id="export-path-save">設定</button>
+            <button id="export-path-open" title="設定中のフォルダをエクスプローラーで開く" disabled>📂</button>
+            <button id="export-path-clear">クリア</button>
+          </div>
+          <label class="export-auto-label">
+            <input type="checkbox" id="export-auto-save" />
+            設定したフォルダへ確認なしで即エクスポートする
+          </label>
+        </div>
+
+        <!-- 差分エクスポートオプション -->
+        <label class="export-auto-label" style="margin-top:4px;">
+          <input type="checkbox" id="chk-diff-export" />
+          差分エクスポートモード（前回エクスポート以降の新規エントリのみを対象にする）
+        </label>
+
+        <!-- サムネイル埋込オプション（GROUP-26-III / v1.29.1） -->
+        <label class="export-auto-label" style="margin-top:4px;">
+          <input type="checkbox" id="chk-export-thumbs" checked />
+          サムネイル画像をエクスポートに含める
+          <span id="export-thumbs-size-hint" style="color:#888;font-size:.85em;margin-left:8px;"></span>
+        </label>
+
+        <div class="backup-actions">
+          <button class="backup-btn export" id="btn-export">⬇ エクスポート（ZIPファイル保存）</button>
+          <label class="backup-btn import" id="label-import">
+            ⬆ インポート（ZIPファイル読み込み）
+            <input type="file" id="input-import" accept=".json,.zip" style="display:none" />
+          </label>
+        </div>
+        <div class="import-result" id="export-result" style="display:none"></div>
+        <div class="import-result" id="import-result"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">エクスプローラーの初期フォルダ</div>
+      <div class="root-path-section">
+        <div class="root-path-row">
+          <input type="text" class="root-path-input" id="root-path-input"
+            placeholder="例: C:\Users\foo\Pictures（空欄でPC/ドライブ一覧から開始）" />
+          <button class="root-path-btn"   id="root-path-save">設定</button>
+          <button class="root-path-btn" style="background:#f0f0f0;color:#555;border:1px solid #d0d0d0"
+            id="root-path-open" title="設定中のフォルダをエクスプローラーで開く" disabled>📂</button>
+          <button class="root-path-clear" id="root-path-clear">クリア</button>
+        </div>
+        <div class="priority-row">
+          <span class="priority-label">開始フォルダの優先順位：</span>
+          <label class="priority-option">
+            <input type="radio" name="start-priority" value="lastSave" id="priority-lastSave" />
+            前回の保存先を優先
+          </label>
+          <label class="priority-option">
+            <input type="radio" name="start-priority" value="rootPath" id="priority-rootPath" />
+            初期フォルダを優先
+          </label>
+          <span style="font-size:11px;color:#888;margin-left:8px;">※ 即保存ボタンの保存先もこの設定に従います</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">即保存ボタン</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          画像ホバー時に表示される💾ボタンの左に、保存ウィンドウを開かずに即時保存するボタンを表示します。<br>
+          保存先は「開始フォルダの優先順位」の設定に従います。タグは付与されません（連続保存モード中はセッションのタグを引き継ぎます）。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="chk-instant-save" />
+          常に即保存ボタンを表示する
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存後の動作</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          連続保存モード以外でも、保存後にウィンドウを閉じずに最小化して待機します。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="chk-minimize-after-save" />
+          保存後にウィンドウを最小化する（連続保存モード以外でも有効）
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">ファイル名設定</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          保存時のファイル名に各情報を付加します。-（ハイフン）で区切られます。<br>
+          ファイル名に含めることができない文字（\ / : * ? " &lt; &gt; |）は除去されます。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="chk-filename-include-tag" />
+          タグをファイル名に含める
+        </label>
+        <label class="export-auto-label" style="margin-top:6px;">
+          <input type="checkbox" id="chk-filename-include-subtag" />
+          サブタグをファイル名に含める
+        </label>
+        <label class="export-auto-label" style="margin-top:6px;">
+          <input type="checkbox" id="chk-filename-include-author" />
+          権利者名をファイル名に含める
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存履歴の表示モード</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          連続保存モードで保存した画像のグループ化方法を選択します。
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="history-display-mode" value="normal" id="hdm-normal" style="margin-top:2px;accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">①通常表示</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">すべての保存画像を個別タイルで表示します（従来の動作）</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="history-display-mode" value="group" id="hdm-group" style="margin-top:2px;accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">②グループ表示</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">連続保存した画像を1タイルにまとめます。展開ボタンで個別表示に切り替え可能です</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">画像プレビュー(グループ表示)の進行方向</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          グループ内ライトボックスで◀▶ボタンの「次のページ」方向を設定します。
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="group-read-direction" value="rtl" id="grd-rtl" style="accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">◀ 左方向（右→左）</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">◀ ボタンで次ページへ進む（漫画・縦書きコンテンツ向け）</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="group-read-direction" value="ltr" id="grd-ltr" style="accent-color:#4a90e2;" />
+          <div>
+            <div style="font-weight:600;color:#2c3e50;">▶ 右方向（左→右）</div>
+            <div style="font-size:12px;color:#888;margin-top:2px;">▶ ボタンで次ページへ進む（写真・横書きコンテンツ向け）</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">保存ウィンドウの表示件数</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          保存ウィンドウの左カラムに表示する「直近タグ」と「ブックマーク」の最大件数を設定します。
+        </div>
+        <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+            直近タグ：
+            <select id="recent-tag-count-select" style="font-size:12px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 6px;font-family:inherit;">
+              <option value="20">20件</option>
+              <option value="50">50件</option>
+              <option value="100">100件</option>
+            </select>
+          </label>
+          <div style="font-size:11px;color:#888;margin-top:2px;width:100%;">
+            ※ 件数を減らしてもストレージ上の保存データは削除されません
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+            ブックマーク：
+            <select id="bookmark-count-select" style="font-size:12px;border:1px solid #d0d0d0;border-radius:4px;padding:3px 6px;font-family:inherit;">
+              <option value="20">20件</option>
+              <option value="50">50件</option>
+              <option value="100">100件</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">動作ログ</div>
+      <div class="log-section">
+        <div class="log-toolbar">
+          <span class="log-toolbar-title">🗒 最新 200 件</span>
+          <button class="log-btn" id="btn-log-refresh">更新</button>
+          <button class="log-btn danger delete-guarded" id="btn-log-clear">クリア</button>
+        </div>
+        <div class="log-list" id="log-list">
+          <div class="log-empty">ログがありません</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ② ブックマークタブ -->
+  <div class="tab-panel" id="tab-bookmarks">
+    <div>
+      <div class="section-title">ブックマーク管理</div>
+      <div class="bm-section">
+        <div class="bm-list" id="bm-list"></div>
+        <div class="bm-add-row">
+          <input type="text" class="bm-add-input" id="bm-add-path"
+            placeholder="追加するフォルダのパスを入力（例: C:\Users\foo\Pictures）" />
+          <button class="bm-add-btn" id="bm-add-btn">⭐ 追加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ③ タグ・保存先タブ -->
+  <div class="tab-panel" id="tab-tags">
+    <div>
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+        タグ別 保存先管理
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;color:#555">
+          <label for="tag-sort-select">並び順</label>
+          <select id="tag-sort-select" style="font-size:12px;padding:3px 6px;border:1px solid #ccc;border-radius:5px;font-family:inherit">
+            <option value="registered">登録順（古い順）</option>
+            <option value="registered-desc">登録順（新しい順）</option>
+            <option value="name">名前順（昇順）</option>
+            <option value="name-desc">名前順（降順）</option>
+            <option value="count-desc">保存先が多い順</option>
+            <option value="count-asc">保存先が少ない順</option>
+          </select>
+        </div>
+      </div>
+      <div class="tag-list" id="tag-list"></div>
+    </div>
+  </div>
+
+  <!-- 保存履歴タブ -->
+  <div class="tab-panel" id="tab-history" style="padding:0; gap:0;">
+    <div class="history-toolbar">
+      <div class="history-toolbar-info">
+        <span id="hist-count">0 件</span>
+        <span id="hist-storage">保存履歴情報: 計算中</span>
+        <span id="hist-idb">保存サムネイル: 計算中</span>
+        <label style="font-size:11px;color:#888;display:flex;align-items:center;gap:4px;">
+          表示件数:
+          <select id="hist-page-size-select" class="hist-page-size-select" title="1ページの表示件数">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+      </div>
+      <div class="history-toolbar-actions">
+        <!-- 上段：ボタン -->
+        <div class="hist-toolbar-btns-row">
+          <button id="hist-select-all" class="hist-btn" disabled title="絞り込み中の全件を選択">全選択</button>
+          <button id="hist-deselect-all" class="hist-btn" disabled>選択解除</button>
+          <button id="hist-add-tag-selected" class="hist-btn" disabled>🏷 タグ追加</button>
+          <button id="hist-add-author-selected" class="hist-btn" disabled>✏️ 権利者追加</button>
+          <button id="hist-replace-selected" class="hist-btn" disabled title="選択中のエントリから値を選んで置換">🔁 置換</button>
+          <button id="hist-remove-selected" class="hist-btn" disabled title="選択中のエントリから値を選んで除去">➖ 除去</button>
+          <button id="hist-sync-global-tags" class="hist-btn" disabled title="選択中のエントリのタグ・サブタグをグローバルタグに追加し、メインタグの保存先をタグ・保存先タブに反映します">🔄 タグ・保存先反映</button>
+          <button id="hist-group-selected" class="hist-btn" disabled title="選択した履歴を連続保存したグループとしてまとめます">🔴 グループ化</button>
+          <button id="hist-ungroup-selected" class="hist-btn" disabled title="選択したグループを解除します（グループ内の全アイテムのセッションIDを削除）">🔵 グループ解除</button>
+          <button id="hist-audio-toggle-selected" class="hist-btn" disabled title="選択した履歴の音声を一括で再生／停止">🔊 音声 ON/OFF</button>
+          <button id="hist-fav-add-selected" class="hist-btn" disabled title="選択した履歴をお気に入りに追加">❤️ お気に入り追加</button>
+          <button id="hist-fav-remove-selected" class="hist-btn" disabled title="選択した履歴のお気に入りを解除">🤍 お気に入り解除</button>
+          <button id="hist-delete-selected" class="hist-btn danger delete-guarded" disabled>選択削除</button>
+          <button id="hist-delete-period" class="hist-btn danger delete-guarded">期間削除</button>
+          <button id="hist-gen-thumbs" class="hist-btn" title="サムネイルがない履歴に対して保存済み画像からサムネイルを生成します">🖼 サムネイル生成</button>
+        </div>
+        <!-- v1.46.10 GROUP-22 + GROUP-21：絞り込みフィルターを 2 段に分離（入力型 / pulldown 型）、ファイル名絞り込み追加、背景色で視覚区分 -->
+        <!-- 中段：入力型フィルター（chip + input row、薄青背景） -->
+        <div class="hist-toolbar-filters-row" style="background:#eef5ff;border:1px solid #a5c8ee;border-radius:4px;padding:4px 6px;">
+          <div id="hist-filter-wrap" class="hist-chip-wrap" title="タグで絞り込み（複数チップで OR/AND 切替）">
+            <input type="text" id="hist-filter" class="hist-chip-input"
+              placeholder="🔍 タグで絞り込み" autocomplete="off" />
+            <div id="hist-filter-suggest" class="hist-chip-suggest"></div>
+          </div>
+          <button id="hist-filter-clear" class="hist-btn-sm" title="絞り込みクリア" style="display:none">✕</button>
+          <!-- v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive） -->
+          <div id="hist-filename-filter-wrap" class="hist-chip-wrap" title="ファイル名で絞り込み（部分一致、大文字小文字区別なし）">
+            <input type="text" id="hist-filename-filter" class="hist-chip-input"
+              placeholder="📄 ファイル名で絞り込み" autocomplete="off" />
+          </div>
+          <button id="hist-filename-filter-clear" class="hist-btn-sm" title="ファイル名フィルタークリア" style="display:none">✕</button>
+          <div id="hist-author-filter-wrap" class="hist-chip-wrap" title="権利者で絞り込み">
+            <input type="text" id="hist-author-filter" class="hist-chip-input"
+              placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
+            <div id="hist-author-filter-suggest" class="hist-chip-suggest"></div>
+          </div>
+          <button id="hist-author-filter-clear" class="hist-btn-sm" title="権利者フィルタークリア" style="display:none">✕</button>
+        </div>
+        <!-- 下段：pulldown / toggle 型フィルター（薄緑背景） -->
+        <div class="hist-toolbar-filters-row" style="background:#f0f7ee;border:1px solid #b9d8a8;border-radius:4px;padding:4px 6px;margin-top:4px;">
+          <select id="hist-filter-mode" title="検索パターン" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+            <option value="or">OR</option>
+            <option value="and">AND</option>
+          </select>
+          <select id="hist-source-filter" title="取り込み元で絞り込み" style="font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">
+            <option value="">取り込み元: すべて</option>
+            <option value="external_import">📥 外部取り込みのみ</option>
+            <option value="normal">🖱 通常保存のみ</option>
+          </select>
+          <!-- v1.32.2 GROUP-28 mvdl：GIF のみチェックボックスをプルダウン化、音声付きフィルタ追加 -->
+          <select id="hist-format-filter" class="hist-format-filter" title="表示形式で絞り込み">
+            <option value="all">📄 全て</option>
+            <option value="gif">🎞 GIF のみ</option>
+            <option value="audio">🔊 音声付き</option>
+          </select>
+          <!-- v1.37.0 GROUP-36-fav-filter：お気に入りのみ表示する独立トグル -->
+          <button id="hist-fav-filter-toggle" class="hist-btn-sm" title="お気に入りのみ表示" aria-pressed="false" style="font-size:12px;padding:2px 8px;border:1px solid #dde;border-radius:4px;background:#fff;color:#444;cursor:pointer;font-family:inherit;">🤍 お気に入りのみ</button>
+        </div>
+      </div>
+    </div>
+    <div id="hist-pager-top" class="hist-pager"></div>
+    <div class="history-grid" id="hist-grid">
+      <div class="hist-empty">読み込み中…</div>
+    </div>
+    <div id="hist-pager-bottom" class="hist-pager"></div>
+  </div>
+
+  <div class="status-bar hidden" id="status-bar"></div>
+
+  <!-- 作者タブ -->
+  <div class="tab-panel" id="tab-authors">
+    <div>
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+        権利者別 保存先管理
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;color:#555">
+          <span id="author-count-label" style="color:#888;font-size:11px;"></span>
+          <label for="author-sort-select">並び順</label>
+          <select id="author-sort-select" style="font-size:12px;padding:3px 6px;border:1px solid #ccc;border-radius:5px;font-family:inherit">
+            <option value="registered">登録順（古い順）</option>
+            <option value="registered-desc">登録順（新しい順）</option>
+            <option value="name">名前順（昇順）</option>
+            <option value="name-desc">名前順（降順）</option>
+            <option value="count-desc">保存先が多い順</option>
+            <option value="count-asc">保存先が少ない順</option>
+          </select>
+        </div>
+      </div>
+      <div class="author-list" id="author-list">
+        <div class="author-empty">読み込み中…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SNS連携タブ -->
+  <div class="tab-panel" id="tab-sns">
+    <div>
+      <div class="section-title">SNS連携</div>
+      <div style="padding: 24px 16px; color: #888; font-size: 13px; text-align: center; background: #fafafa; border: 1px dashed #d0d0d0; border-radius: 8px; line-height: 1.8;">
+        🔗 SNS連携機能は後日実装予定です。<br>
+        <span style="font-size: 11px; color: #aaa;">Twitter / X・pixiv・Misskey 等との連携機能を予定しています。</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 外部取り込みタブ -->
+  <div class="tab-panel" id="tab-external-import">
+
+    <!-- ========================================================== -->
+    <!-- 共通: 取り込み予定フォルダリスト（v1.22.0 で per-item から共通化）-->
+    <!-- ========================================================== -->
+    <div>
+      <div class="section-title">取り込み予定フォルダリスト</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:8px;">
+          取り込み対象となるルートフォルダを登録します。単体指定、または指定フォルダの直下サブフォルダから複数選択できます（再帰なし）。
+          リストの行はチェック選択して<strong>📦 一括取り込み</strong>または<strong>📥 1枚ずつ取り込み</strong>に渡せます。
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          <input type="text" id="ext-fl-path" placeholder="フォルダパス（例: D:\Pictures\artwork）"
+            style="flex:1;min-width:220px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+          <button id="ext-fl-add-single" class="backup-btn" style="padding:3px 10px;font-size:12px;">＋ 単体登録</button>
+          <button id="ext-fl-add-subfolders" class="backup-btn" style="padding:3px 10px;font-size:12px;">📂 サブフォルダから選択</button>
+        </div>
+        <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
+          <div style="font-size:12px;color:#555;margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span id="ext-fl-picker-title">親フォルダ:</span>
+            <span id="ext-fl-picker-parent" style="color:#2c3e50;font-weight:600;flex:1;min-width:120px;word-break:break-all;"></span>
+          </div>
+          <!-- v1.22.0: ヘッダー一括操作ボタン -->
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+            <button id="ext-fl-picker-all"     class="backup-btn" style="padding:2px 8px;font-size:11px;" title="表示中のサブフォルダを全選択">☑ 全選択</button>
+            <button id="ext-fl-picker-none"    class="backup-btn" style="padding:2px 8px;font-size:11px;" title="表示中のサブフォルダを全解除">☐ 全解除</button>
+            <button id="ext-fl-picker-invert"  class="backup-btn" style="padding:2px 8px;font-size:11px;" title="チェック状態を反転">⇄ 反転</button>
+            <span id="ext-fl-picker-count" style="font-size:11px;color:#666;margin-left:auto;"></span>
+          </div>
+          <div style="font-size:10px;color:#888;margin-bottom:4px;">
+            💡 <strong>Shift+クリック</strong>で範囲選択／<strong>マウスドラッグ</strong>で連続選択／<strong>Alt+ドラッグ</strong>または<strong>Alt+Shift+クリック</strong>で範囲反転
+          </div>
+          <div id="ext-fl-picker-list"
+               style="min-height:300px;max-height:60vh;resize:vertical;overflow:auto;border:1px solid #e0e0e0;border-radius:4px;padding:6px;background:#fff;user-select:none;"></div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <button id="ext-fl-picker-ok" class="backup-btn" style="padding:3px 10px;font-size:12px;">✓ 選択したフォルダを登録</button>
+            <button id="ext-fl-picker-cancel" class="backup-btn" style="padding:3px 10px;font-size:12px;">キャンセル</button>
+          </div>
+        </div>
+        <!-- v1.22.0: 一括操作バー -->
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;padding:6px 8px;background:#fafcff;border:1px solid #e3eaf2;border-radius:4px;">
+          <button id="ext-fl-bulk-all"      class="backup-btn" style="padding:2px 8px;font-size:11px;">☑ 全選択</button>
+          <button id="ext-fl-bulk-none"     class="backup-btn" style="padding:2px 8px;font-size:11px;">☐ 全解除</button>
+          <button id="ext-fl-bulk-invert"   class="backup-btn" style="padding:2px 8px;font-size:11px;">⇄ 反転</button>
+          <span style="border-left:1px solid #d0d0d0;height:16px;margin:0 4px;"></span>
+          <button id="ext-fl-bulk-batch"    class="backup-btn" style="padding:2px 10px;font-size:11px;background:#e8f5e9;border-color:#a5d6a7;">📦 選択を一括取り込み</button>
+          <button id="ext-fl-bulk-peritem"  class="backup-btn" style="padding:2px 10px;font-size:11px;background:#e3f2fd;border-color:#90caf9;">📥 選択を1枚ずつ取り込み</button>
+          <button id="ext-fl-bulk-delete"   class="backup-btn" style="padding:2px 10px;font-size:11px;">🗑 選択を削除</button>
+          <span id="ext-fl-bulk-count" style="font-size:11px;color:#666;margin-left:auto;"></span>
+        </div>
+        <!-- v1.27.0 GROUP-19 Phase A: タブバー（単体 / ルート別）-->
+        <div id="ext-fl-tabbar" style="display:flex;gap:2px;margin-bottom:0;flex-wrap:wrap;border-bottom:1px solid #c0cee0;"></div>
+        <!-- v1.28.0 GROUP-19 Phase B: ソートバー（中央配置） / v1.42.0 GROUP-20: ステータス絞り込みトグル群 -->
+        <div id="ext-fl-sort-bar" style="display:flex;justify-content:center;align-items:center;gap:14px;padding:4px 8px;background:#fafcff;border-bottom:1px solid #e3eaf2;font-size:11px;color:#555;flex-wrap:wrap;">
+          <label style="display:inline-flex;align-items:center;gap:4px;">
+            ソート：
+            <select id="ext-fl-sort-select" style="font-size:11px;padding:2px 6px;border:1px solid #d0d0d0;border-radius:4px;background:#fff;font-family:inherit;cursor:pointer;">
+              <option value="insertion">挿入順</option>
+              <option value="path">パス名</option>
+              <option value="status">ステータス</option>
+              <option value="count">ファイル数</option>
+              <option value="progress">進捗率</option>
+              <option value="thumbsize">サムネ容量</option>
+            </select>
+          </label>
+          <!-- v1.42.0 GROUP-20-tlsbl1: ステータス絞り込み（複数選択 OR、タブ別永続化、初期値「完了」OFF） -->
+          <div id="ext-fl-status-filter-bar" style="display:inline-flex;align-items:center;gap:4px;">
+            <span style="color:#666;">表示:</span>
+            <button class="ext-fl-status-btn" data-status="notstarted" type="button" style="font-size:10px;padding:2px 8px;border:1px solid #95a5a6;border-radius:10px;background:#fff;color:#95a5a6;font-family:inherit;cursor:pointer;font-weight:600;">未開始</button>
+            <button class="ext-fl-status-btn" data-status="inprogress" type="button" style="font-size:10px;padding:2px 8px;border:1px solid #3498db;border-radius:10px;background:#fff;color:#3498db;font-family:inherit;cursor:pointer;font-weight:600;">進行中</button>
+            <button class="ext-fl-status-btn" data-status="done" type="button" style="font-size:10px;padding:2px 8px;border:1px solid #2ecc71;border-radius:10px;background:#fff;color:#2ecc71;font-family:inherit;cursor:pointer;font-weight:600;">完了</button>
+            <button class="ext-fl-status-btn" data-status="empty" type="button" style="font-size:10px;padding:2px 8px;border:1px solid #e67e22;border-radius:10px;background:#fff;color:#e67e22;font-family:inherit;cursor:pointer;font-weight:600;">空</button>
+          </div>
+        </div>
+        <!-- v1.28.0 GROUP-19 Phase C: リサイズ可能なテーブルコンテナ -->
+        <div id="ext-fl-table-container" style="resize:vertical;overflow:auto;min-height:150px;max-height:80vh;border:1px solid #e0e0e0;border-radius:0 0 4px 4px;">
+        <table id="ext-fl-table" style="width:100%;min-width:700px;border-collapse:collapse;font-size:12px;table-layout:fixed;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="padding:5px 4px;text-align:center;border:1px solid #e0e0e0;width:28px;">☑</th>
+              <th style="padding:5px 6px;text-align:center;border:1px solid #e0e0e0;width:60px;">状態</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">フォルダパス</th>
+              <th style="padding:5px 6px;text-align:left;border:1px solid #e0e0e0;width:160px;">操作</th>
+              <th style="padding:5px 6px;text-align:left;border:1px solid #e0e0e0;width:160px;">進捗</th>
+              <th style="padding:5px 6px;text-align:left;border:1px solid #e0e0e0;width:110px;">サムネ <span title="このフォルダに対して取り込み作業中に一時保存されたサムネの件数・合計サイズです。保存済みアイテムのサムネは別管理のため、ここには含まれません。" style="cursor:help;color:#2c3e50;font-size:13px;font-weight:600;">ⓘ</span></th>
+            </tr>
+          </thead>
+          <tbody id="ext-fl-tbody"></tbody>
+        </table>
+        </div>
+        <div id="ext-fl-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;background:#fafafa;border:1px dashed #ddd;border-radius:4px;margin-top:4px;">
+          登録されたフォルダはありません。
+        </div>
+      </div>
+    </div>
+
+    <!-- 形式切替（v1.20.0） -->
+    <div class="ext-mode-switch" style="display:flex;align-items:center;gap:14px;padding:8px 12px;background:#f5f8fb;border:1px solid #d0dae5;border-radius:6px;margin:14px 0 12px;">
+      <span style="font-size:12px;font-weight:600;color:#2c3e50;">形式:</span>
+      <label style="font-size:12px;cursor:pointer;">
+        <input type="radio" name="ext-mode" value="batch" id="ext-mode-batch" checked />
+        一括形式
+      </label>
+      <label style="font-size:12px;cursor:pointer;">
+        <input type="radio" name="ext-mode" value="per_item" id="ext-mode-per-item" />
+        1枚ずつ形式
+      </label>
+      <span id="ext-mode-hint" style="font-size:11px;color:#666;margin-left:auto;"></span>
+    </div>
+
+    <!-- v1.23.4: GROUP-11-carryover-move により既存「1枚ずつ形式の引き継ぎ設定」セクションは削除。
+         チェックボックスは 1枚ずつ取り込みモーダル（ext-b1-overlay）の各項目ラベル横へ移設。 -->
+
+    <!-- ────────── 一括形式（従来） ────────── -->
+    <div id="ext-batch-mode">
+
+    <!-- ① スキャン設定 -->
+    <div>
+      <div class="section-title">スキャン設定</div>
+      <div class="backup-section">
+        <div class="export-path-row">
+          <label class="export-path-label">パス（フォルダまたはファイル）</label>
+          <div class="export-path-inputs">
+            <input type="text" id="ext-scan-path" placeholder="例: D:\Pictures\artwork" style="flex:1;" />
+          </div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">サブフォルダを含め再帰的にスキャンします。</div>
+        </div>
+        <div class="export-path-row" style="margin-top:4px;">
+          <label class="export-path-label">基準日時（これより古い更新日時のファイルを対象）</label>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="datetime-local" id="ext-cutoff-date"
+              style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <span id="ext-cutoff-hint" style="font-size:11px;color:#888;"></span>
+          </div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は全ファイルを対象とします。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ② 除外ワード設定 -->
+    <div>
+      <div class="section-title">除外ワード設定</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:6px;">
+          フォルダパスを区切り文字で分割した際、これらのワードと一致するトークンを除外します。<br>
+          全角半角・大文字小文字を無視して照合します。
+        </div>
+        <div id="ext-exclude-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;min-height:26px;"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <input type="text" id="ext-exclude-input" placeholder="除外ワードを追加（Enter）"
+            style="flex:1;min-width:160px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+          <button id="ext-exclude-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          <button id="ext-exclude-reset" class="backup-btn" style="padding:3px 10px;font-size:12px;">デフォルトに戻す</button>
+        </div>
+        <div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:11px;color:#888;margin-bottom:4px;">実行時のみ除外（storage に保存しない）:</div>
+          <div id="ext-temp-exclude-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <input type="text" id="ext-temp-exclude-input" placeholder="一時的な除外ワード（Enter）"
+              style="flex:1;min-width:160px;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-temp-exclude-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+            <button id="ext-temp-exclude-clear" class="backup-btn" style="padding:3px 10px;font-size:12px;">クリア</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ スキャン実行 -->
+    <div>
+      <div class="section-title">スキャン実行</div>
+      <div class="backup-section">
+        <div class="backup-actions">
+          <button class="backup-btn export" id="btn-ext-scan">🔍 スキャン開始</button>
+        </div>
+        <div class="import-result" id="ext-scan-result" style="display:none;white-space:pre-wrap;"></div>
+      </div>
+    </div>
+
+    <!-- ④ タグ設定（スキャン後に表示） -->
+    <div id="ext-tag-section" style="display:none">
+      <div class="section-title">タグ設定</div>
+      <div class="backup-section">
+        <div style="font-size:12px;color:#555;margin-bottom:8px;">
+          スキャンされたフォルダごとに付与するタグを設定します。
+        </div>
+        <table id="ext-folder-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;white-space:nowrap;width:160px;">フォルダ</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">メインタグ / サブタグ / 権利者</th>
+            </tr>
+          </thead>
+          <tbody id="ext-folder-tbody"></tbody>
+        </table>
+
+        <div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            メインタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
+          </div>
+          <div id="ext-manual-tag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;">
+            <input type="text" id="ext-manual-tag-input" placeholder="メインタグを追加（Enter）"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-manual-tag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+        </div>
+
+        <div style="margin-top:8px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            サブタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
+          </div>
+          <div id="ext-manual-subtag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;">
+            <input type="text" id="ext-manual-subtag-input" placeholder="サブタグを追加（Enter）"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-manual-subtag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+        </div>
+
+        <div style="margin-top:8px;border-top:1px solid #eee;padding-top:8px;">
+          <div style="font-size:12px;color:#555;margin-bottom:4px;">
+            権利者を指定（任意・全エントリに付与）:
+          </div>
+          <div id="ext-author-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
+          <div style="display:flex;gap:6px;position:relative;">
+            <input type="text" id="ext-author-input" placeholder="権利者を追加（Enter）" autocomplete="off"
+              style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            <button id="ext-author-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+          </div>
+          <div id="ext-author-suggestions"
+            style="display:none;position:absolute;background:#fff;border:1px solid #d0d8f0;
+            border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;
+            z-index:100;min-width:160px;font-size:12px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑤ インポート実行（スキャン後に表示） -->
+    <div id="ext-import-section" style="display:none">
+      <div class="section-title">インポート実行</div>
+      <div class="backup-section">
+        <label class="export-auto-label">
+          <input type="checkbox" id="ext-gen-thumb" checked />
+          サムネイルを生成する
+        </label>
+        <div id="ext-thumb-warning" style="font-size:11px;color:#e67e22;margin:4px 0 0 18px;display:none;">
+          ⚠ 対象 <span id="ext-entry-count">0</span> 件。件数が多い場合、生成に時間がかかる恐れがあります。完了前にタブを閉じないでください。
+        </div>
+        <div class="backup-actions" style="margin-top:8px;">
+          <button class="backup-btn export" id="btn-ext-import">⬇ インポート実行</button>
+        </div>
+        <div class="import-result" id="ext-import-result" style="display:none;white-space:pre-wrap;"></div>
+        <div id="ext-import-actions" style="display:none;margin-top:6px;"></div>
+      </div>
+    </div>
+
+    </div><!-- /#ext-batch-mode -->
+
+    <!-- ────────── 1枚ずつ形式（v1.20.0 新規） ────────── -->
+    <div id="ext-per-item-mode" style="display:none;">
+
+      <!-- A. 取り込み予定フォルダリストは v1.22.0 で共通領域へ移設（このタブ上部） -->
+
+      <!-- B. セッション一覧
+           v1.25.0 GROUP-12-merge: 統合テーブル（ext-fl-table）側に「状態／進捗」列として
+           吸収。独立セクションは不要のため非表示化（レガシー要素は JS 互換のため残置）。 -->
+      <div style="display:none;">
+        <div id="ext-sessions-list"></div>
+        <div id="ext-sessions-empty"></div>
+      </div>
+
+      <!-- C. 完了ルートフォルダ履歴は v1.44.0 で ext-per-item-mode の外（両モード共通エリア）へ移設 -->
+
+    </div><!-- /#ext-per-item-mode -->
+
+    <!-- v1.43.0 GROUP-19 Phase D / v1.44.0 hotfix：完了ルートフォルダ履歴は両モード共通で表示する。
+         元は ext-per-item-mode 内（per_item モード時のみ表示）だったが、batch モードの完了も
+         _extCompletedRoots に mode:"single" で記録される設計のため、両モード参照可能な位置に移設。 -->
+    <div style="margin-top:18px;">
+      <div class="section-title">
+        📁 完了ルートフォルダ履歴 <span id="ext-completed-count" style="font-size:11px;color:#888;font-weight:400;"></span>
+      </div>
+      <div style="font-size:12px;color:#555;margin:4px 0 6px;">
+        過去に取り込みが完了したルートフォルダの履歴です（一括形式・1 枚ずつ形式の両方を含みます）。再度取り込もうとしたときに警告します。
+      </div>
+      <!-- v1.43.0 Phase D: タブバー（単体 / ルート別）-->
+      <div id="ext-completed-tabbar" style="display:flex;gap:2px;margin-bottom:0;flex-wrap:wrap;border-bottom:1px solid #c0cee0;"></div>
+      <!-- v1.43.0 Phase D: ソートバー（中央配置、Qu-Y3：進捗率→キャンセル数置換）-->
+      <div id="ext-completed-sort-bar" style="display:flex;justify-content:center;align-items:center;gap:6px;padding:4px 8px;background:#fafcff;border-bottom:1px solid #e3eaf2;font-size:11px;color:#555;flex-wrap:wrap;">
+        <label style="display:inline-flex;align-items:center;gap:4px;">
+          ソート：
+          <select id="ext-completed-sort-select" style="font-size:11px;padding:2px 6px;border:1px solid #d0d0d0;border-radius:4px;background:#fff;font-family:inherit;cursor:pointer;">
+            <option value="insertion">完了日時順</option>
+            <option value="path">パス名</option>
+            <option value="status">ステータス</option>
+            <option value="count">ファイル数</option>
+            <option value="cancelled">キャンセル数</option>
+            <option value="thumbsize">サムネ容量</option>
+          </select>
+        </label>
+      </div>
+      <!-- v1.43.0 Phase D: リサイズ可能なテーブルコンテナ -->
+      <div id="ext-completed-container" style="resize:vertical;overflow:auto;min-height:120px;max-height:60vh;border:1px solid #e0e0e0;border-radius:0 0 4px 4px;">
+        <table id="ext-completed-table" style="width:100%;min-width:600px;border-collapse:collapse;font-size:12px;table-layout:fixed;">
+          <thead>
+            <tr style="background:#f5f5f5;">
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;">ルートパス／サブフォルダ</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:120px;">完了日時</th>
+              <th style="padding:5px 8px;text-align:right;border:1px solid #e0e0e0;width:120px;">件数</th>
+              <th style="padding:5px 8px;text-align:right;border:1px solid #e0e0e0;width:80px;">キャンセル</th>
+              <th style="padding:5px 8px;text-align:left;border:1px solid #e0e0e0;width:60px;">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ext-completed-tbody"></tbody>
+        </table>
+        <div id="ext-completed-empty" style="font-size:12px;color:#888;padding:8px;text-align:center;">
+          履歴はありません。
+        </div>
+      </div>
+    </div>
+
+    <!-- b1 プレビュー・入力オーバーレイ -->
+    <div id="ext-b1-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:stretch;justify-content:center;">
+      <div id="ext-b1-panel" style="display:flex;width:96vw;height:94vh;margin:auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <!-- 左ペイン: プレビュー -->
+        <div id="ext-b1-left" style="flex:1 1 60%;min-width:280px;background:#1a1f24;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:10px;overflow:auto;">
+          <div id="ext-b1-preview-wrap" style="display:flex;align-items:center;justify-content:center;flex:1;width:100%;min-height:0;">
+            <img id="ext-b1-preview-img" alt="preview" style="max-width:100%;max-height:100%;object-fit:contain;background:#222;" />
+          </div>
+          <div id="ext-b1-preview-info" style="font-size:11px;color:#ccc;margin-top:6px;text-align:center;"></div>
+        </div>
+        <!-- リサイザ -->
+        <div id="ext-b1-resizer" style="width:6px;cursor:col-resize;background:#e0e0e0;"></div>
+        <!-- 右ペイン: 入力 -->
+        <div id="ext-b1-right" style="flex:1 1 40%;min-width:320px;max-width:600px;display:flex;flex-direction:column;overflow:hidden;">
+          <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <div style="font-size:13px;font-weight:700;color:#2c3e50;">📥 1枚ずつ取り込み</div>
+              <div id="ext-b1-progress" style="font-size:12px;font-weight:600;display:inline-flex;gap:8px;align-items:center;"></div>
+            </div>
+            <div id="ext-b1-session-name" style="font-size:11px;color:#888;margin-top:2px;"></div>
+
+            <!-- v1.23.0: GROUP-1-a1 ナビゲーション＋ GROUP-4 フィルタ -->
+            <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+              <button id="ext-b1-nav-prev"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="1つ前に戻る">◀</button>
+              <span id="ext-b1-nav-pos" style="font-size:12px;color:#2c3e50;font-weight:600;min-width:64px;text-align:center;">– / –</span>
+              <button id="ext-b1-nav-next"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="絞り込み内で次へ">▶</button>
+              <button id="ext-b1-nav-jump"   class="backup-btn" style="padding:3px 8px;font-size:12px;" title="番号を入力してジャンプ">🔢</button>
+              <button id="ext-b1-nav-thumbs" class="backup-btn" style="padding:3px 8px;font-size:12px;" title="サムネ一覧から選択">🖼</button>
+              <div style="flex:1"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px;margin-top:6px;font-size:11px;color:#555;flex-wrap:wrap;">
+              <span style="font-weight:600;">絞り込み:</span>
+              <label id="ext-b1-flt-done-lbl"    style="padding:2px 7px;border:2px solid #2ecc71;color:#2ecc71;border-radius:3px;cursor:pointer;"><input type="checkbox" id="ext-b1-flt-done"    style="margin-right:3px;vertical-align:middle;" /> 完了</label>
+              <label id="ext-b1-flt-skipped-lbl" style="padding:2px 7px;border:2px solid #e67e22;color:#e67e22;border-radius:3px;cursor:pointer;"><input type="checkbox" id="ext-b1-flt-skipped" style="margin-right:3px;vertical-align:middle;" /> スキップ</label>
+              <label id="ext-b1-flt-pending-lbl" style="padding:2px 7px;border:2px solid #3498db;color:#3498db;border-radius:3px;cursor:pointer;background:#e8f1fb;"><input type="checkbox" id="ext-b1-flt-pending" checked style="margin-right:3px;vertical-align:middle;" /> 残り</label>
+            </div>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:12px 14px;">
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">ファイル名</div>
+            <div id="ext-b1-filename" style="font-size:13px;color:#2c3e50;font-weight:600;margin-bottom:6px;word-break:break-all;"></div>
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">元パス</div>
+            <div id="ext-b1-filepath" style="font-size:11px;color:#666;margin-bottom:6px;word-break:break-all;font-family:'Courier New',monospace;"></div>
+            <div style="font-size:11px;color:#555;margin-bottom:2px;">更新日時</div>
+            <div id="ext-b1-mtime" style="font-size:12px;color:#2c3e50;margin-bottom:10px;"></div>
+
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-size:12px;color:#555;font-weight:600;">保存先</span>
+              <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;">
+                <input type="checkbox" id="ext-b1-carry-savepath" /> 入力した情報を次の編集でも使用する
+              </label>
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:4px;">
+              <input type="text" id="ext-b1-savepath" style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <button id="ext-b1-pick-folder" class="backup-btn" style="padding:3px 10px;font-size:12px;">📁 選ぶ</button>
+            </div>
+            <div id="ext-b1-savepath-sugg" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px;"></div>
+            <!-- v1.23.0: GROUP-1-b 指定保存先への画像コピー作成トグル -->
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:#444;margin-bottom:10px;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="ext-b1-copy-file" />
+              保存先に画像をコピー作成（ファイル名＝タグ・権利者含む通常保存と同形式）
+            </label>
+
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-size:12px;color:#555;font-weight:600;">メインタグ</span>
+              <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;">
+                <input type="checkbox" id="ext-b1-carry-tags" /> 入力した情報を次の編集でも使用する
+              </label>
+            </div>
+            <div id="ext-b1-tag-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-tag-input" placeholder="メインタグを追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-tag-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-size:12px;color:#555;font-weight:600;">サブタグ</span>
+              <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;">
+                <input type="checkbox" id="ext-b1-carry-subtags" /> 入力した情報を次の編集でも使用する
+              </label>
+            </div>
+            <div id="ext-b1-subtag-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-subtag-input" placeholder="サブタグを追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-subtag-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-size:12px;color:#555;font-weight:600;">権利者</span>
+              <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;">
+                <input type="checkbox" id="ext-b1-carry-authors" /> 入力した情報を次の編集でも使用する
+              </label>
+            </div>
+            <div id="ext-b1-author-chips" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;min-height:22px;"></div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;position:relative;">
+              <input type="text" id="ext-b1-author-input" placeholder="権利者を追加（Enter）" autocomplete="off"
+                style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <div id="ext-b1-author-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
+          </div>
+          <div style="padding:10px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;gap:6px;flex-wrap:wrap;">
+            <button id="ext-b1-save-next" class="backup-btn export" style="padding:5px 14px;font-size:12px;font-weight:600;">✓ 保存して次へ</button>
+            <button id="ext-b1-skip" class="backup-btn" style="padding:5px 14px;font-size:12px;">⏭ スキップ</button>
+            <button id="ext-b1-close" class="backup-btn" style="padding:5px 14px;font-size:12px;margin-left:auto;">✕ 中断して閉じる</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- v1.23.0: GROUP-1-a1-サムネ一覧 モーダル -->
+    <div id="ext-b1-thumbs-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1020;align-items:center;justify-content:center;">
+      <div style="display:flex;flex-direction:column;width:80vw;max-width:1100px;height:82vh;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="font-size:13px;font-weight:700;color:#2c3e50;">🖼 サムネ一覧</div>
+          <div id="ext-b1-thumbs-count" style="font-size:11px;color:#666;"></div>
+          <div style="flex:1"></div>
+          <span style="font-size:11px;color:#555;">絞り込み反映済み。クリックでジャンプ。</span>
+          <button id="ext-b1-thumbs-close" class="backup-btn" style="padding:3px 10px;font-size:12px;">✕</button>
+        </div>
+        <div id="ext-b1-thumbs-grid" style="flex:1;overflow-y:auto;padding:10px;display:grid;grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));gap:8px;"></div>
+        <!-- v1.23.2: GROUP-7-a ページングコントロール -->
+        <div style="padding:8px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;align-items:center;gap:10px;justify-content:center;font-size:12px;">
+          <button id="ext-b1-thumbs-prev" class="backup-btn" style="padding:3px 10px;font-size:12px;">◀ 前ページ</button>
+          <span id="ext-b1-thumbs-pageinfo" style="color:#2c3e50;font-weight:600;"></span>
+          <button id="ext-b1-thumbs-next" class="backup-btn" style="padding:3px 10px;font-size:12px;">次ページ ▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- フォルダピッカーモーダル（保存先選択: tree-view を modal と共用するのではなく、簡易ツリーで実装） -->
+    <div id="ext-b1-folder-picker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1010;align-items:center;justify-content:center;">
+      <div style="display:flex;flex-direction:column;width:720px;max-width:90vw;height:560px;max-height:85vh;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.3);">
+        <div style="padding:10px 14px;border-bottom:1px solid #e0e0e0;background:#f5f8fb;display:flex;align-items:center;gap:8px;">
+          <div style="font-size:13px;font-weight:700;color:#2c3e50;">📁 保存先フォルダを選択</div>
+          <button id="ext-b1-fp-close" class="backup-btn" style="padding:3px 10px;font-size:12px;margin-left:auto;">✕</button>
+        </div>
+        <div id="ext-b1-fp-breadcrumb" style="padding:6px 14px;font-size:12px;color:#555;border-bottom:1px solid #eee;background:#fafcff;word-break:break-all;"></div>
+        <div style="flex:1;overflow-y:auto;padding:8px;" id="ext-b1-fp-list"></div>
+        <div style="padding:10px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <button id="ext-b1-fp-mkdir" class="backup-btn" style="padding:3px 10px;font-size:12px;">📁+ 新規フォルダ</button>
+          <button id="ext-b1-fp-tagdir" class="backup-btn" style="padding:3px 10px;font-size:12px;">🏷 タグ名でフォルダ作成</button>
+          <div style="flex:1;"></div>
+          <button id="ext-b1-fp-apply" class="backup-btn export" style="padding:4px 14px;font-size:12px;font-weight:600;">✓ このフォルダに決定</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- v1.37.0 GROUP-38：処理中モーダル／v1.38.0 プレビュー＋完了状態／v1.38.1 auto-close 削除／v1.39.0 GROUP-40 レイアウト調整 -->
+  <div id="busy-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;align-items:center;justify-content:center;font-family:inherit;">
+    <div id="busy-modal-card" style="background:#fff;border-radius:10px;padding:18px 22px;min-width:260px;max-width:80vw;box-shadow:0 8px 24px rgba(0,0,0,0.2);text-align:center;display:inline-block;">
+      <!-- プレビュー画像（v1.39.0 GROUP-40-preview-larger：縦最大 240px、横は画像アスペクト比に合わせて伸縮） -->
+      <img id="busy-modal-preview" style="display:none;max-width:none;max-height:240px;width:auto;height:auto;object-fit:contain;border-radius:6px;margin:0 auto 6px;box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
+      <!-- v1.39.0 GROUP-40-caption：プレビュー画像下のキャプション -->
+      <div id="busy-modal-caption" style="display:none;font-size:10px;color:#888;margin-bottom:10px;line-height:1.3;"></div>
+      <!-- v1.39.0 GROUP-40-spinner-inline / close-right：スピナー（or ✅）をメッセージ左、閉じるボタンを右に同一行配置 -->
+      <div id="busy-modal-status-row" style="display:flex;align-items:center;justify-content:center;gap:8px;min-height:30px;">
+        <div id="busy-modal-spinner" style="width:20px;height:20px;border:3px solid #e0e0e0;border-top-color:#4a90e2;border-radius:50%;animation:busy-spin 0.8s linear infinite;flex:0 0 auto;"></div>
+        <div id="busy-modal-icon" style="display:none;font-size:20px;line-height:1;flex:0 0 auto;">✅</div>
+        <div id="busy-modal-message" style="font-size:13px;color:#333;font-weight:600;line-height:1.4;flex:0 1 auto;">処理中…</div>
+        <button id="busy-modal-close" style="display:none;padding:4px 12px;font-size:12px;border:1px solid #4a90e2;background:#fff;color:#4a90e2;border-radius:4px;cursor:pointer;font-family:inherit;flex:0 0 auto;margin-left:4px;">閉じる</button>
+      </div>
+      <div id="busy-modal-sub" style="font-size:11px;color:#666;margin-top:4px;"></div>
+    </div>
+  </div>
+  <style>
+    @keyframes busy-spin { to { transform: rotate(360deg); } }
+    #busy-modal-overlay[data-shown="1"] { display: flex !important; }
+    #busy-modal-close:hover { background:#4a90e2; color:#fff; }
+  </style>
+
+  <!-- JSZip v3.10.1（MIT、GROUP-26-unzip / v1.30.0）: zip インポート展開用 -->
+  <script src="../vendor/jszip.min.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>

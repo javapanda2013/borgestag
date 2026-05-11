@@ -1,0 +1,6773 @@
+/**
+ * modal.js
+ * 別ウィンドウ表示モーダルの UI スクリプト。
+ * background.js が browser.windows.create() で開く modal.html から読み込まれる。
+ * storage.local の _pendingModal から imageUrl / pageUrl を取得して初期化する。
+ *
+ * セキュリティノート:
+ *   このファイルで innerHTML に動的な値を代入している箇所はすべて、
+ *   escapeHtml() によって HTML 特殊文字をエスケープ済みの文字列のみを使用しています。
+ *   静的解析ツールは動的な値の安全性を検証できないため警告が表示されますが、
+ *   XSS のリスクはありません。
+ */
+
+// ----------------------------------------------------------------
+// v1.45.2 GROUP-35-perf-A Phase C-1: saveHistory IDB shadow ミラーリング helper
+// background.js / settings.js と同等の inline 定義（同一 IDB を共有書込）。
+// 詳細は background.js の同名関数のコメント参照。
+// ----------------------------------------------------------------
+const _PHASE_C1_IDB_NAME    = "ImageSaverThumbDB";
+const _PHASE_C1_IDB_VERSION = 3;
+const _PHASE_C1_HISTORY_STORE = "saveHistory";
+
+async function _phaseC1OpenDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(_PHASE_C1_IDB_NAME, _PHASE_C1_IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      // background.js が initiator なので通常はここを通らないが、念のため定義
+      if (!db.objectStoreNames.contains(_PHASE_C1_HISTORY_STORE)) {
+        const s = db.createObjectStore(_PHASE_C1_HISTORY_STORE, { keyPath: "id" });
+        s.createIndex("savedAt", "savedAt", { unique: false });
+      }
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror   = (e) => reject(e.target.error);
+  });
+}
+
+async function _mirrorSaveHistoryToIDB(history) {
+  if (!Array.isArray(history)) return;
+  const db = await _phaseC1OpenDB();
+  await new Promise((resolve, reject) => {
+    const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readwrite");
+    const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+    store.clear();
+    for (const entry of history) {
+      if (entry && entry.id) store.put(entry);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror    = (e) => reject(e.target.error);
+  });
+}
+
+async function _setStorageWithHistoryMirror(setObj) {
+  if (!setObj || typeof setObj !== "object") return;
+  // v1.46.14 Phase C-3：差分通知用に書込前 saveHistory snapshot を保持
+  let _phaseC3PrevHistory = null;
+  if (Array.isArray(setObj.saveHistory)) {
+    try { _phaseC3PrevHistory = await _readSaveHistory(); }
+    catch (_) { _phaseC3PrevHistory = []; }
+  }
+  // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const { saveHistory, ...rest } = setObj;
+    if (rest && Object.keys(rest).length > 0) {
+      await browser.storage.local.set(rest);
+    }
+    if (Array.isArray(saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(saveHistory); }
+      catch (err) { console.warn("[Phase C-2] saveHistory IDB write 失敗", err); }
+    }
+  } else {
+    await browser.storage.local.set(setObj);
+    if (Array.isArray(setObj.saveHistory)) {
+      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory); }
+      catch (err) { console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err); }
+    }
+  }
+  // v1.46.14 Phase C-3：書込後に diff を計算して emit
+  if (_phaseC3PrevHistory !== null && Array.isArray(setObj.saveHistory)) {
+    _emitSaveHistoryDiff(_phaseC3PrevHistory, setObj.saveHistory);
+  }
+}
+
+// v1.46.14 GROUP-35-perf-A Phase C-3：
+// 書込前 prevHistory と書込後 newHistory を id 一致で diff 計算し、
+// HISTORY_ENTRY_ADDED / HISTORY_ENTRY_UPDATED / HISTORY_ENTRY_DELETED を runtime.sendMessage で emit。
+const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `modal-${Date.now()}-${Math.random()}`;
+function _emitSaveHistoryDiff(prevHistory, newHistory) {
+  try {
+    const prevMap = new Map();
+    for (const e of prevHistory) if (e && e.id) prevMap.set(e.id, e);
+    const newMap = new Map();
+    for (const e of newHistory) if (e && e.id) newMap.set(e.id, e);
+    for (const id of newMap.keys()) {
+      if (!prevMap.has(id)) {
+        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_ADDED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
+      }
+    }
+    for (const [id, newEntry] of newMap) {
+      const prevEntry = prevMap.get(id);
+      if (!prevEntry) continue;
+      let changed = false;
+      try { changed = JSON.stringify(prevEntry) !== JSON.stringify(newEntry); } catch (_) { changed = true; }
+      if (changed) {
+        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_UPDATED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
+      }
+    }
+    for (const id of prevMap.keys()) {
+      if (!newMap.has(id)) {
+        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_DELETED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
+      }
+    }
+  } catch (err) {
+    console.warn("[Phase C-3] _emitSaveHistoryDiff 失敗", err);
+  }
+}
+
+// v1.46.14 Phase C-3：受信側 listener。HISTORY_ENTRY_ADDED/UPDATED/DELETED を受けて
+// 保存履歴 DOM を debounced refresh。
+// v1.46.15 GROUP-72 Phase C-3-opt：targetIds を debounce window で coalesce、
+// 発火時に renderHistory に渡して smart reuse を強制 rebuild させる。
+let _phaseC3HistoryRefreshTimer = null;
+let _phaseC3PendingIds = new Set();
+function _phaseC3ScheduleHistoryRefresh(targetId) {
+  if (targetId) _phaseC3PendingIds.add(targetId);
+  if (_phaseC3HistoryRefreshTimer) return;
+  _phaseC3HistoryRefreshTimer = setTimeout(async () => {
+    _phaseC3HistoryRefreshTimer = null;
+    const ids = new Set(_phaseC3PendingIds);
+    _phaseC3PendingIds.clear();
+    try {
+      if (typeof browser !== "undefined" && browser.runtime) {
+        const r = await browser.runtime.sendMessage({ type: "GET_SAVE_HISTORY" });
+        if (r && Array.isArray(r.saveHistory)) {
+          // v1.46.16 GROUP-73 Phase C-3-fix：saveHistory は setupModalEvents の関数
+          // パラメータ（closure）、renderHistory は同関数内ローカル定義のため、
+          // ここから直接アクセス不可。setupModalEvents が expose した window アクセサ経由で
+          // 更新＋再描画する。
+          if (typeof window.__modalSetSaveHistory === "function" && typeof window.__modalRenderHistory === "function") {
+            window.__modalSetSaveHistory(r.saveHistory);
+            // targetIds を window 経由で renderHistory へ伝達（smart reuse 用 force rebuild Set）
+            window.__phaseC3OptForceRebuildIds = ids;
+            window.__modalRenderHistory();
+            window.__phaseC3OptForceRebuildIds = null;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[Phase C-3] modal history refresh failed", err);
+    }
+  }, 200);
+}
+browser.runtime.onMessage.addListener((msg) => {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
+  if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
+    _phaseC3ScheduleHistoryRefresh(msg.id);
+  }
+});
+
+// v1.45.5 Phase C-2: saveHistory 読込 helper
+async function _readSaveHistory() {
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    try {
+      const db = await _phaseC1OpenDB();
+      const entries = await new Promise((resolve, reject) => {
+        const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readonly");
+        const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+        const req   = store.getAll();
+        req.onsuccess = (e) => resolve(e.target.result || []);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      entries.sort((a, b) => {
+        const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+        const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+        return tb - ta;
+      });
+      return entries;
+    } catch (err) {
+      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local fallback", err);
+      const stored = await browser.storage.local.get("saveHistory");
+      return stored.saveHistory || [];
+    }
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return stored.saveHistory || [];
+}
+
+// ウィンドウが開いたら即座に初期化
+document.addEventListener("DOMContentLoaded", () => {
+  initModal();
+  initZoomMonitor();
+});
+
+// background.js から新しい画像が届いた場合（ウィンドウ再利用）
+// v1.46.6 GROUP-62 (b) page reload 方式：
+// minimizeAfterSave / 連続保存で同一 modal を再利用するたびに initModal() を重ね呼びすると、
+// document/window/runtime に登録された 165 個の addEventListener と setupModalEvents の closure
+// （saveHistory + globalTags + globalAuthors 等を保持）が累積し、メモリ蔓延（5GB+ 級）を招く。
+// profile.json で `Timeout::SetWhenOrTimeRemaining` 358MB 累積を確認、modal を閉じると解放される現象とも整合。
+// window.location.reload() で JS context を完全 reset、_pendingModal storage は新画像情報を保持済のため
+// 再 init 時に正しく読み出される（__fromConversion の場合も background の stash が初回 CLAIM で消費される）。
+browser.runtime.onMessage.addListener((message) => {
+  if (message.type === "MODAL_NEW_IMAGE" || message.type === "MODAL_NEW_FROM_CONVERSION") {
+    window.location.reload();
+  }
+});
+
+// ----------------------------------------------------------------
+// 表示倍率モニター
+// タイトルバーに「Image Saver [150%]」のように表示し、
+// Ctrl+0 でリセット（Firefox は zoom リセットを直接 API で行えないため
+// window.location.reload() + meta viewport で対応）
+// ----------------------------------------------------------------
+function initZoomMonitor() {
+  function getZoomPct() {
+    // devicePixelRatio はシステムDPI × ブラウザズームの合成値
+    // ズームのみを取り出すため screen.deviceXDPI は使えないので
+    // window.outerWidth / window.innerWidth で近似する
+    const ratio = window.outerWidth > 0 && window.innerWidth > 0
+      ? window.outerWidth / window.innerWidth
+      : window.devicePixelRatio;
+    return Math.round(ratio * 100);
+  }
+
+  function updateTitle() {
+    const pct = getZoomPct();
+    document.title = pct === 100
+      ? "BorgesTag"
+      : `BorgesTag [${pct}%]`;
+  }
+
+  updateTitle();
+  window.addEventListener("resize", updateTitle);
+
+  // Ctrl+0 でズームリセット
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "0") {
+      // Firefox: ズームAPIがないため zoom CSS プロパティで対応
+      document.body.style.zoom = "";
+      document.documentElement.style.zoom = "";
+      // カードを強制再描画
+      const card = document.querySelector(".card");
+      if (card) {
+        card.style.width  = "";
+        card.style.height = "";
+      }
+      setTimeout(updateTitle, 100);
+    }
+  });
+}
+
+// モーダルUI - 別ウィンドウ版
+
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// v1.46.0 GROUP-57 案 a: history grid サムネを Blob URL 経由で表示する helper。
+// 従来は GET_THUMB_DATA_URL → img.src = dataUrl で、同一 thumbId を参照する N 件の
+// エントリが表示されると structured clone deserialize で N 個の物理コピー（38MB GIF
+// で N=11 → 400MB）が modal の JS zone に retain されていた（memory-report 観察）。
+// Blob URL 経由なら img.src は短い文字列、Blob 本体は IDB 由来 1 件、img.onload 後に
+// revoke すれば decoded image のみ残る。
+// ----------------------------------------------------------------
+function _isGifEntry(entry) {
+  return /\.gif$/i.test(entry?.filename || "");
+}
+
+async function _loadThumbAsBlobUrl(thumbId, mimeFallback) {
+  if (!thumbId) return null;
+  try {
+    const r = await browser.runtime.sendMessage({
+      type:    "GET_THUMB_BINARY",
+      thumbId: thumbId,
+    });
+    if (!r?.ok || !r.buffer) return null;
+    const blob = new Blob([r.buffer], { type: r.mime || mimeFallback || "image/gif" });
+    return URL.createObjectURL(blob);
+  } catch (_) {
+    return null;
+  }
+}
+
+// img に Blob URL を attach し、load/error 時に revoke（decoded image は保持される）
+function _attachBlobUrlToImg(img, blobUrl) {
+  if (!blobUrl) return;
+  img.src = blobUrl;
+  const revoke = () => {
+    try { URL.revokeObjectURL(blobUrl); } catch (_) {}
+  };
+  img.addEventListener("load",  revoke, { once: true });
+  img.addEventListener("error", revoke, { once: true });
+}
+
+// モーダルを開く
+// ----------------------------------------------------------------
+// ウィンドウが最小幅を下回ったら強制リサイズ
+const MODAL_MIN_WIDTH = 700;
+window.addEventListener("resize", () => {
+  if (window.outerWidth < MODAL_MIN_WIDTH) {
+    browser.windows.getCurrent()
+      .then(w => browser.windows.update(w.id, { width: MODAL_MIN_WIDTH }))
+      .catch(() => {});
+  }
+});
+
+// @spec 設計書類/画面別/07_保存ウィンドウ_詳細.md
+async function initModal() {
+  // 画像情報を storage から取得
+  const { _pendingModal } = await browser.storage.local.get("_pendingModal");
+  if (!_pendingModal) { window.close(); return; }
+
+  // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の場合は
+  // background の _pendingConversionStash から受け取る（storage.local broadcast 回避）。
+  let imageUrl, pageUrl, suggestedFilename, associatedAudio;
+  if (_pendingModal.__fromConversion) {
+    const claim = await browser.runtime.sendMessage({ type: "CLAIM_CONVERSION_PAYLOAD" });
+    if (!claim || !claim.ok || !claim.payload) {
+      console.error("[modal] __fromConversion flag but no payload stashed, closing");
+      window.close();
+      return;
+    }
+    ({ imageUrl, pageUrl, suggestedFilename, associatedAudio } = claim.payload);
+  } else {
+    // 通常経路：従来通り storage.local._pendingModal から受け取る
+    ({ imageUrl, pageUrl, suggestedFilename } = _pendingModal);
+    associatedAudio = null;
+  }
+
+  // v1.31.4 GROUP-28 mvdl：動画→GIF 変換で音声を同時取得した場合、
+  // associatedAudio = {dataUrl, mimeType, extension, durationSec} を受け取る。
+  // EXECUTE_SAVE_MULTI の payload に中継して保存時にファイル保存＋履歴紐付け。
+  // 音声なし時は null。
+  window.__pendingAssociatedAudio = associatedAudio || null;
+  // 使用済みフラグをクリア（別ウィンドウ開くときの再初期化用に残す）
+
+  // 必要なデータを並列取得
+  const [
+    { tags: existingTags },
+    { lastSaveDir },
+    { tagDestinations },
+    { recentTags },
+    { viewMode: savedViewMode, rootPath: explorerRootPath, startPriority, folderSort: savedFolderSort },
+    { bookmarks },
+    { modalSize },
+    { saveHistory },
+    { continuousSession },
+    { recentSubTags: recentSubTagsList },
+    { authors: globalAuthors },
+    { recentAuthors },
+    { authorDestinations },
+    { recentTagDisplayCount, bookmarkDisplayCount },
+    { retainTag, retainSubTag, retainAuthor },
+    { retainedTags, retainedSubTags, retainedAuthors },
+    { leftPanelOrder, leftPanelHeights },
+  ] = await Promise.all([
+    browser.runtime.sendMessage({ type: "GET_ALL_TAGS" }),
+    browser.runtime.sendMessage({ type: "GET_LAST_SAVE_DIR" }),
+    browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" }),
+    browser.runtime.sendMessage({ type: "GET_RECENT_TAGS" }),
+    browser.runtime.sendMessage({ type: "GET_EXPLORER_SETTINGS" }),
+    browser.runtime.sendMessage({ type: "GET_BOOKMARKS" }),
+    browser.runtime.sendMessage({ type: "GET_MODAL_SIZE" }),
+    browser.runtime.sendMessage({ type: "GET_SAVE_HISTORY" }),
+    browser.runtime.sendMessage({ type: "GET_CONTINUOUS_SESSION" }),
+    browser.runtime.sendMessage({ type: "GET_RECENT_SUBTAGS" }),
+    browser.runtime.sendMessage({ type: "GET_GLOBAL_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_RECENT_AUTHORS" }),
+    browser.runtime.sendMessage({ type: "GET_AUTHOR_DESTINATIONS" }),
+    browser.storage.local.get(["recentTagDisplayCount", "bookmarkDisplayCount"]),
+    browser.storage.local.get(["retainTag", "retainSubTag", "retainAuthor"]),
+    browser.storage.local.get(["retainedTags", "retainedSubTags", "retainedAuthors"]),
+    browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]),
+  ]);
+
+  // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
+  // 動画→GIF 変換経由など、呼出側が明示的にファイル名を提案した場合はそれを優先採用。
+  // data URL は guessFilename で拡張子推定できないため（data:image/gif;base64,... の
+  // pathname が base64 string になる）、呼出側ヒントが重要。
+  const defaultFilename = suggestedFilename || guessFilename(imageUrl);
+
+  // HTMLを #modal-root に書き込む
+  document.getElementById("modal-root").innerHTML = buildModalHTML(defaultFilename);
+
+  setupModalEvents(
+    document, null, imageUrl, pageUrl, defaultFilename,
+    existingTags, lastSaveDir, tagDestinations,
+    recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
+    saveHistory, continuousSession || null, savedFolderSort || "name-asc",
+    recentSubTagsList || [],
+    null,
+    globalAuthors || [], recentAuthors || [], authorDestinations || {},
+    recentTagDisplayCount || 20, bookmarkDisplayCount || 20,
+    !!retainTag, !!retainSubTag, !!retainAuthor,
+    retainedTags || [], retainedSubTags || [], retainedAuthors || [],
+    leftPanelOrder || ["preview", "recent-tags", "bookmarks"], leftPanelHeights || {}
+  );
+}
+
+// ----------------------------------------------------------------
+// HTML / CSS
+// ----------------------------------------------------------------
+// @spec 設計書類/画面別/07_保存ウィンドウ_詳細.md
+function buildModalHTML(defaultFilename) {
+  return `
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box; margin: 0; padding: 0;
+    }
+    html, body {
+      min-width: 700px; /* ウィンドウ縮小時のクリッピング防止 */
+      overflow-x: auto;
+    }
+    body, #modal-root {
+      color: #1a1a1a;
+      font-family: "Segoe UI", -apple-system, sans-serif;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    /* ================================================================
+       オーバーレイ・カード
+       ================================================================ */
+    .overlay {
+      display: contents;
+    }
+
+    /* カード：ウィンドウ全体を占める */
+    .card {
+      background: #fff;
+      width: 100%; height: 100%;
+      min-width: 700px; min-height: 360px;
+      display: flex; flex-direction: column;
+    }
+
+    /* ================================================================
+       ヘッダー（固定）
+       ================================================================ */
+    .header {
+      display: flex; align-items: center;
+      padding: 7px 12px; flex-shrink: 0;
+      border-bottom: 1px solid #ebebeb;
+      background: #fff; position: relative;
+    }
+    .header-left { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; overflow: hidden; max-width: 30%; }
+    .header h2 { font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+    .header-path {
+      font-size: 10px; color: #888; font-family: "Consolas", monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .header-path.unset { color: #ccc; font-family: inherit; font-style: italic; }
+    /* 中央ゾーン：ファイル名入力 + 保存ボタン */
+    .header-actions {
+      display: flex; align-items: center; gap: 6px;
+      position: absolute; left: 50%; transform: translateX(-50%);
+    }
+    .header-filename-input {
+      border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 8px; font-size: 12px; outline: none; font-family: inherit;
+      width: 260px; background: #fafafa;
+    }
+    .header-filename-input:focus { border-color: #4a90e2; background: #fff; }
+
+    /* ================================================================
+       ボディ：左右2カラム（flex）
+       ================================================================ */
+    .body {
+      display: flex; flex: 1; min-height: 0;
+    }
+
+    /* ---- 左カラム（2/10）---- */
+    .col-left {
+      width: 22%; min-width: 120px; max-width: 50%; flex-shrink: 0;
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    /* ---- カラムリサイザー ---- */
+    .col-resizer {
+      width: 5px; flex-shrink: 0; cursor: col-resize;
+      background: #ebebeb;
+      transition: background .15s;
+      position: relative;
+    }
+    .col-resizer:hover, .col-resizer.dragging { background: #4a90e2; }
+    /* 左カラム内：スクロール可能なコンテンツ領域 */
+    .col-left-scroll {
+      flex: 1; overflow-y: auto; padding: 14px 12px;
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .left-panel { display: flex; flex-direction: column; position: relative; flex-shrink: 0; }
+    .left-panel-hdr {
+      display: flex; align-items: center; justify-content: space-between; min-height: 0;
+    }
+    .left-panel-reorder {
+      display: none; gap: 2px; margin-left: 4px;
+    }
+    .panel-reorder-mode .left-panel-reorder { display: flex; }
+    #chk-panel-reorder-label {
+      display: inline-flex; align-items: center; gap: 3px;
+      font-size: 10px; color: #6a8ab0; cursor: pointer; user-select: none;
+      padding: 1px 5px; border-radius: 3px;
+    }
+    #chk-panel-reorder-label:hover { color: #4a70c0; }
+    #chk-panel-reorder-label input { cursor: pointer; }
+    .left-panel-reorder button {
+      background: #f0f4ff; border: 1px solid #c0cef0; border-radius: 3px;
+      cursor: pointer; font-size: 9px; padding: 1px 4px; color: #4a70c0; line-height: 1;
+    }
+    .left-panel-reorder button:hover { background: #d8e4ff; }
+    .left-row-resizer {
+      height: 5px; cursor: row-resize; flex-shrink: 0; margin: 2px 0;
+      background: transparent; border-radius: 3px;
+    }
+    .left-row-resizer:hover, .left-row-resizer.dragging {
+      background: rgba(74, 144, 226, 0.35);
+    }
+    .col-left-scroll::-webkit-scrollbar { width: 4px; }
+    .col-left-scroll::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+
+    /* ---- 右カラム（8/10）---- */
+    .col-right {
+      flex: 1; display: flex; flex-direction: column; min-height: 0;
+    }
+    /* 右カラム内：スクロール可能なコンテンツ領域 */
+    .col-right-inner {
+      flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-height: 0;
+    }
+    .col-right-inner::-webkit-scrollbar { width: 5px; }
+    .col-right-inner::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+
+    /* ================================================================
+       フォーム要素（左カラム内）
+       ================================================================ */
+    .field-label {
+      display: block; font-size: 10px; font-weight: 700; color: #666;
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px;
+    }
+    input[type="text"] {
+      width: 100%; border: 1px solid #d0d0d0; border-radius: 6px;
+      padding: 7px 9px; font-size: 13px; outline: none;
+      font-family: inherit; transition: border-color .15s;
+    }
+    input[type="text"]:focus {
+      border-color: #4a90e2;
+      box-shadow: 0 0 0 3px rgba(74,144,226,.12);
+    }
+
+    /* プレビュー */
+    .preview {
+      width: 100%; height: 360px; min-height: 40px; object-fit: contain;
+      border-radius: 6px; border: 1px solid #e8e8e8; background: #f6f6f6;
+      flex-shrink: 0;
+    }
+    .preview-resizer {
+      height: 5px; flex-shrink: 0; cursor: row-resize;
+      background: #ebebeb; border-radius: 3px;
+      transition: background .15s; margin: 1px 0;
+    }
+    .preview-resizer:hover, .preview-resizer.dragging { background: #4a90e2; }
+
+    /* ================================================================
+       タグエリア
+       ================================================================ */
+    .tag-area {
+      border: 1px solid #d0d0d0; border-radius: 6px;
+      padding: 5px 7px; display: flex; flex-wrap: wrap;
+      gap: 4px; align-items: center; min-height: 36px; cursor: text;
+    }
+    .tag-area:focus-within {
+      border-color: #4a90e2;
+      box-shadow: 0 0 0 3px rgba(74,144,226,.12);
+    }
+    .tag-chip {
+      display: inline-flex; align-items: center; gap: 3px;
+      background: #e8f0fe; color: #1a56db;
+      border-radius: 4px; padding: 2px 6px;
+      font-size: 11px; font-weight: 600;
+    }
+    .tag-chip button {
+      background: none; border: none; cursor: pointer;
+      color: #1a56db; font-size: 12px; line-height: 1; padding: 0;
+    }
+    .tag-chip button:hover { color: #c0392b; }
+    .tag-input {
+      border: none; outline: none; font-size: 12px;
+      min-width: 60px; flex: 1; padding: 2px 3px; font-family: inherit;
+    }
+    .suggestions {
+      border: 1px solid #e0e0e0; border-radius: 6px;
+      background: #fff; max-height: 110px; overflow-y: auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,.1); display: none;
+      position: absolute; z-index: 100; min-width: 180px;
+      top: calc(100% + 2px); left: 0;
+    }
+    .suggestions.visible { display: block; }
+    .suggestion-item { padding: 6px 10px; cursor: pointer; font-size: 12px; }
+    .suggestion-item:hover, .suggestion-item.active { background: #f0f4ff; }
+
+    /* v1.26.9 (GROUP-22 改): 各 wrap はデフォルト固定幅（狭い画面では max-width:100% で縮む）。
+       v1.26.7 で撤回したリサイズ機能は overflow を使わない方式で後続版に持ち越し。 */
+    /* v1.27.0: 各 wrap をデフォルト固定幅で設定（狭い画面では max-width:100% で縮む） */
+    .dest-tabbar-tag-wrap {
+      position: relative; display: flex; flex-direction: column;
+      width: 400px; max-width: 100%;
+    }
+    .dest-tabbar-subtag-wrap {
+      position: relative; display: flex; flex-direction: column;
+      width: 500px; max-width: 100%;
+    }
+    .dest-tabbar-subtag-wrap .dest-tabbar-tag-area {
+      border-color: #d0c8f0; /* 薄紫でタグ欄と区別 */
+    }
+    .dest-tabbar-subtag-wrap .dest-tabbar-tag-area:focus-within {
+      border-color: #7c5cbf;
+    }
+    /* 権利者 box（main-tabbar 内）もタグ入力と同スタイル、幅は flex-basis 180px */
+    .author-wrap {
+      position: relative; display: flex; flex-direction: column;
+      flex: 0 1 180px; min-width: 100px; max-width: 100%;
+    }
+    .author-wrap .dest-tabbar-tag-area {
+      border-color: #e9d5ff; /* 薄紫寄りで権利者を表現 */
+    }
+    .author-wrap .dest-tabbar-tag-area:focus-within {
+      border-color: #7c3aed;
+    }
+
+    /* ================================================================
+       右カラム：フォルダエクスプローラー
+       ================================================================ */
+    .right-header {
+      display: flex; align-items: center;
+      padding: 0 10px; background: #f7f9ff;
+      border-bottom: 1px solid #e4eaf8; min-height: 34px; flex-shrink: 0;
+      gap: 6px;
+    }
+    .right-header-title {
+      font-size: 10px; font-weight: 700; color: #666;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+
+    /* right-header 右端：新規フォルダ作成エリア */
+    .right-header-folder-create {
+      display: flex; align-items: center; gap: 4px;
+      margin: 0 auto; /* 中央寄せ・幅は内容に合わせて自動 */
+    }
+    .right-header-folder-create .new-folder-input {
+      width: 120px; padding: 3px 6px; font-size: 11px;
+      border: 1px solid #d0d0d0; border-radius: 4px; outline: none; font-family: inherit;
+    }
+    .right-header-folder-create .new-folder-input:focus { border-color: #4a90e2; }
+    .right-header-folder-create .new-folder-btn {
+      padding: 3px 8px; font-size: 11px;
+    }
+
+    /* 戻る・進むボタン */
+    .btn-nav {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer;
+      padding: 2px 6px; font-size: 13px; line-height: 1; color: #999;
+      transition: color .1s, background .1s, border-color .1s;
+    }
+    .btn-nav:hover:not(:disabled) { color: #4a90e2; background: #eef3ff; border-color: #b0c8f0; }
+    .btn-nav:disabled { color: #ddd; cursor: default; }
+
+    /* ブックマーク追加ボタン（現在のフォルダを即登録） */
+    .btn-bookmark-add {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer;
+      padding: 2px 6px; font-size: 13px; line-height: 1;
+      color: #ccc; transition: color .1s, background .1s, border-color .1s;
+    }
+    .btn-bookmark-add:hover:not(.bookmarked) { color: #e8a000; background: #fff8e0; border-color: #f5d080; }
+    /* ブックマーク済み：金色背景で強調 */
+    .btn-bookmark-add.bookmarked {
+      color: #e8a000; background: #fff8e0; border-color: #f5d080;
+    }
+    .btn-bookmark-add:disabled { color: #e0e0e0; cursor: default; }
+
+    /* 候補追加ボタン */
+    .btn-add-candidate {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer;
+      padding: 2px 7px; font-size: 11px; font-weight: 600;
+      color: #4a90e2; transition: color .1s, background .1s, border-color .1s;
+      flex-shrink: 0; white-space: nowrap;
+    }
+    .btn-add-candidate:hover:not(:disabled) { background: #eef3ff; border-color: #b0c8f0; }
+    .btn-add-candidate:disabled { color: #ccc; cursor: default; }
+
+    /* タグ絞込ボタン */
+    .btn-tag-filter {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer;
+      padding: 2px 7px; font-size: 11px; font-weight: 600;
+      color: #888; transition: color .1s, background .1s, border-color .1s;
+      flex-shrink: 0; white-space: nowrap;
+    }
+    .btn-tag-filter:hover:not(:disabled) { background: #eef3ff; border-color: #b0c8f0; color: #4a90e2; }
+    .btn-tag-filter.active { background: #ddeaff; border-color: #4a90e2; color: #1a56db; }
+    .btn-tag-filter:disabled { color: #ccc; cursor: default; }
+
+    .explorer { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+    /* ツールバー：パンくず＋表示切り替え */
+    .explorer-toolbar {
+      display: flex; align-items: center;
+      padding: 4px 8px 4px 10px; background: #f0f5ff;
+      border-bottom: 1px solid #d8e4f8; gap: 6px; min-height: 32px; flex-shrink: 0;
+    }
+    .breadcrumb {
+      display: flex; align-items: center; flex-wrap: nowrap; gap: 2px;
+      font-size: 11px; flex: 1; overflow: hidden;
+    }
+    .breadcrumb-item {
+      cursor: pointer; color: #1a56db; font-weight: 500;
+      padding: 1px 4px; border-radius: 3px; white-space: nowrap;
+    }
+    .breadcrumb-item:hover { background: #dce8ff; }
+    .breadcrumb-sep { color: #aaa; flex-shrink: 0; }
+    .breadcrumb-item.current { color: #333; font-weight: 700; cursor: default; }
+    .breadcrumb-item.current:hover { background: none; }
+
+    .view-switcher { display: flex; gap: 2px; flex-shrink: 0; }
+    .view-btn {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer; padding: 2px 5px;
+      font-size: 12px; color: #888; line-height: 1;
+      transition: background .1s, border-color .1s;
+    }
+    .view-btn:hover { background: #e0e8ff; border-color: #b0c8f0; }
+    .view-btn.active { background: #ddeaff; border-color: #4a90e2; color: #1a56db; }
+
+    /* コンテンツエリア（スクロール） */
+    .tree-view {
+      flex: 1; overflow-y: auto; background: #fafafa; min-height: 0;
+    }
+    .tree-view::-webkit-scrollbar { width: 5px; }
+    .tree-view::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+    /* リスト表示 */
+    .tree-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 12px; cursor: pointer;
+      border-bottom: 1px solid #f0f0f0;
+      transition: background .1s; user-select: none;
+    }
+    .tree-row:hover { background: #eef3ff; }
+    .tree-row.selected { background: #ddeaff; }
+    .tree-row .row-icon { font-size: 14px; flex-shrink: 0; }
+    .tree-row .row-name {
+      font-size: 12px; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tree-row.selected .row-name { font-weight: 600; color: #1a56db; }
+    .tree-row .row-arrow { font-size: 10px; color: #bbb; flex-shrink: 0; }
+    .tree-row .row-path {
+      font-size: 10px; color: #aaa; display: none;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* 詳細表示 */
+    .tree-view.view-detail .tree-row { padding: 7px 12px; }
+    .tree-view.view-detail .tree-row .row-icon { font-size: 18px; }
+    .tree-view.view-detail .tree-row .row-path { display: block; }
+    .tree-view.view-detail .tree-row .row-text { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+    /* タイル表示 */
+    .tree-view.view-tile {
+      display: flex; flex-wrap: wrap; align-content: flex-start;
+      gap: 4px; padding: 8px;
+    }
+    .tree-view.view-tile .tree-row {
+      flex-direction: column; align-items: center; justify-content: center;
+      width: 72px; height: 72px; padding: 5px 3px;
+      border: 1px solid transparent; border-radius: 6px; border-bottom: none; gap: 3px;
+    }
+    .tree-view.view-tile .tree-row:hover { border-color: #b0c8f0; background: #eef3ff; }
+    .tree-view.view-tile .tree-row.selected { border-color: #4a90e2; background: #ddeaff; }
+    .tree-view.view-tile .tree-row .row-icon { font-size: 24px; }
+    .tree-view.view-tile .tree-row .row-name {
+      font-size: 10px; text-align: center;
+      word-break: break-all; white-space: normal; max-height: 28px; overflow: hidden;
+    }
+    .tree-view.view-tile .tree-row .row-arrow { display: none; }
+    .tree-view.view-tile .tree-row .row-path  { display: none; }
+    .tree-view.view-tile .tree-message { width: 100%; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .row-arrow.loading { animation: spin .8s linear infinite; }
+
+    .tree-message { padding: 18px; text-align: center; font-size: 11px; color: #999; }
+    .tree-message.error { color: #c0392b; }
+
+    /* 新規フォルダ行 */
+    .new-folder-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px; border-top: 1px solid #e0e0e0; background: #fff; flex-shrink: 0;
+    }
+    .new-folder-input {
+      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
+    }
+    .new-folder-input:focus { border-color: #4a90e2; }
+    .new-folder-btn {
+      background: #4a90e2; color: #fff; border: none;
+      border-radius: 5px; padding: 4px 10px;
+      font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .new-folder-btn:hover { background: #3a7fd5; }
+    .new-folder-tag-btn {
+      background: #27ae60; color: #fff; border: none; border-radius: 4px;
+      padding: 3px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+      white-space: nowrap; font-family: inherit; flex-shrink: 0;
+    }
+    .new-folder-tag-btn:hover { background: #219150; }
+    .new-folder-tag-btn:disabled { background: #a0bfa8; cursor: not-allowed; opacity: .7; }
+
+    /* タグ名フォルダ作成ダイアログ */
+    .tag-folder-dialog {
+      background: #fff; border: 1px solid #4a90e2; border-radius: 6px;
+      padding: 10px 12px; margin: 6px 0; box-shadow: 0 2px 12px rgba(0,0,0,.12);
+    }
+    .tfd-title { font-size: 11px; font-weight: 700; color: #1a56db; margin-bottom: 8px; }
+    .tfd-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+    .tfd-item {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; cursor: pointer; padding: 2px 0;
+    }
+    .tfd-item input { accent-color: #4a90e2; cursor: pointer; }
+    .tfd-actions { display: flex; gap: 6px; }
+    .tfd-btn {
+      padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 600;
+      cursor: pointer; border: none; font-family: inherit;
+    }
+    .tfd-btn.confirm { background: #4a90e2; color: #fff; }
+    .tfd-btn.confirm:hover { background: #3a7fd5; }
+    .tfd-btn.cancel  { background: #f0f0f0; color: #555; border: 1px solid #d0d0d0; }
+    .tfd-btn.cancel:hover { background: #e0e0e0; }
+
+    /* ================================================================
+       右カラム：タブバー＋排他パネル構造
+       ================================================================ */
+    .col-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+    /* タブバー（タグ追加後に表示、初期は非表示） */
+    .dest-tabbar {
+      display: none; flex-shrink: 0;
+      background: #eef4ff; border-bottom: 1px solid #b8d0f8;
+      padding: 0 8px; gap: 6px; min-height: 34px;
+      align-items: center;
+    }
+    .dest-tabbar.visible { display: flex; }
+
+    /* tag-toolbar：タグ入力欄（dest-tabbar の直前に常時表示）
+       v1.26.9 (GROUP-22 改): タグ行・サブタグ行を独立した 2 行に分割。
+       chip 位置は input 前置き（画面右端飛ばし回避）。
+       v1.27.0: align-items: flex-start で全幅ストレッチを抑制（入力欄広がりっぱなし回避） */
+    #tag-toolbar {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+      background: #f4f7ff; border-bottom: 1px solid #d8e6f8;
+      padding: 4px 8px; flex-shrink: 0;
+    }
+    /* v1.26.10: タグ・サブタグ・権利者すべて chip 前置きに統一
+       input は chip の後ろ（order:1）、#author-input-clear は input のすぐ右（order:2） */
+    .dest-tabbar-tag-input { order: 1; }
+    #author-input-clear { order: 2; }
+    .dest-tabbar-tag-area {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 3px;
+      background: #fff; border: 1px solid #d0d8f0; border-radius: 5px;
+      padding: 2px 6px; min-width: 0; flex: 1;
+      cursor: text;
+    }
+    .dest-tabbar-tag-area .tag-chip {
+      font-size: 10px; padding: 1px 4px;
+    }
+    /* v1.26.6: input の min-width を 120px に拡大（初期表示時の input 幅を確保）。
+       box 内の並び順は DOM 順で [input][chip1][chip2]... / [input][×][chips container] に。 */
+    .dest-tabbar-tag-input {
+      border: none; outline: none; font-size: 11px;
+      background: transparent; min-width: 120px; flex: 1; font-family: inherit;
+    }
+
+    .dest-tab {
+      background: none; border: none;
+      border-bottom: 2px solid transparent;
+      padding: 6px 14px; font-size: 11px; font-weight: 600;
+      cursor: pointer; color: #888; font-family: inherit;
+      transition: color .15s, border-color .15s; white-space: nowrap;
+    }
+    .dest-tab:hover { color: #4a90e2; }
+    .dest-tab.active { color: #1a56db; border-bottom-color: #4a90e2; }
+
+    /* 候補パネル：タブ選択時に flex:1 で全体を占有 */
+    .dest-panel {
+      display: none; flex-direction: column; flex: 1; min-height: 0;
+    }
+    .dest-panel.visible { display: flex; }
+
+    /* エクスプローラー：flex:1 で全体を占有（候補表示時は非表示） */
+    #explorer-wrapper {
+      display: flex; flex-direction: column; flex: 1; min-height: 0;
+    }
+
+    .dest-candidates {
+      flex: 1; overflow-y: auto; background: #fff; min-height: 0;
+    }
+    .dest-candidates::-webkit-scrollbar { width: 5px; }
+    .dest-candidates::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+    .dest-candidate-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; cursor: pointer;
+      border-bottom: 1px solid #f2f2f2;
+      transition: background .1s; user-select: none;
+    }
+    .dest-candidate-item:last-child { border-bottom: none; }
+    .dest-candidate-item:hover { background: #eef3ff; }
+    .dest-candidate-item.selected { background: #ddeaff; }
+    .dest-candidate-item.editing { background: #f8f9ff; cursor: default; }
+
+    /* インライン編集フォーム */
+    .dest-cand-edit-form {
+      flex: 1; display: flex; flex-direction: column; gap: 4px; padding: 2px 0;
+    }
+    .dest-cand-edit-input {
+      border: 1px solid #4a90e2; border-radius: 4px;
+      padding: 3px 7px; font-size: 11px; outline: none; font-family: "Consolas", monospace;
+      width: 100%; background: #fff;
+    }
+    .dest-cand-edit-actions { display: flex; gap: 4px; }
+    .dest-cand-edit-btn {
+      background: #4a90e2; color: #fff; border: none; border-radius: 4px;
+      padding: 2px 8px; font-size: 10px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .dest-cand-edit-btn.cancel { background: #f0f0f0; color: #555; }
+
+    /* チェックボックス風インジケーター */
+    .dest-cand-check {
+      width: 16px; height: 16px; border-radius: 4px;
+      border: 2px solid #ccc; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; transition: border-color .1s, background .1s;
+    }
+    .dest-candidate-item.selected .dest-cand-check {
+      background: #4a90e2; border-color: #4a90e2; color: #fff;
+    }
+
+    /* 候補複数選択フッター */
+    .dest-multi-footer {
+      flex-shrink: 0; border-top: 1px solid #e0e8f8;
+      background: #f0f5ff; padding: 6px 12px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .dest-multi-count {
+      flex: 1; font-size: 11px; color: #3a6abf; font-weight: 600;
+    }
+    .btn-multi-save {
+      background: #4a90e2; color: #fff; border: none;
+      border-radius: 5px; padding: 5px 14px;
+      font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .btn-multi-save:hover { background: #3a7fd5; }
+    .btn-multi-save:disabled { background: #a0c0e8; cursor: not-allowed; }
+    .dest-cand-icon { font-size: 15px; flex-shrink: 0; }
+    .dest-cand-text { flex: 1; overflow: hidden; }
+    .dest-cand-label {
+      font-size: 12px; font-weight: 600; color: #1a56db;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .dest-cand-label.no-label { font-weight: 400; color: #333; }
+    .dest-cand-path {
+      font-size: 10px; color: #999;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-family: "Consolas", monospace;
+    }
+    .dest-cand-tags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 2px; }
+    .dest-cand-tag {
+      font-size: 10px; background: #e8f0fe; color: #1a56db;
+      border-radius: 3px; padding: 1px 5px; font-weight: 600;
+    }
+    .dest-empty { padding: 24px; text-align: center; font-size: 11px; color: #bbb; }
+
+    /* ================================================================
+       左カラム：直近タグ・ブックマーク
+       ================================================================ */
+    /* 左カラム内の直近タグセクション（スクロール可能） */
+    .recent-tags-section {
+      border-top: 1px solid #ebebeb; padding-top: 10px;
+      flex: 1; display: flex; flex-direction: column; min-height: 0;
+    }
+    .recent-tags-list {
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px;
+      align-content: flex-start;
+      overflow-y: auto; min-height: 0;
+    }
+    .recent-tags-list::-webkit-scrollbar { width: 3px; }
+    .recent-tags-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+
+    .recent-tag-item {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 3px 8px; border-radius: 12px; cursor: pointer;
+      font-size: 11px; user-select: none;
+      transition: background .1s, border-color .1s; border: 1px solid transparent;
+    }
+    .recent-tag-item:hover { background: #eef3ff; border-color: #c8d8f8; }
+    .recent-tag-item.active { background: #ddeaff; border-color: #4a90e2; color: #1a56db; font-weight: 600; }
+    .recent-tag-icon { font-size: 10px; flex-shrink: 0; }
+
+    /* ブックマーク（左カラム下部） */
+    .bookmark-section {
+      border-top: 1px solid #ebebeb; padding-top: 10px; background: #fffdf5;
+      flex: 1; display: flex; flex-direction: column; min-height: 0;
+    }
+    .bookmark-header {
+      display: flex; align-items: center; padding: 0 0 5px 0;
+      font-size: 10px; font-weight: 700; color: #888;
+      text-transform: uppercase; letter-spacing: .04em; gap: 4px; flex-shrink: 0;
+    }
+    .bookmark-list {
+      flex: 1; overflow-y: auto; min-height: 0;
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 2px;
+      align-content: flex-start;
+    }
+    .bookmark-list::-webkit-scrollbar { width: 3px; }
+    .bookmark-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+    .bookmark-row {
+      display: flex; align-items: center; gap: 5px;
+      width: calc(50% - 1px); box-sizing: border-box;
+      padding: 4px 6px; cursor: pointer; border-radius: 5px;
+      border: 1px solid transparent;
+      transition: background .1s; user-select: none;
+    }
+    .bookmark-row:hover { background: #fff8e8; border-color: #f5d080; }
+    .bookmark-row.selected { background: #fff3cc; border-color: #e8a000; }
+    .bookmark-row .bm-icon { font-size: 12px; flex-shrink: 0; }
+    .bookmark-row .bm-label {
+      font-size: 11px; font-weight: 600; color: #7a5500; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .bookmark-row .bm-path { display: none; }
+    .bookmark-empty { padding: 4px 6px; font-size: 10px; color: #bbb; }
+
+    /* ================================================================
+       フッター（固定）
+       ================================================================ */
+    .hint { font-size: 10px; color: #aaa; font-weight: 400; }
+
+    /* ヘッダー内保存ボタン */
+    .btn {
+      padding: 4px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+      cursor: pointer; border: 1px solid transparent;
+      transition: opacity .15s; font-family: inherit;
+      white-space: nowrap; line-height: 1.4;
+    }
+    .btn:hover { opacity: .85; }
+    .btn-save   { background: #4a90e2; color: #fff; }
+    .btn-save:disabled { background: #a0c0e8; cursor: not-allowed; opacity: 1; }
+
+    /* 連続保存モード */
+    .continuous-toggle {
+      display: flex; align-items: center; gap: 5px;
+      margin-left: 8px; cursor: pointer; user-select: none;
+    }
+    .continuous-toggle input[type="checkbox"] {
+      width: 14px; height: 14px; accent-color: #e67e22; cursor: pointer; flex-shrink: 0;
+    }
+    .continuous-toggle .ct-label {
+      font-size: 11px; font-weight: 600; color: #e67e22; white-space: nowrap;
+    }
+    .continuous-toggle input:not(:checked) ~ .ct-label { color: #999; }
+    .continuous-badge {
+      display: none; align-items: center; gap: 4px;
+      background: #fff3e0; border: 1px solid #e67e22; border-radius: 12px;
+      padding: 2px 8px; font-size: 10px; font-weight: 700; color: #e67e22;
+      white-space: nowrap;
+    }
+    .continuous-badge.active { display: flex; }
+
+    /* 引き継ぎチェック */
+    .retain-section {
+      display: flex; align-items: center; gap: 4px;
+      margin-left: 6px;
+    }
+    .retain-label {
+      font-size: 11px; color: #999; white-space: nowrap;
+    }
+    .retain-toggle {
+      display: flex; align-items: center; gap: 3px;
+      cursor: pointer; user-select: none;
+    }
+    .retain-toggle input[type="checkbox"] {
+      width: 12px; height: 12px; accent-color: #1abc9c; cursor: pointer; flex-shrink: 0;
+    }
+    .retain-toggle span {
+      font-size: 11px; color: #666; white-space: nowrap;
+    }
+    .retain-reset-btn {
+      background: none; border: 1px solid #ccc; border-radius: 3px;
+      cursor: pointer; color: #999; font-size: 12px; padding: 0 4px;
+      line-height: 1.4; flex-shrink: 0;
+    }
+    .retain-reset-btn:hover { color: #e74c3c; border-color: #e74c3c; }
+
+    .hint { font-size: 10px; color: #aaa; font-weight: 400; }
+
+    /* ================================================================
+       右カラム：メインタブ（保存先 / 保存履歴）
+       ================================================================ */
+    .main-tabbar {
+      display: flex; flex-shrink: 0;
+      background: #f3f4f8; border-bottom: 1px solid #dde2f0;
+      padding: 0 10px; gap: 0; min-height: 32px; align-items: flex-end;
+    }
+    .main-tab {
+      background: none; border: none;
+      border-bottom: 2px solid transparent;
+      padding: 5px 14px; font-size: 11px; font-weight: 600;
+      cursor: pointer; color: #888; font-family: inherit;
+      transition: color .15s, border-color .15s; white-space: nowrap;
+    }
+    .main-tab:hover { color: #4a90e2; }
+    .main-tab.active { color: #1a56db; border-bottom-color: #4a90e2; background: #fff; }
+
+    /* main-tabbar のチップエリア（a3） */
+    #main-chip-area .tag-chip {
+      font-size: 10px; padding: 2px 8px;
+    }
+
+    /* 作者チップ */
+    .history-author {
+      display: inline-flex; align-items: center;
+      background: #f3e8ff; color: #7c3aed;
+      border-radius: 4px; padding: 1px 6px; font-size: 10px;
+      cursor: pointer; font-weight: 600;
+    }
+    .history-author:hover { background: #e9d5ff; }
+    .history-author.filter-active { background: #7c3aed; color: #fff; }
+
+    /* 履歴タグ絞り込み入力欄（v1.26.0: 中央配置→左寄せ寄り） */
+    .history-filter-wrap {
+      display: none; align-items: center; gap: 3px; flex-wrap: wrap;
+      margin: 0 auto 0 20px; padding-bottom: 4px;
+    }
+    .history-filter-wrap.visible { display: flex; }
+    .history-filter-mode-select {
+      font-size: 10px; border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 4px; cursor: pointer; font-family: inherit; background: #fff; color: #444;
+    }
+    .history-filter-clear {
+      background: none; border: none; cursor: pointer;
+      font-size: 11px; color: #aaa; padding: 2px 4px; border-radius: 3px;
+      display: none;
+    }
+    .history-filter-clear.visible { display: block; }
+    .history-filter-clear:hover { color: #e74c3c; }
+    /* v1.32.2 GROUP-28 mvdl：形式フィルタープルダウン（旧 GIF のみチェックボックス） */
+    .history-format-filter {
+      font-size: 10px; color: #444; cursor: pointer;
+      border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 6px; background: #fff; white-space: nowrap;
+    }
+    .history-format-filter:focus { border-color: #4a90e2; outline: none; }
+    /* GIF フィルターラベル（v1.26.0、旧 checkbox、v1.32.2 で select に置換されたが class 残存時のフォールバック） */
+    .history-gif-filter-label {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; color: #444; cursor: pointer;
+      border: 1px solid #dde; border-radius: 4px;
+      padding: 2px 8px; background: #fff; white-space: nowrap;
+      user-select: none;
+    }
+    .history-gif-filter-label input[type="checkbox"] { margin: 0; cursor: pointer; }
+    /* 絞り込みチップ UI（v1.21.1） */
+    .hist-chip-box {
+      position: relative; display: inline-flex; align-items: center;
+      flex-wrap: wrap; gap: 3px;
+      min-width: 140px; max-width: 260px;
+      border: 1px solid #d0d0d0; border-radius: 5px;
+      padding: 2px 5px; background: #fff;
+    }
+    .hist-chip-box.focus { border-color: #4a90e2; }
+    .hist-chip-box .hist-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: #e3f0ff; color: #1a56db;
+      border-radius: 3px; padding: 0 4px; font-size: 10px; font-weight: 600;
+      line-height: 1.6;
+    }
+    .hist-chip-box .hist-chip.author {
+      background: #f3e8ff; color: #7c3aed;
+    }
+    .hist-chip-box .hist-chip .hist-chip-x {
+      background: none; border: none; cursor: pointer;
+      color: inherit; font-size: 11px; padding: 0 1px; line-height: 1;
+    }
+    .hist-chip-box input[type="text"].hist-chip-input {
+      border: none; outline: none; flex: 1 1 60px; min-width: 60px;
+      padding: 1px 2px; font-size: 11px; font-family: inherit; background: transparent;
+    }
+    .hist-chip-suggest {
+      position: absolute; top: 100%; left: 0;
+      background: #fff; border: 1px solid #d0d8f0; border-radius: 5px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 140px; overflow-y: auto;
+      display: none; z-index: 300; min-width: 140px; font-size: 11px;
+    }
+    .hist-chip-suggest.visible { display: block; }
+    .hist-chip-suggest-item {
+      padding: 3px 8px; cursor: pointer; white-space: nowrap;
+    }
+    .hist-chip-suggest-item:hover,
+    .hist-chip-suggest-item.active { background: #eaf2ff; color: #1a56db; }
+
+    /* メインタブのコンテンツパネル */
+    .main-tab-panel { display: none; flex: 1; flex-direction: column; min-height: 0; }
+    .main-tab-panel.active { display: flex; }
+
+    /* ================================================================
+       保存履歴パネル（タイル表示）
+       ================================================================ */
+    .history-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+    /* 容量・件数インフォバー */
+    .history-infobar {
+      flex-shrink: 0; padding: 4px 12px;
+      background: #f3f4f8; border-bottom: 1px solid #dde2f0;
+      font-size: 10px; color: #999;
+      display: flex; gap: 10px; align-items: center;
+    }
+    .history-infobar span { color: #4a90e2; font-weight: 600; }
+
+    .history-pager {
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 4px 12px; background: #f8f9fd;
+      border-bottom: 1px solid #e8ecf5; font-size: 10px; color: #666;
+    }
+    .history-pager:empty { display: none; }
+    .history-pager-btn {
+      background: #fff; border: 1px solid #c8d0e8; border-radius: 4px;
+      padding: 2px 8px; font-size: 10px; cursor: pointer; color: #4a90e2;
+    }
+    .history-pager-btn:disabled { opacity: .4; cursor: default; }
+    .history-pager-btn:not(:disabled):hover { background: #eef2ff; }
+    .history-pager-btn.current { background: #4a90e2; color: #fff; border-color: #3a7fd2; }
+    .history-pager-dots { color: #aaa; font-size: 11px; padding: 0 2px; user-select: none; }
+    .history-pager-info { color: #888; white-space: nowrap; }
+    .history-page-size-select {
+      border: 1px solid #c8d0e8; border-radius: 4px; padding: 1px 3px;
+      font-size: 10px; background: #fff; color: #444; cursor: pointer; font-family: inherit;
+    }
+
+    .history-panel { display: flex; flex-direction: column; flex: 1; min-height: 0;
+      container-type: size; container-name: history-panel; }
+
+    /* 縦スクロール・複数行 */
+    .history-list {
+      flex: 1; overflow-y: auto; overflow-x: hidden; background: #f5f6fa;
+      display: flex; flex-wrap: wrap;
+      align-items: flex-start; align-content: flex-start;
+      gap: 8px; padding: 8px;
+    }
+    .history-list::-webkit-scrollbar { width: 5px; }
+    .history-list::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+    /* タイル：パネル高さの2/3・幅は縦横比から自動・最大3列 */
+    .history-item {
+      display: flex; flex-direction: column;
+      flex: 0 0 auto;
+      height: calc(100cqh * 2 / 3);
+      position: relative; /* オーバーレイの基準 */
+      background: #fff; border: 1px solid #e8e8e8;
+      border-radius: 8px; overflow: hidden; cursor: default;
+      transition: box-shadow .15s, border-color .15s;
+      user-select: none;
+    }
+    .history-item:hover { box-shadow: 0 2px 10px rgba(0,0,0,.1); border-color: #c8d4f0; }
+
+    /* グループラッパー：幅固定で子タイル列に引きずられない */
+    .history-group-wrapper {
+      display: flex; flex-direction: column; gap: 0;
+      flex: 0 0 auto;
+      /* 先頭タイルの幅に揃え、展開エリアがはみ出してもラッパーは広がらない */
+      width: fit-content;
+      max-width: calc(100cqh * 2 / 3 * 1.5); /* 高さの1.5倍を上限に */
+      align-self: flex-start;
+    }
+    .history-group-wrapper .history-item-group-card {
+      border-color: #e67e22 !important;
+      /* 先頭タイルを正方形ではなくアスペクト比を保った固定高さに */
+      max-width: calc(100cqh * 2 / 3 * 1.5) !important;
+    }
+    .history-group-wrapper .history-item-group-card:hover { border-color: #e67e22 !important; }
+    /* グループ先頭タイルのサムネイル：object-fit:containで縦横比を保ちながら枠に収める */
+    .history-item-group-card .history-thumb {
+      height: 100% !important;
+      width: 100% !important;
+      max-width: calc(100cqh * 2 / 3 * 1.5) !important;
+      object-fit: contain !important;
+      background: #1a1a1a !important;
+    }
+    /* 展開ボタン（ラッパー内・カードの直下） */
+    .history-group-expand-btn {
+      background: #fff8f0; border: 1px solid #e67e22; border-top: 2px solid #e67e22;
+      color: #c0622a; font-size: 11px; font-weight: 600; cursor: pointer;
+      padding: 5px 10px; text-align: center; font-family: inherit;
+      border-radius: 0 0 8px 8px; width: 100%;
+      transition: background .15s; flex-shrink: 0;
+    }
+    .history-group-expand-btn:hover { background: #fde8d0; }
+    /* 展開エリア：折り返しあり・縦スクロール可能・ラッパー幅で折り返す */
+    .history-group-children {
+      display: none; flex-direction: row; flex-wrap: wrap;
+      gap: 6px; padding: 8px;
+      border: 1px solid #e67e22; border-top: none;
+      background: #fff8f0; border-radius: 0 0 8px 8px;
+      max-height: 600px; overflow-y: auto; overflow-x: hidden;
+      width: 100%; box-sizing: border-box;
+    }
+    .history-group-children .history-item {
+      flex: 0 0 auto !important;
+      height: calc(100cqh * 2 / 3) !important;
+      overflow: hidden !important;
+    }
+
+    /* サムネイル：タイル高さいっぱい・幅は縦横比で自動 */
+    .history-thumb {
+      height: 100%; width: auto; display: block; cursor: pointer;
+      background: #f0f0f0; flex-shrink: 0;
+      transition: opacity .1s;
+    }
+    .history-thumb:hover { opacity: .85; }
+
+    /* サムネイル取得失敗時のプレースホルダー */
+    .history-thumb-placeholder {
+      width: 100%; aspect-ratio: 4/3;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px; background: #f0f0f0; cursor: pointer;
+      transition: background .1s;
+    }
+    .history-thumb-placeholder:hover { background: #e4e4e4; }
+
+    /* 情報・ボタンをホバー時のみ表示するオーバーレイ */
+    .history-overlay {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: linear-gradient(transparent, rgba(0,0,0,0.72));
+      padding: 20px 8px 6px;
+      opacity: 0; transition: opacity .2s;
+      pointer-events: none;
+    }
+    .history-item:hover .history-overlay { opacity: 1; pointer-events: auto; }
+
+    /* v1.32.2 GROUP-28 mvdl：保存ウィンドウの保存履歴でも音声再生ボタン常時表示 */
+    .history-audio-icon {
+      position: absolute; left: 6px; bottom: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 2;
+      transition: background 0.15s;
+    }
+    .history-audio-icon:hover { background: rgba(40,90,180,0.85); }
+    .history-audio-icon[data-muted="0"] { background: rgba(40,120,60,0.85); }
+
+    /* v1.33.0 GROUP-32-b → v1.37.0 GROUP-36：選択チェックボックスを左上に統一（設定画面と揃える） */
+    .history-select-box {
+      position: absolute; left: 6px; top: 6px;
+      width: 18px; height: 18px;
+      cursor: pointer;
+      z-index: 3;
+      accent-color: #4a90e2;
+    }
+    /* v1.37.0 GROUP-36-fav-tile：お気に入りハートボタン（右上） */
+    .history-fav-btn {
+      position: absolute; right: 6px; top: 6px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; font-size: 13px;
+      line-height: 1; padding: 0;
+      z-index: 3;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .history-fav-btn:hover { background: rgba(220,40,80,0.85); transform: scale(1.08); }
+    .history-fav-btn[data-fav="1"] { background: rgba(220,40,80,0.85); }
+
+    .history-body {
+      padding: 0; overflow: hidden;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .history-filename {
+      font-size: 10px; font-weight: 600; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .history-path {
+      font-size: 9px; color: rgba(255,255,255,0.7);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-family: "Consolas", monospace;
+    }
+    .history-pageurl {
+      font-size: 9px; color: rgba(180,210,255,0.85);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      cursor: pointer; text-decoration: none; display: block;
+    }
+    .history-pageurl:hover { color: #fff; text-decoration: underline; }
+    .history-meta {
+      font-size: 9px; color: rgba(255,255,255,0.6);
+      display: flex; gap: 3px; flex-wrap: wrap; align-items: center;
+    }
+    .history-tag {
+      background: rgba(74,144,226,0.8); color: #fff;
+      border-radius: 3px; padding: 1px 4px; font-weight: 600; font-size: 9px;
+      cursor: pointer; transition: background .1s;
+    }
+    .history-tag:hover { background: rgba(26,86,219,0.9); }
+    .history-tag.filter-active { background: #1a56db; outline: 1px solid #fff; }
+    /* v1.45.0 GROUP-46：1 行 3 ボタンに削減（保存先 / 原寸 / 移動）。
+       音声付エントリは padding-left:32px で左下 .history-audio-icon との重複を回避。 */
+    .history-actions {
+      display: flex; margin-top: 5px; gap: 4px; position: relative;
+    }
+    .history-actions.has-audio { padding-left: 32px; }
+    .history-btn {
+      flex: 1; background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; cursor: pointer; padding: 4px 2px; font-size: 11px; color: #fff;
+      transition: background .1s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .history-btn:hover { background: rgba(255,255,255,0.32); }
+    .history-btn-addtag { flex: 0 0 auto; padding: 4px 6px; }
+    /* v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、history-item :hover で opacity 制御）。
+       右上の ❤️ (.history-fav-btn at right:6) との競合回避のため right:36 を起点に左へ並ぶ。 */
+    .history-icon-cluster {
+      position: absolute; top: 6px; right: 36px;
+      display: flex; gap: 4px;
+      z-index: 4;
+      opacity: 0; transition: opacity .2s;
+      pointer-events: none;
+    }
+    .history-item:hover .history-icon-cluster { opacity: 1; pointer-events: auto; }
+    .history-icon-btn {
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50%;
+      cursor: pointer; padding: 0;
+      line-height: 1; font-size: 13px;
+      transition: background .15s, transform .1s;
+    }
+    .history-icon-btn:hover { background: rgba(80,140,220,0.85); transform: scale(1.08); }
+    .history-icon-btn svg { width: 14px; height: 14px; }
+
+    /* 履歴タイルの情報編集オーバーレイ */
+    .history-info-editor {
+      display: none; position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.65);
+      align-items: center; justify-content: center;
+    }
+    .history-info-editor.visible { display: flex; }
+    .history-info-editor-inner {
+      background: #263545; border-radius: 10px;
+      padding: 18px 22px; max-width: 500px; width: 92%;
+      max-height: 85vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+      color: #fff; font-size: 12px;
+    }
+    .history-info-editor-title {
+      font-size: 13px; font-weight: 700; color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 8px; margin-bottom: 2px;
+    }
+    .history-info-thumb {
+      width: 220px; max-width: 100%; border-radius: 6px;
+      object-fit: contain; background: rgba(0,0,0,.3);
+      aspect-ratio: 11/18;
+    }
+    .history-info-field-group { display: flex; flex-direction: column; gap: 3px; }
+    .history-info-field-label { font-size: 10px; color: rgba(255,255,255,0.7); font-weight: 600; }
+    .history-info-author-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 16px;
+    }
+    .history-info-author-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(200,220,255,0.25); color: #d0e8ff;
+      border-radius: 10px; padding: 1px 6px; font-size: 10px;
+    }
+    .history-info-author-chip button {
+      background: none; border: none; cursor: pointer;
+      color: rgba(200,200,255,0.7); font-size: 11px; padding: 0 0 0 2px; line-height: 1;
+    }
+    .history-info-author-chip button:hover { color: #faa; }
+    .history-info-author-input-row {
+      display: flex; align-items: center; gap: 4px; position: relative;
+    }
+    .history-info-author-input {
+      flex: 1; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px;
+      background: rgba(255,255,255,0.15); color: #fff; font-size: 11px;
+      padding: 2px 6px; outline: none; font-family: inherit;
+    }
+    .history-info-author-input::placeholder { color: rgba(255,255,255,0.5); }
+    .history-info-author-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0; border-radius: 5px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.2); max-height: 120px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px; font-size: 11px;
+    }
+    .history-info-author-suggestions.visible { display: block; }
+    .history-info-path-input {
+      font-size: 10px; color: rgba(255,255,255,0.85); word-break: break-all;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 3px; padding: 2px 5px; width: 100%; box-sizing: border-box;
+      font-family: inherit; outline: none;
+    }
+    .history-info-path-input::placeholder { color: rgba(255,255,255,0.4); }
+    .history-info-path-input:focus { border-color: rgba(255,255,255,0.5); }
+    .history-info-editor-actions {
+      display: flex; gap: 5px; justify-content: flex-end; align-items: center; margin-top: 2px;
+    }
+    .history-info-editor-cancel {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; cursor: pointer; color: rgba(255,255,255,0.7); font-size: 10px;
+      padding: 2px 8px; font-family: inherit;
+    }
+    .history-info-editor-cancel:hover { background: rgba(255,255,255,0.2); }
+    .history-info-editor-save {
+      background: rgba(100,200,100,0.3); border: 1px solid rgba(100,200,100,0.5);
+      border-radius: 4px; cursor: pointer; color: #aeffa0; font-size: 10px;
+      padding: 2px 8px; font-family: inherit; font-weight: 600;
+    }
+    .history-info-editor-save:hover { background: rgba(100,200,100,0.5); }
+
+    /* 履歴タイルのインラインタグエディタ */
+    .history-tag-editor {
+      margin-top: 5px; background: rgba(0,0,0,0.45);
+      border-radius: 5px; padding: 5px 6px;
+      display: none; flex-direction: column; gap: 4px;
+    }
+    .history-tag-editor.visible { display: flex; }
+    .history-tag-editor-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 20px;
+    }
+    .history-tag-editor-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(74,144,226,0.85); color: #fff;
+      border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 600;
+    }
+    .history-tag-editor-chip button {
+      background: none; border: none; cursor: pointer; color: #fff;
+      font-size: 11px; line-height: 1; padding: 0;
+    }
+    .history-tag-editor-chip button:hover { color: #faa; }
+    .history-tag-editor-input-row {
+      display: flex; gap: 4px; align-items: center; position: relative;
+    }
+    .history-tag-editor-input {
+      flex: 1; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px;
+      background: rgba(255,255,255,0.15); color: #fff; font-size: 11px;
+      padding: 2px 6px; outline: none; font-family: inherit;
+    }
+    .history-tag-editor-input::placeholder { color: rgba(255,255,255,0.5); }
+    .history-tag-editor-input:focus { border-color: rgba(255,255,255,0.7); }
+    .history-tag-editor-confirm {
+      background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 4px; cursor: pointer; color: #fff; font-size: 10px;
+      padding: 2px 7px; font-family: inherit; transition: background .1s; white-space: nowrap;
+    }
+    .history-tag-editor-confirm:hover { background: rgba(255,255,255,0.4); }
+    .history-tag-suggestions {
+      position: absolute; top: calc(100% + 2px); left: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      max-height: 100px; overflow-y: auto;
+      display: none; z-index: 200; min-width: 140px;
+    }
+    .history-tag-suggestions.visible { display: block; }
+    .history-tag-suggestions .suggestion-item {
+      padding: 5px 9px; cursor: pointer; font-size: 11px; color: #1a1a1a;
+    }
+    .history-tag-suggestions .suggestion-item:hover { background: #f0f4ff; }
+
+    /* 複数フォルダ選択ドロップダウン */
+    .history-dropdown {
+      position: absolute; bottom: 100%; left: 0; right: 0;
+      background: #fff; border: 1px solid #d0d8f0;
+      border-radius: 6px 6px 0 0; box-shadow: 0 -4px 12px rgba(0,0,0,.1);
+      z-index: 100; overflow: hidden;
+    }
+    .history-dd-title {
+      font-size: 9px; font-weight: 700; color: #888; padding: 4px 8px;
+      background: #eef4ff; border-bottom: 1px solid #d0d8f0;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .history-dd-item {
+      display: flex; align-items: center; gap: 5px;
+      padding: 5px 8px; font-size: 10px; cursor: pointer;
+      border-bottom: 1px solid #f5f5f5; transition: background .1s;
+    }
+    .history-dd-item:last-child { border-bottom: none; }
+    .history-dd-item:hover { background: #eef3ff; color: #1a56db; }
+    .history-dd-name { font-weight: 600; flex-shrink: 0; }
+    .history-dd-path {
+      font-family: "Consolas", monospace; font-size: 9px; color: #aaa;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .history-empty {
+      width: 100%; padding: 32px; text-align: center; font-size: 12px; color: #bbb;
+    }
+
+    /* エクスプローラーで開くボタン（候補アイテム内・right-header内） */
+    .btn-open-explorer {
+      background: none; border: 1px solid transparent;
+      border-radius: 4px; cursor: pointer;
+      padding: 2px 5px; font-size: 12px; color: #bbb;
+      transition: color .1s, background .1s, border-color .1s; flex-shrink: 0;
+    }
+    .btn-open-explorer:hover { color: #4a90e2; background: #eef3ff; border-color: #b0c8f0; }
+  </style>
+
+  <div class="overlay" id="overlay">
+    <div class="card" role="dialog" aria-modal="true">
+
+      <!-- ヘッダー（固定） -->
+      <div class="header">
+        <div class="header-left">
+          <h2>🖼 BorgesTag</h2>
+          <div class="header-path unset" id="selected-path-display">フォルダが選択されていません</div>
+        </div>
+        <div class="header-actions">
+          <input type="text" class="header-filename-input" id="input-filename"
+            placeholder="ファイル名" />
+          <button class="btn btn-save" id="btn-save" disabled>保存</button>
+          <label class="continuous-toggle" id="continuous-toggle"
+            title="連続保存モード：漫画等の複数画像を同一セッションとして記録します。保存履歴でまとめて表示できます。">
+            <input type="checkbox" id="chk-continuous" />
+            <span class="ct-label">連続保存</span>
+          </label>
+          <span class="continuous-badge" id="continuous-badge">🔴 連続保存中</span>
+          <span class="retain-section">
+            <span class="retain-label">引き継ぎ:</span>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-tag" /><span>タグ</span></label>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-subtag" /><span>サブタグ</span></label>
+            <label class="retain-toggle"><input type="checkbox" id="chk-retain-author" /><span>権利者</span></label>
+            <button id="btn-retain-reset" class="retain-reset-btn" title="引き継ぎチェックとタグ/サブタグ/権利者をリセット">↺</button>
+          </span>
+        </div>
+      </div>
+
+      <!-- ボディ：左右カラム -->
+      <div class="body">
+
+        <!-- 左カラム（プレビュー・ファイル名・タグ） -->
+        <div class="col-left" id="col-left">
+          <div class="col-left-scroll">
+
+            <img class="preview" id="preview" src="" alt="プレビュー" />
+            <div class="preview-resizer" id="preview-resizer"></div>
+
+            <!-- 直近タグ（左カラム下部・スクロール可能） -->
+            <div class="recent-tags-section" id="recent-tags-section" style="display:none">
+              <span class="field-label">直近に使用したタグ</span>
+              <div class="recent-tags-list" id="recent-tags-list"></div>
+            </div>
+
+            <!-- ブックマーク一覧（左カラム下部） -->
+            <div class="bookmark-section" id="bookmark-section">
+              <div class="bookmark-header">⭐ ブックマーク</div>
+              <div class="bookmark-list" id="bookmark-list">
+                <div class="bookmark-empty">ブックマークがありません</div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- カラムリサイザー -->
+        <div class="col-resizer" id="col-resizer"></div>
+
+        <!-- 右カラム（保存先フォルダ） -->
+        <div class="col-right" id="col-right">
+
+          <!-- メインタブバー（保存先 / 保存履歴） -->
+          <div class="main-tabbar">
+            <button class="main-tab active" id="main-tab-dest">保存先</button>
+            <button class="main-tab"        id="main-tab-history">保存履歴</button>
+
+            <!-- a3: 権利者入力（保存先タブ表示中のみ visible）
+                 v1.26.6 (GROUP-22): タグ入力と同スタイルのボックス化／label 削除／chip 後置／縦リサイズ可能 -->
+            <div id="main-tabbar-author-area" style="display:none; align-items:center; gap:4px; flex-shrink:0;">
+              <span style="width:1px; height:20px; background:#d0d8e8; margin:0 8px; flex-shrink:0;"></span>
+              <div class="author-wrap">
+                <div class="dest-tabbar-tag-area" id="author-box">
+                  <input type="text" id="author-input" class="dest-tabbar-tag-input"
+                    placeholder="✏️ 権利者を入力（Enter）…" autocomplete="off" />
+                  <button id="author-input-clear" style="background:none; border:none; cursor:pointer;
+                    color:#aaa; font-size:13px; padding:0 2px; display:none; line-height:1;" title="入力クリア">✕</button>
+                  <div id="author-chips" style="display:inline-flex; flex-wrap:wrap; gap:2px; align-items:center;"></div>
+                </div>
+                <div id="author-suggestions" style="position:absolute; top:calc(100% + 2px); left:0;
+                  background:#fff; border:1px solid #d0d8f0; border-radius:5px;
+                  box-shadow:0 4px 12px rgba(0,0,0,.15); max-height:120px; overflow-y:auto;
+                  display:none; z-index:200; min-width:120px; font-size:11px;"></div>
+              </div>
+            </div>
+            <!-- v1.26.6: 旧 main-chip-area は削除（chip は各 box 内に配置） -->
+            <!-- 残置：旧コード参照箇所を移行完了後に完全削除 -->
+            <div id="main-chip-area" style="display:none;"></div>
+
+            <!-- v1.46.10 GROUP-22 + GROUP-21：保存履歴フィルターを 2 段に分離（入力型 / pulldown + button 型）、ファイル名絞り込み追加、背景色で視覚区分 -->
+            <!-- 1 段目：入力型フィルター（chip + input row、薄青背景） -->
+            <div class="history-filter-wrap" id="history-filter-wrap" style="background:#eef5ff;border:1px solid #a5c8ee;border-radius:4px;padding:4px 6px;">
+              <div class="hist-chip-box" id="history-filter-box">
+                <input type="text" id="history-filter-input" class="hist-chip-input"
+                  placeholder="🔍 タグで絞り込み" autocomplete="off" />
+                <div class="hist-chip-suggest" id="history-filter-suggest"></div>
+              </div>
+              <button class="history-filter-clear" id="history-filter-clear" title="クリア">✕</button>
+              <!-- v1.46.10 GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive） -->
+              <div class="hist-chip-box" id="history-filename-filter-box">
+                <input type="text" id="history-filename-filter" class="hist-chip-input"
+                  placeholder="📄 ファイル名で絞り込み" autocomplete="off" />
+              </div>
+              <button class="history-filter-clear" id="history-filename-filter-clear" title="ファイル名フィルタークリア">✕</button>
+              <div class="hist-chip-box" id="history-author-filter-box">
+                <input type="text" id="history-author-filter" class="hist-chip-input"
+                  placeholder="✏️ 権利者で絞り込み" autocomplete="off" />
+                <div class="hist-chip-suggest" id="history-author-filter-suggest"></div>
+              </div>
+              <button class="history-filter-clear" id="history-author-filter-clear" title="クリア">✕</button>
+            </div>
+            <!-- 2 段目：pulldown / toggle / bulk action 型（薄緑背景） -->
+            <div class="history-filter-wrap" style="background:#f0f7ee;border:1px solid #b9d8a8;border-radius:4px;padding:4px 6px;margin-top:4px;">
+              <select id="history-filter-mode" class="history-filter-mode-select" title="タグ・作者の絞り込みモード">
+                <option value="and">AND</option>
+                <option value="or">OR</option>
+              </select>
+              <!-- v1.32.2 GROUP-28 mvdl：GIF のみチェックボックスをプルダウン化、音声付きフィルタ追加 -->
+              <select id="history-format-filter" class="history-format-filter" title="表示形式で絞り込み">
+                <option value="all">📄 全て</option>
+                <option value="gif">🎞 GIF のみ</option>
+                <option value="audio">🔊 音声付き</option>
+              </select>
+              <!-- v1.33.0 GROUP-32-b：選択した履歴の音声を一括ON/OFF -->
+              <button id="history-audio-toggle-selected" class="history-format-filter" title="選択した履歴の音声を一括で再生／停止" disabled>🔊 音声 ON/OFF</button>
+              <!-- v1.37.0 GROUP-36-fav：お気に入りのみ表示／一括追加・解除 -->
+              <button id="history-fav-filter-toggle" class="history-format-filter" title="お気に入りのみ表示" aria-pressed="false">🤍 お気に入りのみ</button>
+              <button id="history-fav-add-selected" class="history-format-filter" title="選択した履歴をお気に入りに追加" disabled>❤️ お気に入り追加</button>
+              <button id="history-fav-remove-selected" class="history-format-filter" title="選択した履歴のお気に入りを解除" disabled>🤍 お気に入り解除</button>
+              <!-- v1.37.0 GROUP-37：保存ウィンドウにも全選択／選択解除（v1.33.2 パターン：絞り込み中は絞り込み結果対象） -->
+              <button id="history-select-all" class="history-format-filter" title="現在の絞り込み結果を全選択" disabled>✅ 全選択</button>
+              <button id="history-deselect-all" class="history-format-filter" title="選択をすべて解除" disabled>☐ 選択解除</button>
+            </div>
+          </div>
+
+          <!-- 保存先パネル -->
+          <div class="main-tab-panel active" id="panel-dest">
+
+            <!-- a2: タグ入力行（常時表示） -->
+            <div id="tag-toolbar">
+              <div class="dest-tabbar-tag-wrap">
+                <div class="dest-tabbar-tag-area" id="dest-tabbar-tag-area">
+                  <input type="text" class="dest-tabbar-tag-input" id="tag-input"
+                    placeholder="保存先に関連付けるタグを入力" autocomplete="off" />
+                </div>
+                <div class="suggestions" id="suggestions"></div>
+              </div>
+              <div class="dest-tabbar-subtag-wrap">
+                <div class="dest-tabbar-tag-area" id="dest-tabbar-subtag-area">
+                  <input type="text" class="dest-tabbar-tag-input" id="subtag-input"
+                    placeholder="履歴に付与するタグ" autocomplete="off"
+                    title="保存先候補に使わないタグを入力（サブタグ）" />
+                </div>
+                <div class="suggestions" id="subtag-suggestions"></div>
+              </div>
+            </div>
+
+            <!-- a2: タブバー（dest-tabbar）：タブ＋フィルタ・新規作成ボタンを左寄せ -->
+            <div class="dest-tabbar" id="dest-tabbar">
+              <button class="dest-tab active" id="dest-tab-suggest">💡 候補から選ぶ</button>
+              <button class="dest-tab"        id="dest-tab-explorer">📁 フォルダを選ぶ</button>
+              <button class="btn-tag-filter" id="btn-tag-filter"
+                title="タグ名でフォルダを絞り込む" disabled>🔍 タグで絞り込み</button>
+              <button class="new-folder-tag-btn" id="new-folder-tag-btn"
+                title="タグ名でフォルダを新規作成" disabled>🏷 タグ名でフォルダを新規作成</button>
+            </div>
+
+            <!-- 保存先候補パネル（候補タブ選択時に全体表示） -->
+            <div class="dest-panel" id="dest-panel">
+              <!-- a1: currentPath バナー（候補パネル上部） -->
+              <div id="current-path-banner" style="display:none; align-items:center; gap:6px;
+                background:#f4f7ff; border-bottom:1px solid #dce8f8; padding:5px 12px;
+                font-size:10px; color:#555; flex-shrink:0;">
+                <span style="color:#888; white-space:nowrap;">📁 フォルダを選ぶ側の選択中：</span>
+                <span id="current-path-banner-text" style="color:#2c5aaa; font-weight:600; word-break:break-all;"></span>
+              </div>
+              <div class="dest-candidates" id="dest-candidates">
+                <div class="dest-empty">タグに関連付けられた保存先がありません</div>
+              </div>
+              <!-- 複数選択フッター -->
+              <div class="dest-multi-footer" id="dest-multi-footer" style="display:none">
+                <span class="dest-multi-count" id="dest-multi-count">0件選択中</span>
+                <button class="btn-multi-save" id="btn-multi-save" disabled>選択した候補に保存</button>
+              </div>
+            </div>
+
+            <!-- フォルダエクスプローラー（フォルダタブ選択時 or タグなし時に全体表示） -->
+            <div id="explorer-wrapper" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
+              <div class="right-header">
+                <button class="btn-bookmark-add" id="btn-bookmark-add"
+                  title="現在のフォルダをブックマークに追加">⭐</button>
+                <button class="btn-add-candidate" id="btn-add-candidate"
+                  title="現在のフォルダを保存先候補に追加" disabled>保存先候補に追加</button>
+                
+                <button class="btn-nav" id="btn-nav-back"  title="戻る"  disabled>◀</button>
+                <button class="btn-nav" id="btn-nav-fwd"   title="進む"  disabled>▶</button>
+                <button class="btn-open-explorer" id="btn-open-current"
+                  title="現在のフォルダをエクスプローラーで開く">📂</button>
+                <div class="view-switcher">
+                  <button class="view-btn active" id="vbtn-list"   title="リスト表示">☰</button>
+                  <button class="view-btn"        id="vbtn-detail" title="詳細表示">≡</button>
+                  <button class="view-btn"        id="vbtn-tile"   title="タイル表示">⊞</button>
+                </div>
+                <select id="folder-sort-select" title="フォルダの並び順" style="
+                  font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;
+                  background:#fff;color:#444;cursor:pointer;font-family:inherit;max-width:100px;">
+                  <option value="name-asc">名前 ↑</option>
+                  <option value="name-desc">名前 ↓</option>
+                  <option value="created-asc">作成日 ↑</option>
+                  <option value="created-desc">作成日 ↓</option>
+                </select>
+                <div style="display:flex;align-items:center;gap:3px;">
+                  <input type="text" id="folder-kw-input" placeholder="🔍 フォルダを絞り込み"
+                    autocomplete="off" style="width:160px;border:1px solid #d0d0d0;
+                    border-radius:4px;padding:2px 7px;font-size:11px;outline:none;font-family:inherit;" />
+                  <button id="folder-kw-clear" title="クリア" style="
+                    background:none;border:none;cursor:pointer;color:#aaa;font-size:13px;
+                    padding:0 2px;display:none;line-height:1;">✕</button>
+                  <input type="text" class="new-folder-input" id="new-folder-input"
+                    placeholder="新しいフォルダ名" />
+                  <button class="new-folder-btn" id="new-folder-btn">＋ 作成</button>
+                </div>
+              </div>
+              <div class="explorer">
+                <div class="explorer-toolbar">
+                  <div class="breadcrumb" id="breadcrumb"></div>
+                </div>
+                <div class="tree-view" id="tree-view">
+                  <div class="tree-message">読み込み中…</div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- 保存履歴パネル -->\n          <div class=\"main-tab-panel\" id=\"panel-history\">\n            <div class=\"history-panel\">\n              <div class=\"history-infobar\" id=\"history-infobar\">\n                <span id=\"history-count\">0 件</span>\n                保存履歴情報: <span id=\"history-storage-size\">計算中…</span>\n                &nbsp;|&nbsp;保存サムネイル: <span id=\"history-idb-size\">計算中…</span>\n              </div>\n              <div id=\"history-pager-top\" class=\"history-pager\"></div>\n              <div class=\"history-list\" id=\"history-list\">\n                <div class=\"history-empty\">まだ保存履歴がありません</div>\n              </div>\n              <div id=\"history-pager-bottom\" class=\"history-pager\"></div>\n            </div>\n          </div>
+
+        </div>
+      </div>
+
+  </div>
+  </div>`;
+}
+
+// ----------------------------------------------------------------
+// イベント設定
+// ----------------------------------------------------------------
+// @spec 設計書類/画面別/07_保存ウィンドウ_詳細.md
+function setupModalEvents(
+  shadow, host, imageUrl, pageUrl, defaultFilename,
+  existingTags, lastSaveDir, tagDestinations,
+  recentTags, savedViewMode, explorerRootPath, bookmarks, modalSize, startPriority,
+  saveHistory, continuousSession, folderSort, recentSubTags, onCleanup,
+  globalAuthors, recentAuthors, authorDestinations,
+  recentTagDisplayCount = 20, bookmarkDisplayCount = 20,
+  initialRetainTag = false, initialRetainSubTag = false, initialRetainAuthor = false,
+  initialRetainedTags = [], initialRetainedSubTags = [], initialRetainedAuthors = [],
+  leftPanelOrder = ["preview", "recent-tags", "bookmarks"], leftPanelHeights = {}
+) {
+  // shadow/host は別ウィンドウモードでは document/null が渡される
+  const previewEl = document.getElementById("preview");
+  previewEl.style.display = "";
+  previewEl.src = imageUrl;
+  previewEl.addEventListener("error", async () => {
+    // ① background XHR（Referer付き）で取得
+    try {
+      const res = await browser.runtime.sendMessage({
+        type: "FETCH_IMAGE_AS_DATAURL",
+        url: imageUrl,
+      });
+      if (res?.dataUrl) { previewEl.src = res.dataUrl; return; }
+    } catch {}
+    // ② XHRも失敗した場合（pixiv等）→ Python経由で取得
+    try {
+      const res = await browser.runtime.sendMessage({
+        type: "FETCH_PREVIEW",
+        url: imageUrl,
+      });
+      if (res?.dataUrl) { previewEl.src = res.dataUrl; return; }
+      // v1.22.9: GIF は base64 チャンクで返るため Blob URL に組み立てる
+      if (res && Array.isArray(res.chunksB64)) {
+        const arrays = [];
+        for (const b64 of res.chunksB64) {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          arrays.push(arr);
+        }
+        const blob = new Blob(arrays, { type: res.mime || "image/gif" });
+        const blobUrl = URL.createObjectURL(blob);
+        previewEl.src = blobUrl;
+        // モーダルが閉じられる時点で revoke する手段が無いため、次の src 変更時に
+        // 自動 GC に委ねる（モーダル自体が閉じた際にページごと破棄される）
+      }
+    } catch {}
+  }, { once: true });
+
+  // ウィンドウのリサイズを監視して外枠サイズ（outerWidth/Height）を保存
+  const card = document.querySelector(".card");
+  let resizeTimer = null;
+  const resizeObs = new ResizeObserver(() => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const w = window.outerWidth;
+      const h = window.outerHeight;
+      if (w >= 600 && h >= 360) {
+        browser.runtime.sendMessage({
+          type: "SET_MODAL_SIZE",
+          size: { width: w, height: h },
+        });
+      }
+    }, 400);
+  });
+  resizeObs.observe(card);
+
+  // ================================================================
+  // フォルダエクスプローラー
+  // ================================================================
+
+  let currentPath = null;
+  // selectedPath：候補モードで選んだパス（候補クリック時のみ設定）
+  // フォルダ選択・タグ未選択時は currentPath を直接使う
+  let selectedPath = null;
+  let currentEntries = [];
+  let currentResolvedPath = null;
+  // ①表示形式：storage から復元
+  let viewMode = savedViewMode || "list";
+
+  // フォルダ並び順
+  let currentFolderSort = folderSort || "name-asc";
+  const folderSortSelect = document.getElementById("folder-sort-select");
+  if (folderSortSelect) {
+    folderSortSelect.value = currentFolderSort;
+    folderSortSelect.addEventListener("change", () => {
+      currentFolderSort = folderSortSelect.value;
+      browser.storage.local.set({ explorerFolderSort: currentFolderSort });
+      if (lastEntries && lastResolvedPath !== undefined) {
+        renderEntries(lastEntries, lastResolvedPath);
+      }
+    });
+  }
+
+  // フォルダ絞り込みキーワード
+  let folderKwFilter = "";
+  let folderScrollPos = 0;
+  const folderKwInput = document.getElementById("folder-kw-input");
+  const folderKwClear = document.getElementById("folder-kw-clear");
+  if (folderKwInput) {
+    folderKwInput.addEventListener("input", () => {
+      const prev = folderKwFilter;
+      folderKwFilter = folderKwInput.value;
+      folderKwClear.style.display = folderKwFilter ? "" : "none";
+      // 絞り込みなし→ありになる直前のスクロール位置を記憶
+      if (!prev && folderKwFilter) {
+        const tv = document.getElementById("tree-view");
+        folderScrollPos = tv?.scrollTop ?? 0;
+      }
+      if (lastEntries && lastResolvedPath !== undefined) {
+        renderEntries(lastEntries, lastResolvedPath);
+      }
+    });
+    folderKwClear.addEventListener("click", () => {
+      folderKwInput.value = "";
+      folderKwFilter = "";
+      folderKwClear.style.display = "none";
+      if (lastEntries && lastResolvedPath !== undefined) {
+        renderEntries(lastEntries, lastResolvedPath);
+      }
+    });
+  }
+
+  const breadcrumbStack = [];
+
+  // フォルダ移動履歴（戻る・進む用）各エントリ: { path, stack[] }
+  const navHistory = [];
+  let navHistoryIndex = -1;
+
+  // 候補モード: "suggest"（候補リスト） or "explorer"（フォルダ選択）
+  // getEffectiveSavePath から参照するため、ここで宣言する
+  let destMode = "suggest";
+
+  /**
+   * 保存ボタンの有効・無効を更新する。
+   * - 候補モード（suggest）：selectedPath があれば有効
+   * - エクスプローラーモード or タグ未選択：currentPath があれば有効
+   *   （currentPath=null はドライブ一覧画面 = フォルダ未選択）
+   */
+  function updateSaveButton() {
+    const effectivePath = getEffectiveSavePath();
+    document.getElementById("btn-save").disabled = !effectivePath;
+  }
+
+  /**
+   * 実際に保存に使うパスを返す。
+   * - 候補モードで候補を選んでいる → selectedPath
+   * - それ以外 → currentPath（表示中フォルダ）
+   */
+  function getEffectiveSavePath() {
+    if (destMode === "suggest" && selectedPath) return selectedPath;
+    return currentPath;
+  }
+
+  updateSaveButton();
+
+  function updatePathDisplay(path) {
+    const el = document.getElementById("selected-path-display");
+    const effective = path || getEffectiveSavePath();
+    if (effective) {
+      el.textContent = effective;
+      el.classList.remove("unset");
+    } else if (lastSaveDir) {
+      el.textContent = `前回: ${lastSaveDir}`;
+      el.classList.add("unset");
+    } else {
+      el.textContent = "フォルダが選択されていません";
+      el.classList.add("unset");
+    }
+  }
+
+  updatePathDisplay(selectedPath);
+
+  // ---- 表示切り替えボタン（①前回の表示形式を反映） ----
+  const viewButtons = {
+    list:   document.getElementById("vbtn-list"),
+    detail: document.getElementById("vbtn-detail"),
+    tile:   document.getElementById("vbtn-tile"),
+  };
+
+  // 初期アクティブ状態を savedViewMode に合わせる
+  Object.entries(viewButtons).forEach(([mode, btn]) => {
+    btn.classList.toggle("active", mode === viewMode);
+  });
+
+  Object.entries(viewButtons).forEach(([mode, btn]) => {
+    btn.addEventListener("click", () => {
+      if (viewMode === mode) return;
+      viewMode = mode;
+      Object.values(viewButtons).forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      // ①変更を storage に保存
+      browser.runtime.sendMessage({ type: "SET_EXPLORER_VIEW_MODE", mode });
+      const view = document.getElementById("tree-view");
+      view.className = `tree-view view-${mode}`;
+      if (currentEntries.length > 0 || currentResolvedPath !== null) {
+        renderEntries(currentEntries, currentResolvedPath);
+      }
+    });
+  });
+
+  // ================================================================
+  // ④ブックマーク描画
+  // ================================================================
+  function renderBookmarks() {
+    const list = document.getElementById("bookmark-list");
+    list["innerHTML"] = "";
+
+    if (!bookmarks || bookmarks.length === 0) {
+      list["innerHTML"] = `<div class="bookmark-empty">ブックマークがありません</div>`;
+      return;
+    }
+
+    for (const bm of bookmarks.slice(0, bookmarkDisplayCount)) {
+      const row = document.createElement("div");
+      row.className = "bookmark-row" + (selectedPath === bm.path ? " selected" : "");
+      row["innerHTML"] = `
+        <span class="bm-icon">⭐</span>
+        <span class="bm-label">${escapeHtml(bm.label || bm.path.split("\\").pop())}</span>
+        <span class="bm-path">${escapeHtml(bm.path)}</span>`;
+
+      row.addEventListener("click", () => {
+        // 候補モードのときはフォルダ選択モードに切り替える
+        if (destMode === "suggest") switchDestMode("explorer");
+        // ブックマークをクリックするとそのフォルダへ直接ナビゲート
+        const parts = bm.path.split("\\").filter(Boolean);
+        const stack = parts.reduce((acc, seg, i) => {
+          const p = parts.slice(0, i + 1).join("\\");
+          acc.push({ label: seg, path: p });
+          return acc;
+        }, []);
+        navigateTo(bm.path, stack);
+      });
+
+      list.appendChild(row);
+    }
+  }
+
+  renderBookmarks();
+
+  // ================================================================
+  // メインタブ（保存先 / 保存履歴）
+  // ================================================================
+  const mainTabDest    = document.getElementById("main-tab-dest");
+  const mainTabHistory = document.getElementById("main-tab-history");
+  const panelDest      = document.getElementById("panel-dest");
+  const panelHistory   = document.getElementById("panel-history");
+
+  function switchMainTab(tab) {
+    if (tab === "dest") {
+      mainTabDest.classList.add("active");
+      mainTabHistory.classList.remove("active");
+      panelDest.classList.add("active");
+      panelHistory.classList.remove("active");
+      historyFilterWrap.classList.remove("visible");
+    } else {
+      mainTabHistory.classList.add("active");
+      mainTabDest.classList.remove("active");
+      panelHistory.classList.add("active");
+      panelDest.classList.remove("active");
+      historyFilterWrap.classList.add("visible");
+    }
+    // a3: 権利者エリアとチップエリアの表示切り替え
+    updateMainTabbarExtras();
+  }
+
+  /** a3: 保存先タブ表示中のみ main-tabbar-author-area と main-chip-area を表示する */
+  function updateMainTabbarExtras() {
+    const authorArea = document.getElementById("main-tabbar-author-area");
+    const chipArea   = document.getElementById("main-chip-area");
+    const isDestTab  = panelDest.classList.contains("active");
+    if (authorArea) authorArea.style.display = isDestTab ? "flex" : "none";
+    if (chipArea)   chipArea.style.display   = isDestTab ? "flex" : "none";
+  }
+
+  mainTabDest.addEventListener("click",    () => switchMainTab("dest"));
+  mainTabHistory.addEventListener("click", () => switchMainTab("history"));
+
+  // ================================================================
+  // 保存履歴描画
+  // ================================================================
+  // v1.21.1: 絞り込み入力をチップ化。canonical はチップ配列、互換 shadow として文字列を保持。
+  let historyFilterTagChips    = []; // 確定済みタグチップ
+  let historyFilterAuthorChips = []; // 確定済み権利者チップ
+  let historyFilterTag    = ""; // shadow: chips.join(" ")（既存コード互換）
+  let historyFilterAuthor = ""; // shadow: chips.join(" ")（既存コード互換）
+  let historyFilterMode   = "and"; // "and" | "or"
+  // v1.32.2 GROUP-28 mvdl：GIF のみ → プルダウン化
+  // "all" | "gif" | "audio"
+  let historyFormatFilter = "all";
+  // GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+  let historyFilenameFilter = "";
+  // v1.46.8 GROUP-67：保存履歴フィルター 3 要素（filter mode / format filter / fav toggle）の永続値を初期化時に読込
+  // settings.js と共有 storage key を使用、Firefox bfcache の visual restore による状態乖離を解消
+  // GROUP-21-a：histFilenameFilter も追加
+  browser.storage.local.get(["histFilterMode", "histFormatFilter", "histFavFilter", "histFilenameFilter"]).then(r => {
+    if (typeof r.histFilterMode === "string") {
+      historyFilterMode = r.histFilterMode;
+      const sel = document.getElementById("history-filter-mode");
+      if (sel) sel.value = historyFilterMode;
+    }
+    if (typeof r.histFormatFilter === "string") {
+      historyFormatFilter = r.histFormatFilter;
+      const sel = document.getElementById("history-format-filter");
+      if (sel) sel.value = historyFormatFilter;
+    }
+    if (typeof r.histFavFilter === "boolean") {
+      _modalHistFavFilter = r.histFavFilter;
+      const btn = document.getElementById("history-fav-filter-toggle");
+      if (btn) {
+        btn.setAttribute("aria-pressed", _modalHistFavFilter ? "true" : "false");
+        btn.textContent = _modalHistFavFilter ? "❤️ お気に入りのみ" : "🤍 お気に入りのみ";
+      }
+    }
+    if (typeof r.histFilenameFilter === "string") {
+      historyFilenameFilter = r.histFilenameFilter;
+      const inp = document.getElementById("history-filename-filter");
+      if (inp) inp.value = historyFilenameFilter;
+      const clr = document.getElementById("history-filename-filter-clear");
+      if (clr) clr.style.display = historyFilenameFilter ? "" : "none";
+    }
+    // 既に初期 render 済の可能性があるため再描画
+    if (typeof renderHistory === "function") renderHistory();
+  }).catch(() => {});
+  let _historyRenderGen = 0; // renderHistory() の世代番号（非同期競合による二重描画防止）
+
+  // v1.32.2 GROUP-28 mvdl：保存ウィンドウの保存履歴にも音声再生機構
+  // （settings.js 側の _histAudioCache と同等、modal ウィンドウごとに独立）
+  const _modalAudioCache = new Map(); // entry.id → {audio, blobUrl}
+  const _modalAudioPlayingIds = new Set();
+
+  // v1.33.0 GROUP-32-b：保存ウィンドウ側の選択状態管理（音声一括トグル用）
+  const _modalHistSelected = new Set(); // 選択されている entry.id の集合
+
+  function _modalUpdateAudioButtonsForEntry(entryId, playing) {
+    document.querySelectorAll(`.history-audio-icon[data-audio-entry-id="${entryId}"]`).forEach(btn => {
+      btn.dataset.muted = playing ? "0" : "1";
+      btn.textContent = playing ? "🔊" : "🔇";
+    });
+  }
+
+  async function _modalToggleAudio(entry, btn) {
+    const existing = _modalAudioCache.get(entry.id);
+    if (existing && existing.audio && !existing.audio.paused) {
+      try { existing.audio.pause(); existing.audio.currentTime = 0; } catch (_) {}
+      _modalAudioPlayingIds.delete(entry.id);
+      _modalUpdateAudioButtonsForEntry(entry.id, false);
+      return;
+    }
+
+    const paths = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
+    const primary = paths[0];
+    if (!primary || !entry.audioFilename) {
+      console.warn(`[modal-hist-audio] パス情報がありません`, { entry });
+      return;
+    }
+    const audioPath = `${primary.replace(/[\\/]+$/, "")}\\${entry.audioFilename}`;
+
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "⏳";
+    try {
+      let cached = _modalAudioCache.get(entry.id);
+      if (!cached) {
+        const res = await browser.runtime.sendMessage({ type: "READ_FILE_CHUNKS_B64", path: audioPath });
+        if (!res || !res.ok || !Array.isArray(res.chunksB64)) {
+          console.warn(`[modal-hist-audio] 音声読込失敗`, res?.error, { path: audioPath });
+          btn.textContent = originalText;
+          btn.disabled = false;
+          return;
+        }
+        const arrays = [];
+        for (const b64 of res.chunksB64) {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          arrays.push(arr);
+        }
+        const blob = new Blob(arrays, { type: entry.audioMimeType || "audio/webm" });
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+        audio.loop = true;
+        audio.onpause = () => {
+          if (audio.ended || audio.currentTime === 0) {
+            _modalAudioPlayingIds.delete(entry.id);
+            _modalUpdateAudioButtonsForEntry(entry.id, false);
+          }
+        };
+        cached = { audio, blobUrl };
+        _modalAudioCache.set(entry.id, cached);
+      }
+      await cached.audio.play();
+      _modalAudioPlayingIds.add(entry.id);
+      _modalUpdateAudioButtonsForEntry(entry.id, true);
+    } catch (err) {
+      console.warn(`[modal-hist-audio] 音声再生エラー`, err);
+      btn.textContent = originalText;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // v1.33.0 GROUP-32-b：選択した履歴の音声を一括 ON/OFF
+  function _modalHasPlayingAudioInSelection() {
+    for (const id of _modalHistSelected) {
+      if (_modalAudioPlayingIds.has(id)) return true;
+    }
+    return false;
+  }
+
+  function _modalSelectedEntriesWithAudio(historyData) {
+    return (historyData || []).filter(e => _modalHistSelected.has(e.id) && e.audioFilename);
+  }
+
+  function _modalUpdateAudioToggleBtn(historyData) {
+    const btn = document.getElementById("history-audio-toggle-selected");
+    if (!btn) return;
+    const hasAudio = _modalSelectedEntriesWithAudio(historyData).length > 0;
+    btn.disabled = !hasAudio;
+    if (hasAudio) {
+      btn.textContent = _modalHasPlayingAudioInSelection() ? "🔇 音声 OFF" : "🔊 音声 ON";
+    } else {
+      btn.textContent = "🔊 音声 ON/OFF";
+    }
+  }
+
+  async function _modalToggleAudioSelected(historyData) {
+    const targets = _modalSelectedEntriesWithAudio(historyData);
+    if (targets.length === 0) return;
+    const shouldStop = _modalHasPlayingAudioInSelection();
+    // v1.41.4 GROUP-44：処理中モーダル
+    showBusyModal(shouldStop ? "音声停止中…" : "音声再生開始中…", `${targets.length} 件`, historyData);
+    try {
+      if (shouldStop) {
+        for (const entry of targets) {
+          const cached = _modalAudioCache.get(entry.id);
+          if (cached && cached.audio && !cached.audio.paused) {
+            try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+            _modalAudioPlayingIds.delete(entry.id);
+            _modalUpdateAudioButtonsForEntry(entry.id, false);
+          }
+        }
+      } else {
+        for (const entry of targets) {
+          if (_modalAudioPlayingIds.has(entry.id)) continue;
+          const iconBtn = document.querySelector(`.history-audio-icon[data-audio-entry-id="${entry.id}"]`);
+          const useBtn = iconBtn || document.createElement("button");
+          // eslint-disable-next-line no-await-in-loop
+          await _modalToggleAudio(entry, useBtn);
+        }
+      }
+      completeBusyModal(shouldStop ? `${targets.length} 件停止しました` : `${targets.length} 件再生開始しました`);
+    } finally { hideBusyModal(); }
+    _modalUpdateAudioToggleBtn(historyData);
+  }
+
+  // v1.37.0 GROUP-36-fav：保存ウィンドウ側のお気に入りフィルタ状態（独立トグル）
+  let _modalHistFavFilter = false;
+
+  // v1.37.0 GROUP-36-fav：DOM 上のハートボタンを同期
+  function _modalUpdateFavButtonsForEntry(entryId, isFav) {
+    document.querySelectorAll(`.history-fav-btn[data-fav-entry-id="${entryId}"]`).forEach(btn => {
+      btn.dataset.fav = isFav ? "1" : "0";
+      btn.textContent = isFav ? "❤️" : "🤍";
+      btn.title = isFav ? "お気に入り解除" : "お気に入り登録";
+      btn.setAttribute("aria-pressed", isFav ? "true" : "false");
+    });
+  }
+
+  // v1.37.0 GROUP-36-fav → v1.38.0：単一エントリのお気に入りトグル（保存ウィンドウ・オプティミスティック更新）
+  // - クリック直後に DOM／allEntries 即時反映、storage.local.set は裏で実行
+  // - 失敗時は DOM／メモリ／フィルタ表示をロールバックしてエラー表示
+  async function _modalToggleEntryFavorite(entryId, allEntries) {
+    const memEntry = Array.isArray(allEntries) ? allEntries.find(h => h.id === entryId) : null;
+    const prev = !!memEntry?.favorite;
+    const next = !prev;
+
+    // ① 即時 UI 反映：メモリ＋ DOM＋（必要なら）当該タイルのみ除去
+    if (memEntry) memEntry.favorite = next;
+    _modalUpdateFavButtonsForEntry(entryId, next);
+    let removedFromFilter = false;
+    if (_modalHistFavFilter && !next) {
+      // v1.39.1 GROUP-42-b：fav-filter ON で当該エントリが外れる時、全体再描画（renderHistory）
+      // ではなく該当タイルだけ DOM 除去（他の GIF タイルの再デコードを避ける）
+      _modalHistSelected.delete(entryId);
+      const list = document.getElementById("history-list");
+      if (list) {
+        list.querySelectorAll(`.history-item[data-entry-id="${entryId}"]`).forEach(el => el.remove());
+      }
+      removedFromFilter = true;
+    }
+
+    // ② 裏で永続化、失敗時はロールバック
+    try {
+      const history = await _readSaveHistory();
+      const e = history.find(h => h.id === entryId);
+      if (!e) throw new Error("saveHistory にエントリが見つかりません");
+      e.favorite = next;
+      await _setStorageWithHistoryMirror({ saveHistory: history });
+    } catch (err) {
+      if (memEntry) memEntry.favorite = prev;
+      _modalUpdateFavButtonsForEntry(entryId, prev);
+      if (removedFromFilter) {
+        // ロールバック時のみ全体再描画で除去タイルを取り戻す（稀ケースなので GIF 再デコードコスト許容）
+        renderHistory();
+      }
+      console.warn("[modal-fav] お気に入りトグル失敗、ロールバック", err);
+      try { showToast(shadow, `⚠️ お気に入りの保存に失敗しました`, true); } catch (_) {}
+    }
+  }
+
+  // v1.37.0 GROUP-36-fav-bulk：保存ウィンドウ側、選択した履歴の favorite を一括代入
+  async function _modalSetBulkFavorite(targetIds, value, allEntries) {
+    if (!targetIds || targetIds.length === 0) return 0;
+    const history = await _readSaveHistory();
+    const idSet = new Set(targetIds);
+    let changed = 0;
+    for (const h of history) {
+      if (idSet.has(h.id) && !!h.favorite !== !!value) {
+        h.favorite = !!value;
+        changed++;
+      }
+    }
+    if (changed > 0) {
+      await _setStorageWithHistoryMirror({ saveHistory: history });
+      if (Array.isArray(allEntries)) {
+        for (const h of allEntries) {
+          if (idSet.has(h.id)) h.favorite = !!value;
+        }
+      }
+      for (const id of targetIds) _modalUpdateFavButtonsForEntry(id, value);
+    }
+    // v1.39.1 GROUP-42-b：fav-filter ON で外れる場合、該当タイルだけ DOM 除去（GIF 再デコード回避）
+    if (_modalHistFavFilter && !value) {
+      const list = document.getElementById("history-list");
+      for (const id of targetIds) {
+        _modalHistSelected.delete(id);
+        if (list) list.querySelectorAll(`.history-item[data-entry-id="${id}"]`).forEach(el => el.remove());
+      }
+    }
+    return changed;
+  }
+
+  // v1.37.0 GROUP-36-fav-bulk：お気に入り追加／解除ボタンの活性状態
+  function _modalUpdateFavBulkBtns() {
+    const n = _modalHistSelected.size;
+    const addBtn    = document.getElementById("history-fav-add-selected");
+    const removeBtn = document.getElementById("history-fav-remove-selected");
+    if (addBtn)    addBtn.disabled    = n === 0;
+    if (removeBtn) removeBtn.disabled = n === 0;
+  }
+
+  // v1.37.0 GROUP-37：保存ウィンドウの全選択／選択解除ボタンの活性状態
+  // 全選択：絞り込み結果に「未選択」が 1 件以上ある時のみ活性
+  // 選択解除：選択件数 > 0 で活性
+  function _modalUpdateSelectAllBtns(filtered) {
+    const selectAllBtn  = document.getElementById("history-select-all");
+    const deselectBtn   = document.getElementById("history-deselect-all");
+    if (selectAllBtn) {
+      const allSelected = (filtered || []).length > 0 && (filtered || []).every(e => _modalHistSelected.has(e.id));
+      selectAllBtn.disabled = !filtered || filtered.length === 0 || allSelected;
+    }
+    if (deselectBtn) {
+      deselectBtn.disabled = _modalHistSelected.size === 0;
+    }
+  }
+
+  let _histPage     = 0;   // 現在ページ（0始まり）
+  let _histPageSize = 100; // 1ページの表示件数（初期値、storage.get で上書き）
+  // v1.26.2: ページ内ファーストビュー先行描画・裏読み込みの定数
+  const _HIST_INITIAL_BATCH_SIZE = 6;  // 初期同期描画の件数（グループ表示時は「グループ数」基準）
+  const _HIST_BG_CHUNK_SIZE      = 3;  // requestIdleCallback 1 回あたりの追加描画件数
+  // ※ modalHistoryPageSize の storage 読込は DOMContentLoaded 末尾の初回 renderHistory() 呼出で
+  // await 扱いするため、ここでの重複 .then() は削除（race condition の原因だった）
+
+  // 絞り込み入力欄の制御
+  const historyFilterWrap        = document.getElementById("history-filter-wrap");
+  const historyFilterInput       = document.getElementById("history-filter-input");
+  const historyFilterClear       = document.getElementById("history-filter-clear");
+  const historyAuthorFilter      = document.getElementById("history-author-filter");
+  const historyAuthorFilterClear = document.getElementById("history-author-filter-clear");
+  const historyFilterModeSelect  = document.getElementById("history-filter-mode");
+
+  // ---- v1.21.1: 履歴絞り込み チップ入力 ----
+  const historyFilterBox         = document.getElementById("history-filter-box");
+  const historyFilterSuggest     = document.getElementById("history-filter-suggest");
+  const historyAuthorFilterBox   = document.getElementById("history-author-filter-box");
+  const historyAuthorFilterSuggest = document.getElementById("history-author-filter-suggest");
+
+  function renderTagChips() {
+    // 既存の chip ノードを除去して再構築
+    Array.from(historyFilterBox.querySelectorAll(".hist-chip")).forEach(n => n.remove());
+    historyFilterTagChips.forEach((chip, idx) => {
+      const el = document.createElement("span");
+      el.className = "hist-chip";
+      // GROUP-22-tab：✕ ボタンに tabindex="-1"（Tab focus 遷移防止）
+      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" tabindex="-1" title="削除">×</button>`;
+      historyFilterBox.insertBefore(el, historyFilterInput);
+    });
+    historyFilterClear.classList.toggle("visible", historyFilterTagChips.length > 0);
+  }
+  function renderAuthorChips() {
+    Array.from(historyAuthorFilterBox.querySelectorAll(".hist-chip")).forEach(n => n.remove());
+    historyFilterAuthorChips.forEach((chip, idx) => {
+      const el = document.createElement("span");
+      el.className = "hist-chip author";
+      // GROUP-22-tab：✕ ボタンに tabindex="-1"（Tab focus 遷移防止）
+      el.innerHTML = `${escapeHtml(chip)}<button class="hist-chip-x" data-idx="${idx}" tabindex="-1" title="削除">×</button>`;
+      historyAuthorFilterBox.insertBefore(el, historyAuthorFilter);
+    });
+    historyAuthorFilterClear.classList.toggle("visible", historyFilterAuthorChips.length > 0);
+  }
+
+  function setHistoryTagChips(chips) {
+    historyFilterTagChips = chips;
+    historyFilterTag = chips.join(" "); // shadow
+    _histPage = 0;
+    renderTagChips();
+    renderHistory();
+  }
+  function setHistoryAuthorChips(chips) {
+    historyFilterAuthorChips = chips;
+    historyFilterAuthor = chips.join(" "); // shadow
+    _histPage = 0;
+    renderAuthorChips();
+    renderHistory();
+  }
+
+  // 既存コードからの呼び出し互換（タグクリックでトグル）
+  function toggleHistoryFilterTag(tag) {
+    const key = tag;
+    const idx = historyFilterTagChips.indexOf(key);
+    if (idx !== -1) {
+      const next = [...historyFilterTagChips];
+      next.splice(idx, 1);
+      setHistoryTagChips(next);
+    } else {
+      setHistoryTagChips([...historyFilterTagChips, key]);
+    }
+  }
+  // 作者チップクリック：履歴パネルからの呼び出し互換
+  function setHistoryAuthorFilter(author) {
+    if (!author) { setHistoryAuthorChips([]); return; }
+    setHistoryAuthorChips([author]);
+  }
+
+  /**
+   * 文字列正規化（v1.21.3）
+   * サジェストのマッチで使用：
+   * - NFKC で半角カナ→全角カナ・全角英数→半角英数を統一
+   * - カタカナ → ひらがな（U+30A1〜U+30F6 を -0x60 シフト）
+   * - 小文字化
+   * これにより「アサ」「あさ」「ｱｻ」「Asa」「ＡＳＡ」が同一視される。
+   */
+  function _normalizeForMatch(s) {
+    if (!s) return "";
+    let t = String(s).normalize("NFKC").toLowerCase();
+    let out = "";
+    for (let i = 0; i < t.length; i++) {
+      const c = t.charCodeAt(i);
+      if (c >= 0x30a1 && c <= 0x30f6) {
+        out += String.fromCharCode(c - 0x60);
+      } else {
+        out += t[i];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * チップ入力の共通セットアップ
+   *   box: .hist-chip-box 要素
+   *   input: 入力欄
+   *   suggest: サジェスト <div>
+   *   commitOnSpace: 半角スペースで確定するか（タグ=true、権利者=false）
+   *   getSuggestions: () => Promise<string[]>
+   *   getChips / setChips: 状態アクセサ
+   */
+  function _setupHistoryChipInput({ box, input, suggest, commitOnSpace, getSuggestions, getChips, setChips }) {
+    let activeIdx = -1;
+
+    function hideSuggest() {
+      suggest.classList.remove("visible");
+      activeIdx = -1;
+    }
+    async function showSuggest(q) {
+      const qRaw = (q || "").trim();
+      // v1.21.2: 未入力時はサジェスト非表示（従来は全件表示していたが意味が薄い）
+      if (!qRaw) { hideSuggest(); return; }
+      // v1.21.3: かな/カナ・半角/全角を無視して比較
+      const qNorm = _normalizeForMatch(qRaw);
+      const list = await getSuggestions();
+      const chips = new Set(getChips());
+      // v1.21.2: 前方一致（startsWith）に変更
+      // v1.21.3: 比較は _normalizeForMatch を介して行う
+      const filtered = (list || [])
+        .filter(x => !chips.has(x))
+        .filter(x => _normalizeForMatch(x).startsWith(qNorm))
+        .slice(0, 30);
+      if (filtered.length === 0) { hideSuggest(); return; }
+      suggest.innerHTML = filtered
+        .map((x, i) => `<div class="hist-chip-suggest-item${i === 0 ? " active" : ""}" data-value="${escapeHtml(x)}">${escapeHtml(x)}</div>`)
+        .join("");
+      activeIdx = 0;
+      suggest.classList.add("visible");
+    }
+    function setActive(idx) {
+      const items = Array.from(suggest.querySelectorAll(".hist-chip-suggest-item"));
+      if (!items.length) return;
+      const n = items.length;
+      activeIdx = ((idx % n) + n) % n;
+      items.forEach((it, i) => it.classList.toggle("active", i === activeIdx));
+      items[activeIdx].scrollIntoView({ block: "nearest" });
+    }
+    function commitInput(raw) {
+      const val = (raw ?? input.value).trim();
+      if (!val) return false;
+      const chips = getChips();
+      if (chips.includes(val)) { input.value = ""; return true; }
+      setChips([...chips, val]);
+      input.value = "";
+      return true;
+    }
+
+    input.addEventListener("focus", () => {
+      box.classList.add("focus");
+      showSuggest(input.value);
+    });
+    input.addEventListener("blur", () => {
+      box.classList.remove("focus");
+      // 少し遅延してクリックを通す
+      setTimeout(hideSuggest, 150);
+    });
+    input.addEventListener("input", () => {
+      showSuggest(input.value);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const items = Array.from(suggest.querySelectorAll(".hist-chip-suggest-item"));
+        if (suggest.classList.contains("visible") && items[activeIdx]) {
+          commitInput(items[activeIdx].dataset.value);
+        } else {
+          commitInput();
+        }
+        showSuggest("");
+      } else if (e.key === "," || (commitOnSpace && e.key === " ")) {
+        if (input.value.trim()) {
+          e.preventDefault();
+          commitInput();
+          showSuggest("");
+        }
+      } else if (e.key === "Backspace" && input.value === "") {
+        const chips = getChips();
+        if (chips.length > 0) {
+          setChips(chips.slice(0, -1));
+        }
+      } else if (e.key === "ArrowDown") {
+        if (suggest.classList.contains("visible")) { e.preventDefault(); setActive(activeIdx + 1); }
+      } else if (e.key === "ArrowUp") {
+        if (suggest.classList.contains("visible")) { e.preventDefault(); setActive(activeIdx - 1); }
+      } else if (e.key === "Escape") {
+        hideSuggest();
+        input.blur();
+      }
+    });
+
+    suggest.addEventListener("mousedown", (e) => {
+      const item = e.target.closest(".hist-chip-suggest-item");
+      if (!item) return;
+      e.preventDefault(); // blur による hideSuggest を抑止
+      commitInput(item.dataset.value);
+      // 続けて選びやすいよう再表示
+      showSuggest("");
+      input.focus();
+    });
+
+    // チップ削除（×ボタン）
+    box.addEventListener("click", (e) => {
+      const btn = e.target.closest(".hist-chip-x");
+      if (!btn) return;
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx, 10);
+      const chips = [...getChips()];
+      chips.splice(idx, 1);
+      setChips(chips);
+    });
+    // 箱内クリックで input にフォーカス
+    box.addEventListener("click", (e) => {
+      if (e.target === box) input.focus();
+    });
+  }
+
+  _setupHistoryChipInput({
+    box: historyFilterBox,
+    input: historyFilterInput,
+    suggest: historyFilterSuggest,
+    commitOnSpace: true,
+    getSuggestions: async () => {
+      const { globalTags } = await browser.storage.local.get("globalTags");
+      return globalTags || [];
+    },
+    getChips: () => historyFilterTagChips,
+    setChips: setHistoryTagChips,
+  });
+  _setupHistoryChipInput({
+    box: historyAuthorFilterBox,
+    input: historyAuthorFilter,
+    suggest: historyAuthorFilterSuggest,
+    commitOnSpace: false, // 権利者名はスペースを含むことがあるため
+    getSuggestions: async () => globalAuthors || [],
+    getChips: () => historyFilterAuthorChips,
+    setChips: setHistoryAuthorChips,
+  });
+
+  historyFilterClear.addEventListener("click", () => setHistoryTagChips([]));
+  historyAuthorFilterClear.addEventListener("click", () => setHistoryAuthorChips([]));
+
+  // GROUP-21-a：ファイル名絞り込み（部分一致、case insensitive）
+  const historyFilenameFilterInput = document.getElementById("history-filename-filter");
+  const historyFilenameFilterClear = document.getElementById("history-filename-filter-clear");
+  if (historyFilenameFilterInput) {
+    historyFilenameFilterInput.addEventListener("input", () => {
+      historyFilenameFilter = historyFilenameFilterInput.value || "";
+      browser.storage.local.set({ histFilenameFilter: historyFilenameFilter }).catch(() => {});
+      if (historyFilenameFilterClear) historyFilenameFilterClear.style.display = historyFilenameFilter ? "" : "none";
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+  if (historyFilenameFilterClear) {
+    historyFilenameFilterClear.addEventListener("click", () => {
+      historyFilenameFilter = "";
+      if (historyFilenameFilterInput) historyFilenameFilterInput.value = "";
+      browser.storage.local.set({ histFilenameFilter: "" }).catch(() => {});
+      historyFilenameFilterClear.style.display = "none";
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+
+  if (historyFilterModeSelect) {
+    historyFilterModeSelect.addEventListener("change", () => {
+      historyFilterMode = historyFilterModeSelect.value;
+      // v1.46.8 GROUP-67：永続化（settings.js と共有 storage key）
+      browser.storage.local.set({ histFilterMode: historyFilterMode }).catch(() => {});
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+
+  // v1.32.2：形式フィルター（GIF のみ → プルダウン化）
+  const historyFormatFilterSelect = document.getElementById("history-format-filter");
+  if (historyFormatFilterSelect) {
+    historyFormatFilterSelect.addEventListener("change", (e) => {
+      historyFormatFilter = e.target.value || "all";
+      // v1.46.8 GROUP-67：永続化
+      browser.storage.local.set({ histFormatFilter: historyFormatFilter }).catch(() => {});
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+
+  // v1.33.0 GROUP-32-b：選択した履歴の音声を一括 ON/OFF
+  const historyAudioToggleBtn = document.getElementById("history-audio-toggle-selected");
+  if (historyAudioToggleBtn) {
+    historyAudioToggleBtn.addEventListener("click", async () => {
+      await _modalToggleAudioSelected(saveHistory);
+    });
+  }
+
+  // v1.37.0 GROUP-36-fav-filter：お気に入りのみ表示する独立トグル（保存ウィンドウ）
+  const historyFavFilterBtn = document.getElementById("history-fav-filter-toggle");
+  if (historyFavFilterBtn) {
+    historyFavFilterBtn.addEventListener("click", () => {
+      _modalHistFavFilter = !_modalHistFavFilter;
+      // v1.46.8 GROUP-67：永続化
+      browser.storage.local.set({ histFavFilter: _modalHistFavFilter }).catch(() => {});
+      historyFavFilterBtn.setAttribute("aria-pressed", _modalHistFavFilter ? "true" : "false");
+      historyFavFilterBtn.textContent = _modalHistFavFilter ? "❤️ お気に入りのみ" : "🤍 お気に入りのみ";
+      _histPage = 0;
+      renderHistory();
+    });
+  }
+
+  // v1.37.0 GROUP-36-fav-bulk：選択した履歴を一括お気に入り追加／解除（GROUP-38：処理中表示）
+  // v1.41.4 GROUP-44：busy modal をプレビュー画像つきで追加（既存の btn 表示変更も維持）
+  document.getElementById("history-fav-add-selected")?.addEventListener("click", async (e) => {
+    if (!_modalHistSelected.size) return;
+    const btn = e.currentTarget;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "⏳ 処理中…";
+    const ids = [..._modalHistSelected];
+    showBusyModal("お気に入り追加中…", `${ids.length} 件`, saveHistory);
+    try {
+      await _modalSetBulkFavorite(ids, true, saveHistory);
+      completeBusyModal(`${ids.length} 件をお気に入りに追加しました`);
+    } finally {
+      btn.textContent = original;
+      _modalUpdateFavBulkBtns();
+      hideBusyModal();
+    }
+  });
+  document.getElementById("history-fav-remove-selected")?.addEventListener("click", async (e) => {
+    if (!_modalHistSelected.size) return;
+    const btn = e.currentTarget;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "⏳ 処理中…";
+    const ids = [..._modalHistSelected];
+    showBusyModal("お気に入り解除中…", `${ids.length} 件`, saveHistory);
+    try {
+      await _modalSetBulkFavorite(ids, false, saveHistory);
+      completeBusyModal(`${ids.length} 件のお気に入りを解除しました`);
+    } finally {
+      btn.textContent = original;
+      _modalUpdateFavBulkBtns();
+      hideBusyModal();
+    }
+  });
+
+  // v1.37.0 GROUP-37：保存ウィンドウの全選択／選択解除（v1.33.2 パターン：絞り込み中は絞り込み結果対象）
+  document.getElementById("history-select-all")?.addEventListener("click", () => {
+    // renderHistory と同じフィルタ条件で絞り込み結果を計算
+    const filtered = _modalComputeFiltered();
+    if (!filtered.length) return;
+    for (const e of filtered) _modalHistSelected.add(e.id);
+    // チェックボックス DOM 同期
+    document.querySelectorAll(".history-select-box").forEach(cb => {
+      const id = cb.dataset.entryId;
+      if (id && _modalHistSelected.has(id)) cb.checked = true;
+    });
+    _modalUpdateAudioToggleBtn(saveHistory);
+    _modalUpdateFavBulkBtns();
+    _modalUpdateSelectAllBtns(filtered);
+  });
+  document.getElementById("history-deselect-all")?.addEventListener("click", () => {
+    if (!_modalHistSelected.size) return;
+    _modalHistSelected.clear();
+    document.querySelectorAll(".history-select-box").forEach(cb => { cb.checked = false; });
+    _modalUpdateAudioToggleBtn(saveHistory);
+    _modalUpdateFavBulkBtns();
+    _modalUpdateSelectAllBtns(_modalComputeFiltered());
+  });
+
+  // v1.37.0 GROUP-37：renderHistory と同じフィルタ条件を呼び出す軽量版（全選択ボタン用）
+  function _modalComputeFiltered() {
+    if (!saveHistory || saveHistory.length === 0) return [];
+    const tagChipsLower    = historyFilterTagChips.map(c => c.toLowerCase());
+    const authorChipsLower = historyFilterAuthorChips.map(c => c.toLowerCase());
+    const hasTagFilter     = tagChipsLower.length > 0;
+    const hasAuthFilter    = authorChipsLower.length > 0;
+    let filtered = saveHistory;
+    if (hasTagFilter || hasAuthFilter) {
+      filtered = filtered.filter(e => {
+        const entryTags = (e.tags || []).map(t => t.toLowerCase());
+        const tagMatch = !hasTagFilter || (
+          historyFilterMode === "and"
+            ? tagChipsLower.every(chip => entryTags.some(t => t === chip))
+            : tagChipsLower.some(chip => entryTags.some(t => t === chip))
+        );
+        const eAuthors = (e.authors || (e.author ? [e.author] : [])).map(a => a.toLowerCase());
+        const authorMatch = !hasAuthFilter || (
+          historyFilterMode === "and"
+            ? authorChipsLower.every(chip => eAuthors.some(a => a === chip))
+            : authorChipsLower.some(chip => eAuthors.some(a => a === chip))
+        );
+        if (hasTagFilter && hasAuthFilter) {
+          return historyFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+        }
+        return tagMatch && authorMatch;
+      });
+    }
+    if (historyFormatFilter === "gif") {
+      filtered = filtered.filter(e => /\.gif$/i.test(e.filename || ""));
+    } else if (historyFormatFilter === "audio") {
+      filtered = filtered.filter(e => !!e.audioFilename);
+    }
+    if (_modalHistFavFilter) {
+      filtered = filtered.filter(e => !!e.favorite);
+    }
+    // GROUP-21-a：ファイル名部分一致（case insensitive）
+    if (historyFilenameFilter) {
+      const needle = historyFilenameFilter.toLowerCase();
+      filtered = filtered.filter(e => (e.filename || "").toLowerCase().includes(needle));
+    }
+    return filtered;
+  }
+
+  function renderHistory() {
+    const gen = ++_historyRenderGen; // この呼び出しの世代番号を確保
+    const list = document.getElementById("history-list");
+    // v1.46.15 GROUP-72 Phase C-3-opt：smart reuse モード判定。
+    // v1.46.17 GROUP-74 fix：sync 部での src="" / innerHTML="" 切替えを廃止し、
+    // mode 判定（async）後に branch 別に clear するよう移動。
+    // 旧実装は sync 部で「smart reuse 期待で innerHTML 残置」したが、async 側で
+    // mode==="group" の場合 chunked 経路へ落ちて list 残置のまま appendChild するため
+    // 旧 item に src="" が残ったまま新 item が追加され、古い空 tile が表示される事象に。
+    // window.__phaseC3OptForceRebuildIds が Set ならそれを force rebuild 対象として smart reuse。
+    // 未指定なら従来通りの全削除＋再構築（filter / page / 表示モード変更時の安全策）。
+    const forceRebuildIds = (typeof window !== "undefined" && window.__phaseC3OptForceRebuildIds instanceof Set)
+      ? window.__phaseC3OptForceRebuildIds
+      : null;
+
+    // infobar 更新
+    const countEl   = document.getElementById("history-count");
+    const storageSz = document.getElementById("history-storage-size");
+    const idbSz     = document.getElementById("history-idb-size");
+    browser.runtime.sendMessage({ type: "GET_STORAGE_SIZE" }).then(r => {
+      if (storageSz && r) storageSz.textContent = r.storageSizeStr;
+      if (idbSz && r)     idbSz.textContent     = r.idbSizeStr;
+    }).catch(() => {});
+
+    if (!saveHistory || saveHistory.length === 0) {
+      if (countEl) countEl.textContent = "0 件";
+      list["innerHTML"] = `<div class="history-empty">まだ保存履歴がありません</div>`;
+      return;
+    }
+
+    // フィルタ適用（タグ・作者 絞り込み） — v1.21.1: チップ配列を canonical として使用
+    const tagChipsLower    = historyFilterTagChips.map(c => c.toLowerCase());
+    const authorChipsLower = historyFilterAuthorChips.map(c => c.toLowerCase());
+    let filtered           = saveHistory;
+    const hasTagFilter     = tagChipsLower.length > 0;
+    const hasAuthFilter    = authorChipsLower.length > 0;
+    if (hasTagFilter || hasAuthFilter) {
+      filtered = filtered.filter(e => {
+        const entryTags = (e.tags || []).map(t => t.toLowerCase());
+        const tagMatch = !hasTagFilter || (
+          historyFilterMode === "and"
+            ? tagChipsLower.every(chip => entryTags.some(t => t === chip))
+            : tagChipsLower.some(chip => entryTags.some(t => t === chip))
+        );
+        const eAuthors = (e.authors || (e.author ? [e.author] : [])).map(a => a.toLowerCase());
+        const authorMatch = !hasAuthFilter || (
+          historyFilterMode === "and"
+            ? authorChipsLower.every(chip => eAuthors.some(a => a === chip))
+            : authorChipsLower.some(chip => eAuthors.some(a => a === chip))
+        );
+        // 両フィルター有効時のみモードを適用。片方のみの場合は active 側の結果をそのまま返す
+        if (hasTagFilter && hasAuthFilter) {
+          return historyFilterMode === "and" ? (tagMatch && authorMatch) : (tagMatch || authorMatch);
+        }
+        return tagMatch && authorMatch;
+      });
+    }
+    // v1.32.2 GROUP-28 mvdl：形式フィルター（GIF のみ / 音声付き）
+    if (historyFormatFilter === "gif") {
+      filtered = filtered.filter(e => /\.gif$/i.test(e.filename || ""));
+    } else if (historyFormatFilter === "audio") {
+      filtered = filtered.filter(e => !!e.audioFilename);
+    }
+    // v1.37.0 GROUP-36-fav-filter：お気に入りのみ表示
+    if (_modalHistFavFilter) {
+      filtered = filtered.filter(e => !!e.favorite);
+    }
+    // GROUP-21-a：ファイル名部分一致（case insensitive）
+    if (historyFilenameFilter) {
+      const needle = historyFilenameFilter.toLowerCase();
+      filtered = filtered.filter(e => (e.filename || "").toLowerCase().includes(needle));
+    }
+    const isFiltered = hasTagFilter || hasAuthFilter || historyFormatFilter !== "all" || _modalHistFavFilter;
+
+    const totalFiltered = filtered.length;
+    // ページ範囲を超えないよう補正
+    const totalPages = Math.max(1, Math.ceil(totalFiltered / _histPageSize));
+    if (_histPage >= totalPages) _histPage = totalPages - 1;
+
+    const pageSlice = filtered.slice(_histPage * _histPageSize, (_histPage + 1) * _histPageSize);
+
+    if (countEl) {
+      const suffix = isFiltered ? "（絞り込み中）" : "";
+      if (totalFiltered <= _histPageSize) {
+        countEl.textContent = `${totalFiltered} 件${suffix}`;
+      } else {
+        countEl.textContent = `${_histPage + 1}/${totalPages} ページ（全 ${totalFiltered} 件${suffix ? suffix.replace("（", "・") : ""}）`;
+      }
+    }
+
+    if (filtered.length === 0) {
+      list["innerHTML"] = `<div class="history-empty">絞り込み条件に一致する履歴がありません</div>`;
+      renderHistoryPager(0);
+      return;
+    }
+
+    renderHistoryPager(totalFiltered);
+
+    // 表示モード判定（storage.local から非同期取得して再描画）
+    browser.storage.local.get("historyDisplayMode").then(({ historyDisplayMode }) => {
+      // 古い世代の呼び出しは描画しない（二重描画防止）
+      if (gen !== _historyRenderGen) return;
+      const mode = historyDisplayMode || "normal";
+      // v1.46.17 GROUP-74：mode と forceRebuildIds の組合せに応じて clear 範囲と描画関数を切替
+      _phaseC3OptDispatchRender(list, pageSlice, mode, gen, forceRebuildIds);
+    }).catch(() => {
+      if (gen !== _historyRenderGen) return;
+      // .catch では mode 不明なので "normal" を仮定（forceRebuildIds 有無で smart reuse 判定）
+      _phaseC3OptDispatchRender(list, pageSlice, "normal", gen, forceRebuildIds);
+    });
+
+    // v1.33.0 GROUP-32-b：音声一括トグルボタンの状態更新
+    _modalUpdateAudioToggleBtn(saveHistory);
+    // v1.37.0 GROUP-36/37：お気に入り一括ボタン・全選択／選択解除ボタンの状態更新
+    _modalUpdateFavBulkBtns();
+    _modalUpdateSelectAllBtns(filtered);
+  }
+
+  // v1.46.16 GROUP-73 Phase C-3-fix：top-level の Phase C-3 listener から
+  // saveHistory（setupModalEvents の関数パラメータ closure 変数）と renderHistory
+  // （setupModalEvents 内ローカル関数）に到達できなかった bug の修正。
+  // setupModalEvents 起動時に window 経由で setter / 呼出関数を expose し、
+  // listener は window アクセサ経由で更新と再描画を行う。
+  // setupModalEvents が再呼出された場合（多重起動）は上書きで OK。
+  window.__modalSetSaveHistory = (newData) => { saveHistory = newData; };
+  window.__modalRenderHistory  = () => renderHistory();
+
+  function renderHistoryPager(total) {
+    const totalPages = Math.max(1, Math.ceil(total / _histPageSize));
+
+    function buildPager() {
+      const frag = document.createDocumentFragment();
+      if (total <= _histPageSize) return frag;
+
+      const makeBtn = (p) => {
+        const btn = document.createElement("button");
+        btn.className = "history-pager-btn" + (p === _histPage ? " current" : "");
+        btn.textContent = String(p + 1);
+        btn.disabled = (p === _histPage);
+        btn.addEventListener("click", () => { _histPage = p; renderHistory(); });
+        return btn;
+      };
+      const makeDots = () => {
+        const s = document.createElement("span");
+        s.className = "history-pager-dots";
+        s.textContent = "…";
+        return s;
+      };
+
+      if (totalPages <= 5) {
+        for (let p = 0; p < totalPages; p++) frag.appendChild(makeBtn(p));
+      } else {
+        frag.appendChild(makeBtn(0));
+        const rStart = Math.max(1, _histPage - 2);
+        const rEnd   = Math.min(totalPages - 2, _histPage + 2);
+        if (rStart > 1) frag.appendChild(makeDots());
+        for (let p = rStart; p <= rEnd; p++) frag.appendChild(makeBtn(p));
+        if (rEnd < totalPages - 2) frag.appendChild(makeDots());
+        frag.appendChild(makeBtn(totalPages - 1));
+      }
+
+      const sizeSelect = document.createElement("select");
+      sizeSelect.className = "history-page-size-select";
+      sizeSelect.title = "表示件数";
+      [20, 50, 100, 200].forEach(n => {
+        const opt = document.createElement("option");
+        opt.value = String(n);
+        opt.textContent = `${n}件`;
+        if (n === _histPageSize) opt.selected = true;
+        sizeSelect.appendChild(opt);
+      });
+      sizeSelect.addEventListener("change", (e) => {
+        _histPageSize = parseInt(e.target.value);
+        _histPage = 0;
+        browser.storage.local.set({ modalHistoryPageSize: _histPageSize }).catch(() => {});
+        renderHistory();
+      });
+      frag.appendChild(sizeSelect);
+      return frag;
+    }
+
+    ["history-pager-top", "history-pager-bottom"].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.innerHTML = "";
+      el.appendChild(buildPager());
+    });
+  }
+
+  /** v1.26.2: 同一 sessionId でまとめたグループ配列を計算（描画は別関数） */
+  function _computeHistoryGroups(filtered) {
+    const groups = [];
+    const groupMap = new Map();
+    for (const entry of filtered) {
+      if (entry.sessionId) {
+        if (groupMap.has(entry.sessionId)) {
+          groups[groupMap.get(entry.sessionId)].items.push(entry);
+        } else {
+          groupMap.set(entry.sessionId, groups.length);
+          groups.push({ sessionId: entry.sessionId, items: [entry] });
+        }
+      } else {
+        groups.push({ sessionId: null, items: [entry] });
+      }
+    }
+    return groups;
+  }
+
+  /** v1.26.2: 1 グループを list に append（単独エントリ or グループラッパー）*/
+  function _appendHistoryGroupItem(list, group, filtered) {
+    if (!group.sessionId || group.items.length === 1) {
+      list.appendChild(_buildHistoryItem(group.items[0], [group.items[0]], filtered));
+      return;
+    }
+    const first = group.items.at(-1); // 最初に保存した画像（unshiftで末尾が古い）
+
+    // グループ全体ラッパー（通常フローに乗る flex-column コンテナ）
+    const wrapper = document.createElement("div");
+    wrapper.className = "history-group-wrapper";
+
+    // 先頭タイル：_buildHistoryItem で通常タイルとして生成・幅を固定
+    const orderedGroup = [...group.items].reverse(); // 古い順
+    const item = _buildHistoryItem(first, orderedGroup, filtered);
+    item.classList.add("history-item-group-card");
+    item.style.cssText += ";border-color:#e67e22;box-sizing:border-box;";
+
+    // 枚数バッジ
+    const badge = document.createElement("div");
+    badge.style.cssText = "position:absolute;top:4px;right:6px;z-index:2;font-size:10px;font-weight:700;" +
+      "background:#e67e22;color:#fff;padding:1px 7px;border-radius:10px;pointer-events:none;";
+    badge.textContent = `${group.items.length}枚`;
+    item.appendChild(badge);
+
+    // 展開ボタン（ラッパーの直接子として配置・オーバーレイ外）
+    const expandBtn = document.createElement("button");
+    expandBtn.className = "history-group-expand-btn";
+    expandBtn.textContent = `▶ 展開（${group.items.length}枚）`;
+
+    // 展開エリア（ラッパーの直接子として配置）
+    const childrenArea = document.createElement("div");
+    childrenArea.className = "history-group-children";
+
+    wrapper.appendChild(item);
+    wrapper.appendChild(expandBtn);
+    wrapper.appendChild(childrenArea);
+
+    let expanded = false;
+    expandBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      expanded = !expanded;
+      childrenArea.style.display = expanded ? "flex" : "none";
+      expandBtn.textContent = expanded ? `▼ 折りたたむ` : `▶ 展開（${group.items.length}枚）`;
+      expandBtn.style.borderRadius = expanded ? "0" : "0 0 8px 8px";
+      if (expanded && childrenArea.childElementCount === 0) {
+        for (const sub of orderedGroup) {
+          childrenArea.appendChild(_buildHistoryItem(sub, orderedGroup, filtered, true));
+        }
+      }
+    });
+
+    list.appendChild(wrapper);
+  }
+
+  /** v1.26.2: 初期 6 件を同期描画、残りを requestIdleCallback で裏描画する
+   *  - units: 描画単位（normal: entry、group: group）
+   *  - renderUnit: 1 単位を list に append する関数
+   *  - gen: _historyRenderGen のスナップショット。変化すれば中断 */
+  function _renderHistoryChunked(list, pageSlice, mode, gen) {
+    let units, renderUnit;
+    if (mode === "group") {
+      units = _computeHistoryGroups(pageSlice);
+      renderUnit = (g) => _appendHistoryGroupItem(list, g, pageSlice);
+    } else {
+      units = pageSlice;
+      renderUnit = (entry) => list.appendChild(_buildHistoryItem(entry, [entry], pageSlice));
+    }
+    // 初期バッチ同期
+    const initial = units.slice(0, _HIST_INITIAL_BATCH_SIZE);
+    for (const u of initial) renderUnit(u);
+    // 残り非同期
+    const remaining = units.slice(_HIST_INITIAL_BATCH_SIZE);
+    if (remaining.length > 0) {
+      _scheduleHistoryBgRender(gen, remaining, renderUnit);
+    }
+  }
+
+  // v1.46.17 GROUP-74 fix：mode (normal/group) と forceRebuildIds (Set/null) の組合せ別に
+  // clear 範囲と描画関数を切替える dispatch 関数。
+  // - normal + forceRebuildIds: smart reuse 経路（target img のみ src clear → _renderHistoryItemsReuse が
+  // target item を rebuild、他 item を再利用）
+  // - group + forceRebuildIds: smart reuse 未対応のため full clear + chunked へ fallback
+  // （group 用 entry レベル smart reuse は GROUP-72-opt-2 として後送）
+  // - forceRebuildIds なし（filter / page / 表示モード変更時）: full clear + chunked
+  // // sync 部の旧 src="" / innerHTML="" 切替えはここに集約された。
+  function _phaseC3OptDispatchRender(list, pageSlice, mode, gen, forceRebuildIds) {
+    if (forceRebuildIds && mode === "normal") {
+      // smart reuse パス：force rebuild 対象 entry の img のみ src 解除（他は再利用）
+      // _renderHistoryItemsReuse が target item を ex.remove() → _buildHistoryItem で rebuild
+      for (const id of forceRebuildIds) {
+        const el = list.querySelector(`.history-item[data-entry-id="${CSS.escape(id)}"] img.history-thumb`);
+        if (el) el.src = "";
+      }
+      _renderHistoryItemsReuse(list, pageSlice, forceRebuildIds);
+    } else {
+      // full clear + chunked パス（v1.46.0 GROUP-57 案 b 由来の blob URL retain 対策を維持）
+      const oldImgs = list.querySelectorAll("img.history-thumb");
+      for (const oldImg of oldImgs) oldImg.src = "";
+      list["innerHTML"] = "";
+      _renderHistoryChunked(list, pageSlice, mode, gen);
+    }
+  }
+
+  // v1.46.15 GROUP-72 Phase C-3-opt：保存履歴アイテムの smart reuse 描画。
+  // 既存 history-item を data-entry-id でインデックス化、thumbId 一致 ＋ targetIds 非該当の
+  // entry は DOM 再利用、それ以外は作り直し。settings.js _renderHistoryGridNormalReuse 同等の
+  // パターン。
+  // forceRebuildIds: Phase C-3 listener から渡される、強制 rebuild 対象の entry id Set。
+  // 同じ id でも targetIds に含まれる entry は内容変更があるため必ず作り直す（タグ/作者更新が
+  // 反映されるよう）。
+  function _renderHistoryItemsReuse(list, pageSlice, forceRebuildIds) {
+    const force = forceRebuildIds instanceof Set ? forceRebuildIds : new Set();
+    // 既存 history-item を entry id でインデックス化
+    const existing = new Map();
+    for (const el of Array.from(list.children)) {
+      if (el.classList && el.classList.contains("history-item") && el.dataset && el.dataset.entryId) {
+        existing.set(el.dataset.entryId, el);
+      }
+    }
+    // history-item 以外（hist-empty 等）は破棄
+    const others = Array.from(list.children).filter(el =>
+      !(el.classList && el.classList.contains("history-item") && el.dataset && el.dataset.entryId)
+    );
+    for (const el of others) el.remove();
+
+    let prev = null;
+    for (const entry of pageSlice) {
+      const ex = existing.get(entry.id);
+      const sameThumb = ex && (ex.dataset.thumbId || "") === (entry.thumbId || "");
+      const mustRebuild = force.has(entry.id);
+      if (ex && sameThumb && !mustRebuild) {
+        // 既存タイル再利用：選択状態・チェックボックスのみ同期
+        const isSel = _modalHistSelected.has(entry.id);
+        ex.classList.toggle("selected", isSel);
+        const cb = ex.querySelector(".history-select-box");
+        if (cb) cb.checked = isSel;
+        // 順序を pageSlice に合わせる
+        if (prev) {
+          if (prev.nextSibling !== ex) list.insertBefore(ex, prev.nextSibling);
+        } else {
+          if (list.firstChild !== ex) list.insertBefore(ex, list.firstChild);
+        }
+        prev = ex;
+        existing.delete(entry.id);
+      } else {
+        // 新規 or thumbId 不一致 or force rebuild 対象：作り直し
+        if (ex) {
+          ex.remove();
+          existing.delete(entry.id);
+        }
+        const newItem = _buildHistoryItem(entry, [entry], pageSlice);
+        if (prev) {
+          list.insertBefore(newItem, prev.nextSibling);
+        } else {
+          list.insertBefore(newItem, list.firstChild);
+        }
+        prev = newItem;
+      }
+    }
+    // 余った既存タイルは DOM 除去
+    for (const orphan of existing.values()) {
+      orphan.remove();
+    }
+  }
+
+  /** v1.26.2: 残り件数を requestIdleCallback（なければ setTimeout 0）で段階的に描画。
+   *  各 chunk 実行前に _historyRenderGen を照合し、変わっていたら中断する。 */
+  function _scheduleHistoryBgRender(gen, units, renderUnit) {
+    if (gen !== _historyRenderGen) return;
+    const chunk = units.slice(0, _HIST_BG_CHUNK_SIZE);
+    const rest  = units.slice(_HIST_BG_CHUNK_SIZE);
+    const run = () => {
+      if (gen !== _historyRenderGen) return;
+      for (const u of chunk) renderUnit(u);
+      if (rest.length > 0) {
+        _scheduleHistoryBgRender(gen, rest, renderUnit);
+      }
+    };
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(run);
+    } else {
+      setTimeout(run, 0);
+    }
+  }
+
+  /** 保存履歴アイテムを構築して返す共通関数 */
+  function _buildHistoryItem(entry, groupEntries, allEntries, isGroupChild) {
+    // groupEntries: グループ内の全エントリ（古い順）、allEntries: 全履歴（表示順）
+    // isGroupChild: 展開後の子タイルかどうか（◀▶の動作が変わる）
+      const item = document.createElement("div");
+      item.className = "history-item";
+      // v1.39.1 GROUP-42-b：fav-filter drop 等での単一タイル除去用に entry id を保持
+      item.dataset.entryId = entry.id;
+      // v1.46.15 GROUP-72 Phase C-3-opt：smart reuse 用 thumbId 識別子（settings.js _renderHistoryGridNormalReuse 同等）
+      if (entry.thumbId) item.dataset.thumbId = entry.thumbId;
+
+      // savePaths（配列）か savePath（旧形式）を正規化
+      const paths = Array.isArray(entry.savePaths)
+        ? entry.savePaths
+        : (entry.savePath ? [entry.savePath] : []);
+      const primaryPath = paths[0] ?? "";
+      const isMulti = paths.length > 1;
+
+      const savedDate = new Date(entry.savedAt).toLocaleString("ja-JP");
+      const activeTokens = new Set(historyFilterTagChips.map(c => c.toLowerCase()));
+      const activeAuthors = new Set(historyFilterAuthorChips.map(c => c.toLowerCase()));
+      const tagHtml = (entry.tags || [])
+        .map(t => `<span class="history-tag${activeTokens.has(t.toLowerCase()) ? ' filter-active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
+      const entryAuthors = entry.authors || (entry.author ? [entry.author] : []);
+      const authorHtml = entryAuthors.map(a =>
+        `<span class="history-author${activeAuthors.has(a.toLowerCase()) ? ' filter-active' : ''}" data-author="${escapeHtml(a)}">✏️ ${escapeHtml(a)}</span>`
+      ).join("");
+
+      const pathLabel = isMulti
+        ? `${paths.length} 件のフォルダに保存`
+        : escapeHtml(primaryPath);
+      const pathTitle = isMulti ? paths.join("\n") : primaryPath;
+
+      // pageUrl 表示（ドメインのみ短縮表示・タイトルはフルURL）
+      let pageUrlHtml = "";
+      if (entry.pageUrl) {
+        let displayUrl = entry.pageUrl;
+        try { displayUrl = new URL(entry.pageUrl).hostname; } catch {}
+        pageUrlHtml = `<a class="history-pageurl"
+          title="${escapeHtml(entry.pageUrl)}"
+          data-href="${escapeHtml(entry.pageUrl)}">🔗 ${escapeHtml(displayUrl)}</a>`;
+      }
+
+      // v1.32.2 GROUP-28 mvdl：音声あり時は左下スピーカーアイコン
+      const audioIconHtml = entry.audioFilename
+        ? `<button class="history-audio-icon" data-muted="${_modalAudioPlayingIds.has(entry.id) ? "0" : "1"}" data-audio-entry-id="${escapeHtml(entry.id)}" title="音声再生: ${escapeHtml(entry.audioFilename)}">${_modalAudioPlayingIds.has(entry.id) ? "🔊" : "🔇"}</button>`
+        : "";
+
+      // v1.33.0 GROUP-32-b：選択チェックボックス（音声一括トグル用）→ v1.37.0 で左上に統一
+      const selectBoxHtml = `<input type="checkbox" class="history-select-box" data-entry-id="${escapeHtml(entry.id)}" title="一括操作対象として選択" ${_modalHistSelected.has(entry.id) ? "checked" : ""} />`;
+
+      // v1.37.0 GROUP-36-fav-tile：右上のお気に入りハートボタン
+      const isFav = !!entry.favorite;
+      const favBtnHtml = `<button class="history-fav-btn" data-fav-entry-id="${escapeHtml(entry.id)}" data-fav="${isFav ? "1" : "0"}" title="${isFav ? "お気に入り解除" : "お気に入り登録"}" aria-pressed="${isFav}">${isFav ? "❤️" : "🤍"}</button>`;
+
+      // v1.45.0 GROUP-46：右上アイコンクラスタ（hover 時のみ表示、item :hover で opacity 制御）
+      // コピー SVG: 2 ドキュメント横並び + 下部曲線矢印 + 三角矢じり
+      const iconClusterHtml = `
+        <div class="history-icon-cluster">
+          <button class="history-icon-btn history-btn-id-copy" title="識別情報をクリップボードにコピー" data-copy-id="${escapeHtml(entry.id)}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M 2,3 L 2,13 L 9,13 L 9,5 L 7,3 Z M 7,3 L 7,5 L 9,5" />
+              <line x1="3.5" y1="6.5" x2="7.5" y2="6.5" />
+              <line x1="3.5" y1="8.5" x2="7.5" y2="8.5" />
+              <line x1="3.5" y1="10.5" x2="7.5" y2="10.5" />
+              <path d="M 13,3 L 13,13 L 20,13 L 20,5 L 18,3 Z M 18,3 L 18,5 L 20,5" />
+              <line x1="14.5" y1="6.5" x2="18.5" y2="6.5" />
+              <line x1="14.5" y1="8.5" x2="18.5" y2="8.5" />
+              <line x1="14.5" y1="10.5" x2="18.5" y2="10.5" />
+              <path d="M 5,17 Q 12,22 19,17" />
+              <polyline points="16,16 19,17 18,20" />
+            </svg>
+          </button>
+          <button class="history-icon-btn history-btn-info-edit" title="情報を編集">✏️</button>
+        </div>`;
+
+      // v1.45.0 GROUP-46：音声付エントリは下部ボタン行に padding-left:32px
+      const actionsClass = entry.audioFilename ? "history-actions has-audio" : "history-actions";
+
+      item["innerHTML"] = `
+        ${selectBoxHtml}
+        ${favBtnHtml}
+        ${iconClusterHtml}
+        <div class="history-thumb-placeholder" title="${escapeHtml(pathTitle)}"
+          style="cursor:pointer">🖼</div>
+        ${audioIconHtml}
+        <div class="history-overlay">
+          <div class="history-body">
+            <div class="history-filename">${escapeHtml(entry.filename)}</div>
+            <div class="history-path" title="${escapeHtml(pathTitle)}">${pathLabel}</div>
+            ${pageUrlHtml}
+            <div class="history-meta">
+              <span>${escapeHtml(savedDate)}</span>
+              ${authorHtml}
+              ${tagHtml}
+            </div>
+          </div>
+          <div class="${actionsClass}">
+            <button class="history-btn history-btn-open" title="${escapeHtml(pathTitle)}">
+              🗂 保存先
+            </button>
+            <button class="history-btn history-btn-open-file" title="${escapeHtml(pathTitle)}">
+              🖼 原寸
+            </button>
+            <button class="history-btn history-btn-nav" title="${escapeHtml(pathTitle)}">
+              🧭 移動
+            </button>
+          </div>
+          <div class="history-info-editor">
+            <div class="history-info-editor-inner">
+              <div class="history-info-editor-title">✏️ 情報を編集</div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">🖼 プレビュー</div>
+                <img class="history-info-thumb" src="" alt="" style="display:none;" />
+              </div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">🏷️ タグ</div>
+                <!-- GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+                <div class="history-tag-editor-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.4);border-radius:4px;background:rgba(255,255,255,0.1);max-width:500px;position:relative;">
+                  <div class="history-tag-editor-chips" style="display:contents;"></div>
+                  <input type="text" class="history-tag-editor-input"
+                    placeholder="タグを入力..." autocomplete="off"
+                    style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:11px;padding:1px 4px;outline:none;font-family:inherit;" />
+                  <div class="history-tag-suggestions"></div>
+                </div>
+              </div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">✏️ 権利者</div>
+                <!-- GROUP-22-author + box-grow：chips + input を統合 box 化、max-width 500px、flex-wrap で chip 数に応じ折返し -->
+                <div class="history-info-author-box" style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding:3px 5px;border:1px solid rgba(255,255,255,0.3);border-radius:4px;background:rgba(255,255,255,0.08);max-width:500px;position:relative;">
+                  <div class="history-info-author-chips" style="display:contents;"></div>
+                  <input type="text" class="history-info-author-input"
+                    placeholder="追加(Enter)..." autocomplete="off"
+                    style="flex:1;min-width:80px;border:none;background:transparent;color:#fff;font-size:10px;padding:1px 4px;outline:none;font-family:inherit;" />
+                  <div class="history-info-author-suggestions"></div>
+                </div>
+              </div>
+              <div class="history-info-field-group">
+                <div class="history-info-field-label">📁 保存先情報</div>
+                <input type="text" class="history-info-path-input" placeholder="保存先パス" />
+              </div>
+              <!-- v1.44.0 GROUP-16-a2: 識別情報を貼付して情報流用（v1.44.1 文言統一）
+                   v1.46.3 GROUP-59-info-edit-button revise: 識別情報ブロックをアクション行と同じ最下段に統合。
+                   左側に識別情報（コンパクト幅、入力欄上＋ボタン下）、右側にキャンセル／保存。 -->
+              <div class="history-info-bottom-row" style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-top:6px;">
+                <div class="history-info-id-paste-group" style="flex:0 1 auto;min-width:0;max-width:60%;">
+                  <div class="history-info-field-label" style="margin-bottom:2px;">📥 識別情報から反映</div>
+                  <input type="text" class="history-id-paste-input" placeholder="他エントリの識別情報を貼付" autocomplete="off" style="width:200px;max-width:100%;box-sizing:border-box;font-size:11px;font-family:Consolas,monospace;padding:4px;border:1px solid rgba(255,255,255,0.3);background:rgba(0,0,0,0.2);color:#fff;border-radius:4px;" />
+                  <button class="history-id-paste-apply" type="button" title="貼付した識別情報から情報を読み取り、反映対象を選択するダイアログを開く" style="display:block;margin-top:4px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.3);border-radius:4px;cursor:pointer;color:#fff;font-size:11px;padding:3px 8px;font-family:inherit;width:200px;max-width:100%;">識別情報反映</button>
+                </div>
+                <div class="history-info-editor-actions" style="flex:0 0 auto;">
+                  <button class="history-info-editor-save">💾 保存</button>
+                  <button class="history-info-editor-cancel">✕ 閉じる</button>
+                  <button class="history-info-editor-undo" disabled>↩ アンドゥ</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>`;
+
+      const thumbEl = item.querySelector(".history-thumb-placeholder");
+
+      // v1.32.2 GROUP-28 mvdl：音声アイコンのクリックハンドラ
+      const audioIconEl = item.querySelector(".history-audio-icon");
+      if (audioIconEl) {
+        audioIconEl.addEventListener("click", (e) => {
+          e.stopPropagation();
+          _modalToggleAudio(entry, audioIconEl);
+        });
+      }
+
+      /** サムネイルクリック時のプレビュー表示 */
+      const safeGroup = groupEntries || [entry];
+      const safeAll   = allEntries   || [entry];
+      const groupIdx  = safeGroup.findIndex(e => e.id === entry.id);
+      const globalIdx = safeAll.findIndex(e => e.id === entry.id);
+
+      async function openPreview() {
+        showModalLightbox(safeGroup, groupIdx, safeAll, globalIdx, isGroupChild);
+      }
+
+      // サムネイル：thumbId → IndexedDB から取得、なければ thumbnailBase64（旧形式）を使用
+      // v1.46.0 GROUP-57 案 a: GIF entries は Blob URL 経由（dataUrl の N コピー retain 回避）。
+      // 非 GIF は従来 dataUrl 経路を維持（小サイズ、cache 互換性のため）。
+      if (entry.thumbId) {
+        if (_isGifEntry(entry)) {
+          _loadThumbAsBlobUrl(entry.thumbId, "image/gif").then(blobUrl => {
+            if (!blobUrl) return;
+            const img = document.createElement("img");
+            img.className = "history-thumb";
+            img.alt   = entry.filename;
+            img.title = "クリックでプレビュー";
+            img.style.cursor = "zoom-in";
+            img.addEventListener("click", openPreview);
+            _attachBlobUrlToImg(img, blobUrl);
+            item.insertBefore(img, thumbEl);
+            thumbEl.style.display = "none";
+          }).catch(() => {});
+        } else {
+          browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+            .then(({ dataUrl }) => {
+              if (!dataUrl) return;
+              const img = document.createElement("img");
+              img.className = "history-thumb";
+              img.src   = dataUrl;
+              img.alt   = entry.filename;
+              img.title = "クリックでプレビュー";
+              img.style.cursor = "zoom-in";
+              img.addEventListener("click", openPreview);
+              item.insertBefore(img, thumbEl);
+              thumbEl.style.display = "none";
+            }).catch(() => {});
+        }
+      } else if (entry.thumbnailBase64) {
+        const img = document.createElement("img");
+        img.className = "history-thumb";
+        img.src   = entry.thumbnailBase64;
+        img.alt   = entry.filename;
+        img.title = "クリックでプレビュー";
+        img.style.cursor = "zoom-in";
+        img.addEventListener("click", openPreview);
+        item.insertBefore(img, thumbEl);
+        thumbEl.style.display = "none";
+      } else {
+        thumbEl.title = "クリックでプレビュー";
+        thumbEl.style.cursor = "zoom-in";
+        thumbEl.addEventListener("click", openPreview);
+      }
+
+      // pageUrl リンク
+      const pageLink = item.querySelector(".history-pageurl");
+      if (pageLink) {
+        pageLink.addEventListener("click", (e) => {
+          e.stopPropagation();
+          window.open(pageLink.dataset.href, "_blank");
+        });
+      }
+
+      // v1.33.0 GROUP-32-b：選択チェックボックス
+      const selectBox = item.querySelector(".history-select-box");
+      if (selectBox) {
+        selectBox.addEventListener("click", (e) => e.stopPropagation());
+        selectBox.addEventListener("change", (e) => {
+          if (e.target.checked) _modalHistSelected.add(entry.id);
+          else                  _modalHistSelected.delete(entry.id);
+          _modalUpdateAudioToggleBtn(allEntries);
+          _modalUpdateFavBulkBtns();
+        });
+      }
+
+      // v1.37.0 GROUP-36-fav-tile：お気に入りハートボタン
+      const favBtn = item.querySelector(".history-fav-btn");
+      if (favBtn) {
+        favBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await _modalToggleEntryFavorite(entry.id, allEntries);
+        });
+      }
+
+      item.querySelector(".history-btn-open").addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleHistoryAction(paths, "open", item);
+      });
+      item.querySelector(".history-btn-open-file").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const p = paths[0];
+        if (!p || !entry.filename) { showToast(shadow, "⚠️ 保存先情報が取得できません", true); return; }
+        const filePath = p.replace(/[\\/]+$/, "") + "\\" + entry.filename;
+        // v1.22.9: 拡張ページ viewer.html 経由で表示し、大容量 GIF も chunksB64 で描画する。
+        const viewerUrl = browser.runtime.getURL("src/viewer/viewer.html") + "?path=" + encodeURIComponent(filePath);
+        window.open(viewerUrl, "_blank");
+      });
+      item.querySelector(".history-btn-nav").addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleHistoryAction(paths, "nav", item);
+      });
+
+      // ---- v1.44.0 GROUP-16-a1：識別情報（UUID）コピーボタン ----
+      const idCopyBtn = item.querySelector(".history-btn-id-copy");
+      if (idCopyBtn) {
+        idCopyBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(idCopyBtn.dataset.copyId || entry.id);
+            showToast(shadow, "📋 識別情報をコピーしました");
+          } catch (err) {
+            showToast(shadow, `❌ クリップボードにコピーできませんでした: ${err?.message || err}`, true);
+          }
+        });
+      }
+
+      // ---- ✏️ 情報を編集ボタン ----
+      const infoEditBtn   = item.querySelector(".history-btn-info-edit");
+      const infoEditor    = item.querySelector(".history-info-editor");
+      const tagChipsArea  = item.querySelector(".history-tag-editor-chips");
+      const tagEditorIn   = item.querySelector(".history-tag-editor-input");
+      const tagSugPanel   = item.querySelector(".history-tag-suggestions");
+      const authChipsArea = item.querySelector(".history-info-author-chips");
+      const authInput     = item.querySelector(".history-info-author-input");
+      const authSugPanel  = item.querySelector(".history-info-author-suggestions");
+      const pathInput     = item.querySelector(".history-info-path-input");
+      const infoThumb     = item.querySelector(".history-info-thumb");
+      const cancelBtn     = item.querySelector(".history-info-editor-cancel");
+      const saveBtn       = item.querySelector(".history-info-editor-save");
+      const undoBtn       = item.querySelector(".history-info-editor-undo");
+      const idPasteInput  = item.querySelector(".history-id-paste-input");
+      const idPasteApply  = item.querySelector(".history-id-paste-apply");
+
+      let pendingTags    = new Set(entry.tags || []);
+      let pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
+      // v1.46.4 GROUP-63 (a)：settings.js 統一 — undo stack / 自動保存 / globalTags merge
+      let _undoStack = [];
+      let _prevPath  = "";
+
+      function _modalUpdateUndoBtn() {
+        if (undoBtn) undoBtn.disabled = _undoStack.length === 0;
+      }
+
+      // v1.46.4 GROUP-63 (a)：settings.js の saveEntryNow と同じく
+      // saveHistory + globalTags + globalAuthors を一括書込（migration aware）
+      async function _modalSaveEntryNow() {
+        const history = await _readSaveHistory();
+        const stored  = await browser.storage.local.get(["globalTags", "globalAuthors"]);
+        const target  = history.find(h => h.id === entry.id);
+        if (!target) return;
+        target.tags    = [...pendingTags];
+        target.authors = [...pendingAuthors];
+        delete target.author;
+        const newPath = pathInput.value.trim();
+        if (newPath) target.savePaths = [newPath];
+        const gTagSet    = new Set([...(stored.globalTags    || []), ...pendingTags]);
+        const gAuthorSet = new Set([...(stored.globalAuthors || []), ...pendingAuthors]);
+        await _setStorageWithHistoryMirror({
+          saveHistory:   history,
+          globalTags:    [...gTagSet],
+          globalAuthors: [...gAuthorSet],
+        });
+        // ローカル saveHistory 配列も同期
+        const idx = saveHistory.findIndex(h => h.id === entry.id);
+        if (idx !== -1) {
+          saveHistory[idx].tags    = target.tags;
+          saveHistory[idx].authors = target.authors;
+          delete saveHistory[idx].author;
+          if (newPath) saveHistory[idx].savePaths = target.savePaths;
+        }
+        // entry も同期（保存ボタン押下時に reflect する元データ）
+        entry.tags = target.tags; entry.authors = target.authors;
+        delete entry.author;
+        if (newPath) entry.savePaths = target.savePaths;
+        // タイル meta 即時反映
+        const metaEl = item.querySelector(".history-meta");
+        if (metaEl) {
+          const dateSpan = metaEl.querySelector("span");
+          metaEl.innerHTML = "";
+          if (dateSpan) metaEl.appendChild(dateSpan);
+          for (const a of target.authors) {
+            const sp = document.createElement("span");
+            sp.className = "history-author"; sp.dataset.author = a;
+            sp.textContent = `✏️ ${a}`; metaEl.appendChild(sp);
+          }
+          for (const t of target.tags) {
+            const sp = document.createElement("span");
+            sp.className = "history-tag"; sp.dataset.tag = t;
+            sp.textContent = t; metaEl.appendChild(sp);
+          }
+        }
+        // パス表示も更新
+        if (newPath) {
+          const pathEl = item.querySelector(".history-path");
+          if (pathEl) {
+            pathEl.textContent = newPath;
+            pathEl.title       = newPath;
+          }
+        }
+      }
+
+      function renderInfoTagChips() {
+        tagChipsArea.innerHTML = "";
+        pendingTags.forEach(t => {
+          const chip = document.createElement("span");
+          chip.className = "history-tag-editor-chip";
+          chip.innerHTML = `${escapeHtml(t)}<button type="button" title="削除">×</button>`;
+          const delBtn = chip.querySelector("button");
+          delBtn.tabIndex = -1; // GROUP-22-tab：Tab で chip ✕ にフォーカス遷移しない
+          delBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            // v1.46.4 GROUP-63 (a)：undo stack 記録 ＋ 自動保存
+            _undoStack.push({ type: "deleteTag", tag: t });
+            pendingTags.delete(t);
+            renderInfoTagChips();
+            _modalSaveEntryNow();
+            _modalUpdateUndoBtn();
+          });
+          tagChipsArea.appendChild(chip);
+        });
+      }
+
+      function showInfoTagSuggestions(q) {
+        const matches = q
+          ? existingTags.filter(t => tagMatches(t, q) && !pendingTags.has(t))
+          : existingTags.filter(t => !pendingTags.has(t));
+        if (!matches.length) { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; return; }
+        tagSugPanel.innerHTML = matches.slice(0, 8)
+          .map(t => `<div class="suggestion-item" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)
+          .join("");
+        tagSugPanel.classList.add("visible");
+        tagSugPanel.querySelectorAll(".suggestion-item").forEach(el => {
+          el.addEventListener("mousedown", (ev) => {
+            ev.preventDefault();
+            // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+            _undoStack.push({ type: "addTag", tag: el.dataset.tag });
+            pendingTags.add(el.dataset.tag);
+            renderInfoTagChips();
+            tagEditorIn.value = "";
+            tagSugPanel.classList.remove("visible");
+            tagSugPanel.innerHTML = "";
+            _modalSaveEntryNow();
+            _modalUpdateUndoBtn();
+          });
+        });
+      }
+
+      function renderInfoAuthorChips() {
+        authChipsArea.innerHTML = "";
+        pendingAuthors.forEach(a => {
+          const chip = document.createElement("span");
+          chip.className = "history-info-author-chip";
+          chip.innerHTML = `${escapeHtml(a)}<button type="button" title="削除">×</button>`;
+          const delBtn = chip.querySelector("button");
+          delBtn.tabIndex = -1; // GROUP-22-tab：Tab で chip ✕ にフォーカス遷移しない
+          delBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+            _undoStack.push({ type: "deleteAuthor", author: a });
+            pendingAuthors = pendingAuthors.filter(x => x !== a);
+            renderInfoAuthorChips();
+            _modalSaveEntryNow();
+            _modalUpdateUndoBtn();
+          });
+          authChipsArea.appendChild(chip);
+        });
+      }
+
+      function showInfoAuthorSuggestions(q) {
+        const matches = (q
+          ? globalAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
+          : globalAuthors
+        ).filter(a => !pendingAuthors.includes(a)).slice(0, 8);
+        if (!matches.length) { authSugPanel.classList.remove("visible"); authSugPanel.innerHTML = ""; return; }
+        authSugPanel.innerHTML = matches.map(a => `<div class="suggestion-item">${escapeHtml(a)}</div>`).join("");
+        authSugPanel.classList.add("visible");
+        authSugPanel.querySelectorAll(".suggestion-item").forEach(el => {
+          el.addEventListener("mousedown", (ev) => {
+            ev.preventDefault();
+            const a = el.textContent;
+            if (!pendingAuthors.includes(a)) {
+              // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+              _undoStack.push({ type: "addAuthor", author: a });
+              pendingAuthors.push(a);
+              renderInfoAuthorChips();
+              _modalSaveEntryNow();
+              _modalUpdateUndoBtn();
+            }
+            authInput.value = "";
+            authSugPanel.classList.remove("visible");
+            authSugPanel.innerHTML = "";
+          });
+        });
+      }
+
+      infoEditBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const isOpen = infoEditor.classList.contains("visible");
+        if (isOpen) { infoEditor.classList.remove("visible"); return; }
+        pendingTags    = new Set(entry.tags || []);
+        pendingAuthors = [...(entry.authors || (entry.author ? [entry.author] : []))];
+        // v1.46.4 GROUP-63 (a)：開閉時に undo stack / prevPath をリセット
+        _undoStack = [];
+        renderInfoTagChips();
+        renderInfoAuthorChips();
+        tagEditorIn.value = "";
+        tagSugPanel.classList.remove("visible");
+        authInput.value = "";
+        authSugPanel.classList.remove("visible");
+        pathInput.value = paths.length > 0 ? paths[0] : "";
+        _prevPath  = pathInput.value;
+        _modalUpdateUndoBtn();
+        // サムネイル取得→インライン表示
+        // v1.46.0 GROUP-57: GIF は Blob URL 経由で fetch（dataUrl の N コピー retain 回避）
+        const thumbImg = item.querySelector(".history-thumb");
+        if (thumbImg?.src) {
+          infoThumb.src = thumbImg.src; infoThumb.style.display = "";
+        } else if (entry.thumbId) {
+          if (_isGifEntry(entry)) {
+            _loadThumbAsBlobUrl(entry.thumbId, "image/gif")
+              .then(blobUrl => {
+                if (!blobUrl) return;
+                _attachBlobUrlToImg(infoThumb, blobUrl);
+                infoThumb.style.display = "";
+              }).catch(() => {});
+          } else {
+            browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+              .then(({ dataUrl }) => { if (dataUrl) { infoThumb.src = dataUrl; infoThumb.style.display = ""; } })
+              .catch(() => {});
+          }
+        } else if (entry.thumbnailBase64) {
+          infoThumb.src = entry.thumbnailBase64; infoThumb.style.display = "";
+        }
+        infoEditor.classList.add("visible");
+        setTimeout(() => tagEditorIn.focus(), 30);
+      });
+
+      cancelBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        infoEditor.classList.remove("visible");
+      });
+
+      // ── v1.44.0 GROUP-16-a2：ID 貼付反映 ──
+      if (idPasteApply && idPasteInput) {
+        idPasteApply.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const pastedId = (idPasteInput.value || "").trim();
+          if (!pastedId) {
+            showToast(shadow, "⚠️ 識別情報を貼付してください", true);
+            return;
+          }
+          const src = (saveHistory || []).find(h => h.id === pastedId);
+          if (!src) {
+            showToast(shadow, `❌ 該当する保存履歴が見つかりません: ${pastedId.slice(0, 12)}…`, true);
+            return;
+          }
+          const result = await _showIdPasteConfirmDialog(src);
+          if (!result) return;
+          if (result.tags && result.tags.length > 0) {
+            const merged = [];
+            if (result.mainTag) merged.push(result.mainTag);
+            for (const t of result.tags) if (!merged.includes(t)) merged.push(t);
+            for (const t of pendingTags) if (!merged.includes(t)) merged.push(t);
+            pendingTags = new Set(merged);
+            renderInfoTagChips();
+          }
+          if (result.authors && result.authors.length > 0) {
+            for (const a of result.authors) {
+              if (!pendingAuthors.includes(a)) pendingAuthors.push(a);
+            }
+            renderInfoAuthorChips();
+          }
+          if (result.applyPageUrl && src.pageUrl) {
+            entry.pageUrl = src.pageUrl;
+            showToast(shadow, `📥 反映：tags ${result.tags.length} 件 / authors ${result.authors.length} 件 / pageUrl 上書き`);
+          } else {
+            showToast(shadow, `📥 反映：tags ${result.tags.length} 件 / authors ${result.authors.length} 件`);
+          }
+          idPasteInput.value = "";
+        });
+        idPasteInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); idPasteApply.click(); }
+        });
+      }
+
+      // オーバーレイ背景クリックで閉じる
+      infoEditor.addEventListener("click", (e) => {
+        if (e.target === infoEditor) infoEditor.classList.remove("visible");
+      });
+
+      tagEditorIn.addEventListener("input", () => {
+        if (tagEditorIn.value) showInfoTagSuggestions(tagEditorIn.value);
+        else { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }
+      });
+      tagEditorIn.addEventListener("blur", () => setTimeout(() => { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }, 150));
+      tagEditorIn.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const val = tagEditorIn.value.trim();
+          if (val && !pendingTags.has(val)) {
+            // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+            _undoStack.push({ type: "addTag", tag: val });
+            pendingTags.add(val);
+            renderInfoTagChips();
+            _modalSaveEntryNow();
+            _modalUpdateUndoBtn();
+          }
+          tagEditorIn.value = "";
+          tagSugPanel.classList.remove("visible");
+        } else if (e.key === "Escape") {
+          infoEditor.classList.remove("visible");
+        } else if (e.key === "Backspace" && !tagEditorIn.value && pendingTags.size > 0) {
+          const last = [...pendingTags].at(-1);
+          // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+          _undoStack.push({ type: "deleteTag", tag: last });
+          pendingTags.delete(last);
+          renderInfoTagChips();
+          _modalSaveEntryNow();
+          _modalUpdateUndoBtn();
+        }
+      });
+
+      authInput.addEventListener("input", () => showInfoAuthorSuggestions(authInput.value.trim()));
+      authInput.addEventListener("blur", () => setTimeout(() => { authSugPanel.classList.remove("visible"); authSugPanel.innerHTML = ""; }, 150));
+      authInput.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const val = authInput.value.trim();
+          if (val && !pendingAuthors.includes(val)) {
+            // v1.46.4 GROUP-63 (a)：undo stack ＋ 自動保存
+            _undoStack.push({ type: "addAuthor", author: val });
+            pendingAuthors.push(val);
+            renderInfoAuthorChips();
+            _modalSaveEntryNow();
+            _modalUpdateUndoBtn();
+          }
+          authInput.value = "";
+          authSugPanel.classList.remove("visible");
+        } else if (e.key === "Escape") {
+          infoEditor.classList.remove("visible");
+        }
+      });
+
+      // v1.46.4 GROUP-63 (a)：path blur で自動保存（settings.js commitPathChange と同じ）
+      async function _modalCommitPathChange() {
+        const newPath = pathInput.value.trim();
+        if (newPath !== _prevPath) {
+          _undoStack.push({ type: "changePath", oldPath: _prevPath, newPath });
+          _prevPath = newPath;
+          await _modalSaveEntryNow();
+          _modalUpdateUndoBtn();
+        }
+      }
+      pathInput.addEventListener("blur", _modalCommitPathChange);
+      pathInput.addEventListener("keydown", async (e) => {
+        if (e.key === "Enter") { e.preventDefault(); await _modalCommitPathChange(); }
+      });
+
+      // v1.46.4 GROUP-63 (a)：undo button（settings.js と同じ undo stack 操作）
+      if (undoBtn) {
+        undoBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!_undoStack.length) return;
+          const op = _undoStack.pop();
+          if      (op.type === "addTag")        pendingTags.delete(op.tag);
+          else if (op.type === "deleteTag")     pendingTags.add(op.tag);
+          else if (op.type === "addAuthor")     pendingAuthors = pendingAuthors.filter(a => a !== op.author);
+          else if (op.type === "deleteAuthor")  pendingAuthors.push(op.author);
+          else if (op.type === "changePath")    { pathInput.value = op.oldPath; _prevPath = op.oldPath; }
+          renderInfoTagChips();
+          renderInfoAuthorChips();
+          await _modalSaveEntryNow();
+          _modalUpdateUndoBtn();
+        });
+      }
+
+      // v1.46.4 GROUP-63 (a)：明示的な保存ボタン（リアルタイム保存と併用、settings.js と統一）
+      // - 入力欄に未確定値があれば commit ＋ undo stack に push
+      // - _modalSaveEntryNow() で saveHistory + globalTags + globalAuthors を一括書込
+      // - ✔ 保存済み 1.2s disabled で feedback（settings.js と同じ）
+      saveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const tagVal = tagEditorIn.value.trim();
+        if (tagVal && !pendingTags.has(tagVal)) {
+          _undoStack.push({ type: "addTag", tag: tagVal });
+          pendingTags.add(tagVal);
+          renderInfoTagChips();
+          tagEditorIn.value = "";
+        }
+        const authVal = authInput.value.trim();
+        if (authVal && !pendingAuthors.includes(authVal)) {
+          _undoStack.push({ type: "addAuthor", author: authVal });
+          pendingAuthors.push(authVal);
+          renderInfoAuthorChips();
+          authInput.value = "";
+        }
+        await _modalCommitPathChange();
+        await _modalSaveEntryNow();
+        _modalUpdateUndoBtn();
+        showToast(shadow, "保存しました ✔");
+        saveBtn.textContent = "✔ 保存済み";
+        saveBtn.disabled    = true;
+        setTimeout(() => { saveBtn.textContent = "💾 保存"; saveBtn.disabled = false; }, 1200);
+      });
+
+      return item;
+  }
+
+  // タグ・作者クリックでフィルタ適用（history-panel に委譲 → 再描画後も有効）
+  document.getElementById("panel-history").addEventListener("click", (e) => {
+    if (e.target.classList.contains("history-tag")) {
+      const tag = e.target.dataset?.tag;
+      if (!tag) return;
+      e.stopPropagation();
+      toggleHistoryFilterTag(tag);
+    } else if (e.target.classList.contains("history-author")) {
+      const author = e.target.dataset?.author;
+      if (!author) return;
+      e.stopPropagation();
+      // チップ配列上でトグル
+      const idx = historyFilterAuthorChips.indexOf(author);
+      if (idx !== -1) {
+        const next = [...historyFilterAuthorChips];
+        next.splice(idx, 1);
+        setHistoryAuthorChips(next);
+      } else {
+        setHistoryAuthorChips([...historyFilterAuthorChips, author]);
+      }
+    }
+  });
+
+  /**
+   * 保存履歴のアクション（open / nav）
+   * 1件 → 直接実行、複数件 → インラインドロップダウンを表示
+   */
+  function handleHistoryAction(paths, action, item) {
+    const execute = (p) => {
+      if (action === "open") {
+        browser.runtime.sendMessage({ type: "OPEN_EXPLORER", path: p });
+      } else {
+        const parts = normalizePath(p).split("\\").filter(Boolean);
+        const stack = parts.reduce((acc, seg, i) => {
+          acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
+          return acc;
+        }, []);
+        switchMainTab("dest");
+        navigateTo(p, stack);
+      }
+    };
+
+    if (paths.length === 1) { execute(paths[0]); return; }
+
+    // 既存のドロップダウンを閉じる
+    document.querySelectorAll(".history-dropdown").forEach(d => d.remove());
+
+    const dd = document.createElement("div");
+    dd.className = "history-dropdown";
+    const title = action === "open" ? "🗂 エクスプローラーで開く" : "🧭 このフォルダに移動";
+    dd["innerHTML"] = `<div class="history-dd-title">${escapeHtml(title)}</div>`;
+
+    for (const p of paths) {
+      const row = document.createElement("div");
+      row.className = "history-dd-item";
+      row.title = p;
+      row["innerHTML"] = `<span>📁</span><span class="history-dd-name">${escapeHtml(p.split("\\").pop())}</span><span class="history-dd-path">${escapeHtml(p)}</span>`;
+      row.addEventListener("click", (e) => { e.stopPropagation(); dd.remove(); execute(p); });
+      dd.appendChild(row);
+    }
+
+    item.querySelector(".history-actions").appendChild(dd);
+    setTimeout(() => {
+      const close = (e) => { if (!dd.contains(e.target)) { dd.remove(); document.removeEventListener("click", close, true); } };
+      document.addEventListener("click", close, true);
+    }, 0);
+  }
+
+  // v1.26.2: modalHistoryPageSize 読込を await 扱いで初回 renderHistory() の前に完了させる。
+  // 旧実装は storage.get と renderHistory() が別経路で走っており、初回のみ
+  // 設定値（20/50/100/200）を反映しないまま 100 件ベースで描画する race 状態があった。
+  browser.storage.local.get("modalHistoryPageSize").then(({ modalHistoryPageSize }) => {
+    if (modalHistoryPageSize) _histPageSize = modalHistoryPageSize;
+    renderHistory();
+  }).catch(() => renderHistory());
+
+  // ================================================================
+  // エクスプローラーで現在フォルダを開くボタン
+  // ================================================================
+  document.getElementById("btn-open-current").addEventListener("click", async () => {
+    if (!currentPath) return;
+    const res = await browser.runtime.sendMessage({ type: "OPEN_EXPLORER", path: currentPath });
+    if (!res || !res.ok) {
+      showToast(shadow, `❌ フォルダを開けません: ${res?.error || "不明なエラー"}`, true);
+    }
+  });
+
+  // ---- ⭐ ブックマーク追加ボタン ----
+  const btnBookmarkAdd = document.getElementById("btn-bookmark-add");
+  const btnNavBack     = document.getElementById("btn-nav-back");
+  const btnNavFwd      = document.getElementById("btn-nav-fwd");
+
+  /** 戻る・進むボタンの有効・無効を更新 */
+  function updateNavButtons() {
+    btnNavBack.disabled = navHistoryIndex <= 0;
+    btnNavFwd.disabled  = navHistoryIndex >= navHistory.length - 1;
+  }
+
+  btnNavBack.addEventListener("click", () => {
+    if (navHistoryIndex <= 0) return;
+    navHistoryIndex--;
+    const entry = navHistory[navHistoryIndex];
+    navigateTo(entry.path, entry.stack, false); // false = 履歴に追加しない
+  });
+
+  btnNavFwd.addEventListener("click", () => {
+    if (navHistoryIndex >= navHistory.length - 1) return;
+    navHistoryIndex++;
+    const entry = navHistory[navHistoryIndex];
+    navigateTo(entry.path, entry.stack, false);
+  });
+
+  /** ボタンの状態（現在のフォルダが登録済みか）を更新 */
+  function updateBookmarkBtn() {
+    if (!currentPath) {
+      // ドライブ一覧表示中はブックマーク対象なし
+      btnBookmarkAdd.classList.remove("bookmarked");
+      btnBookmarkAdd.title = "フォルダを開くとブックマークできます";
+      btnBookmarkAdd.disabled = true;
+      return;
+    }
+    btnBookmarkAdd.disabled = false;
+    const already = bookmarks.some((b) => b.path === currentPath);
+    btnBookmarkAdd.classList.toggle("bookmarked", already);
+    btnBookmarkAdd.title = already
+      ? `「${currentPath}」はブックマーク済みです`
+      : `「${currentPath}」をブックマークに追加`;
+  }
+
+  btnBookmarkAdd.disabled = true; // 初期はドライブ一覧のため無効
+  btnBookmarkAdd.addEventListener("click", async () => {
+    if (!currentPath) return;
+    const alreadyIdx = bookmarks.findIndex((b) => b.path === currentPath);
+    if (alreadyIdx >= 0) {
+      // ブックマーク解除
+      bookmarks.splice(alreadyIdx, 1);
+      await browser.runtime.sendMessage({ type: "SET_BOOKMARKS", data: bookmarks });
+      updateBookmarkBtn();
+      renderBookmarks();
+      showToast(shadow, `🚫 ブックマークを解除しました`);
+    } else {
+      // ブックマーク追加
+      bookmarks.push({ id: crypto.randomUUID(), path: currentPath, label: "" });
+      await browser.runtime.sendMessage({ type: "SET_BOOKMARKS", data: bookmarks });
+      updateBookmarkBtn();
+      renderBookmarks();
+      showToast(shadow, `⭐ ブックマークに追加しました`);
+    }
+  });
+
+  // ---- ＋候補 ボタン（表示中フォルダを保存先候補に追加/解除） ----
+  const btnAddCandidate = document.getElementById("btn-add-candidate");
+  btnAddCandidate.disabled = true;
+
+  /** 候補追加/解除ボタンの状態を更新 */
+  async function updateAddCandidateBtn() {
+    if (!currentPath || selectedTags.length === 0) {
+      btnAddCandidate.disabled = true;
+      btnAddCandidate.textContent = "保存先候補に追加";
+      btnAddCandidate.title = selectedTags.length === 0
+        ? "タグを選択すると候補に追加できます"
+        : "フォルダを開くと候補に追加できます";
+      return;
+    }
+    btnAddCandidate.disabled = false;
+    // 全タグ登録済みか確認
+    const res = await browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" });
+    const tagDest = res?.tagDestinations || {};
+    const allRegistered = selectedTags.every(tag =>
+      (tagDest[tag] || []).some(d => d.path === currentPath)
+    );
+    if (allRegistered) {
+      btnAddCandidate.textContent = "保存先候補から解除";
+      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補から解除`;
+    } else {
+      btnAddCandidate.textContent = "保存先候補に追加";
+      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補に追加`;
+    }
+  }
+
+  btnAddCandidate.addEventListener("click", async () => {
+    if (!currentPath || selectedTags.length === 0) return;
+
+    const res = await browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" });
+    const tagDest = res?.tagDestinations || {};
+
+    const allRegistered = selectedTags.every(tag =>
+      (tagDest[tag] || []).some(d => d.path === currentPath)
+    );
+
+    if (allRegistered) {
+      // 解除処理
+      for (const tag of selectedTags) {
+        if (tagDest[tag]) {
+          tagDest[tag] = tagDest[tag].filter(d => d.path !== currentPath);
+        }
+      }
+      await browser.runtime.sendMessage({ type: "SET_TAG_DESTINATIONS", data: tagDest });
+      for (const tag of selectedTags) {
+        tagDestinations[tag] = tagDest[tag];
+      }
+      refreshCandidatePanel();
+      await updateAddCandidateBtn();
+      showToast(shadow, `✅ ${selectedTags.length} 件のタグから候補を解除しました`);
+    } else {
+      // 追加処理（未登録タグのみ）
+      const eligible = selectedTags.filter(tag =>
+        !(tagDest[tag] || []).some(d => d.path === currentPath)
+      );
+      let targetTags = eligible;
+      if (eligible.length > 1) {
+        targetTags = await showTagSelectDialog(eligible, currentPath);
+        if (!targetTags || targetTags.length === 0) return;
+      }
+      let added = 0;
+      for (const tag of targetTags) {
+        if (!tagDest[tag]) tagDest[tag] = [];
+        tagDest[tag].push({ id: crypto.randomUUID(), path: currentPath, label: "" });
+        added++;
+      }
+      await browser.runtime.sendMessage({ type: "SET_TAG_DESTINATIONS", data: tagDest });
+      for (const tag of targetTags) {
+        tagDestinations[tag] = tagDest[tag];
+      }
+      refreshCandidatePanel();
+      await updateAddCandidateBtn();
+      showToast(shadow, `✅ ${added} 件のタグに候補として追加しました`);
+    }
+  });
+
+  /**
+   * タグ選択ダイアログ（複数選択可）を表示し、選択されたタグ配列を返す。
+   * キャンセル時は null を返す。
+   */
+  function showTagSelectDialog(tags, path) {
+    return new Promise((resolve) => {
+      const root = (shadow instanceof ShadowRoot) ? shadow : document;
+      const existing = root.querySelector(".tag-select-dialog-overlay");
+      if (existing) existing.remove();
+
+      const overlay = document.createElement("div");
+      overlay.className = "tag-select-dialog-overlay";
+      overlay.style.cssText = `
+        position: fixed; inset: 0; background: rgba(0,0,0,.45);
+        z-index: 2147483646; display: flex; align-items: center; justify-content: center;
+      `;
+
+      const dialog = document.createElement("div");
+      dialog.style.cssText = `
+        background: #fff; border-radius: 10px; padding: 20px 24px 16px;
+        box-shadow: 0 8px 32px rgba(0,0,0,.28); min-width: 280px; max-width: 380px;
+        font-family: "Segoe UI", sans-serif;
+      `;
+
+      const shortPath = path.length > 40 ? "..." + path.slice(-37) : path;
+      dialog.innerHTML = `
+        <div style="font-size:13px;font-weight:700;color:#2c3e50;margin-bottom:6px">候補に追加するタグを選択</div>
+        <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all">${escapeHtml(shortPath)}</div>
+        <div class="tag-select-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="tsd-cancel" style="padding:6px 16px;border-radius:6px;border:1px solid #ddd;background:#f0f0f0;color:#555;cursor:pointer;font-size:13px">キャンセル</button>
+          <button class="tsd-ok" style="padding:6px 16px;border-radius:6px;border:none;background:#4a90e2;color:#fff;cursor:pointer;font-size:13px;font-weight:600">追加</button>
+        </div>
+      `;
+
+      const list = dialog.querySelector(".tag-select-list");
+      const checked = new Set(tags); // デフォルト全選択
+
+      for (const tag of tags) {
+        const label = document.createElement("label");
+        label.style.cssText = `display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#333;
+          padding:5px 8px;border-radius:5px;border:1px solid #b0d0f8;background:#eef5ff;transition:all .1s;`;
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = true;
+        cb.style.accentColor = "#4a90e2";
+        cb.addEventListener("change", () => {
+          if (cb.checked) { checked.add(tag); label.style.background = "#eef5ff"; label.style.borderColor = "#b0d0f8"; }
+          else            { checked.delete(tag); label.style.background = "#fafafa"; label.style.borderColor = "#e0e0e0"; }
+          okBtn.disabled = checked.size === 0;
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(tag));
+        list.appendChild(label);
+      }
+
+      const okBtn = dialog.querySelector(".tsd-ok");
+      dialog.querySelector(".tsd-cancel").addEventListener("click", () => { overlay.remove(); resolve(null); });
+      okBtn.addEventListener("click", () => { overlay.remove(); resolve([...checked]); });
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+
+      overlay.appendChild(dialog);
+      // ShadowRoot なら shadow に追加、それ以外（document含む）は document.body に追加
+      if (shadow && shadow instanceof ShadowRoot) shadow.appendChild(overlay);
+      else document.body.appendChild(overlay);
+    });
+  }
+
+  // ---- 🔍 絞込ボタン（タグ名でフォルダ一覧をフィルタ） ----
+  const btnTagFilter = document.getElementById("btn-tag-filter");
+  let tagFilterActive = false;
+
+  function updateTagFilterBtn() {
+    if (selectedTags.length === 0 || !currentPath) {
+      btnTagFilter.disabled = true;
+      btnTagFilter.classList.remove("active");
+      tagFilterActive = false;
+      return;
+    }
+    btnTagFilter.disabled = false;
+  }
+
+  btnTagFilter.addEventListener("click", () => {
+    tagFilterActive = !tagFilterActive;
+    btnTagFilter.classList.toggle("active", tagFilterActive);
+    if (tagFilterActive) {
+      applyTagFilter();
+    } else {
+      clearTagFilter();
+    }
+  });
+
+  function applyTagFilter() {
+    if (!currentEntries || selectedTags.length === 0) return;
+    const keywords = selectedTags.map(t => t.toLowerCase());
+    const view = document.getElementById("tree-view");
+    view.querySelectorAll(".tree-row").forEach(el => {
+      const name = (el.dataset.name || "").toLowerCase();
+      const match = keywords.some(k => name.includes(k));
+      el.style.display = match ? "" : "none";
+    });
+    btnTagFilter.title = `絞込中: ${selectedTags.join(", ")}（再クリックで解除）`;
+  }
+
+  function clearTagFilter() {
+    const view = document.getElementById("tree-view");
+    view.querySelectorAll(".tree-row").forEach(el => { el.style.display = ""; });
+    btnTagFilter.title = "タグ名でフォルダを絞り込む";
+  }
+
+  /** パンくずを描画 */
+  function renderBreadcrumb() {
+    const bar = document.getElementById("breadcrumb");
+    bar["innerHTML"] = "";
+
+    const root = document.createElement("span");
+    root.className = "breadcrumb-item" + (breadcrumbStack.length === 0 ? " current" : "");
+    root.textContent = "🖥 PC";
+    if (breadcrumbStack.length > 0) {
+      root.addEventListener("click", () => navigateTo(null, []));
+    }
+    bar.appendChild(root);
+
+    breadcrumbStack.forEach((item, i) => {
+      const sep = document.createElement("span");
+      sep.className = "breadcrumb-sep";
+      sep.textContent = " › ";
+      bar.appendChild(sep);
+
+      const crumb = document.createElement("span");
+      const isCurrent = i === breadcrumbStack.length - 1;
+      crumb.className = "breadcrumb-item" + (isCurrent ? " current" : "");
+      crumb.textContent = item.label;
+      if (!isCurrent) {
+        crumb.addEventListener("click", () => {
+          navigateTo(item.path, breadcrumbStack.slice(0, i + 1));
+        });
+      }
+      bar.appendChild(crumb);
+    });
+  }
+
+  /**
+   * Windowsパスの正規化
+   * - 末尾の \ を除去
+   * - \\ の連続を \ 1個に統一
+   */
+  function normalizePath(p) {
+    if (!p) return p;
+    return p.replace(/\\{2,}/g, "\\").replace(/\\+$/, "");
+  }
+
+  /** ディレクトリを読み込んでビューを描画
+   *  addToHistory=true（デフォルト）: 履歴に追加
+   *  addToHistory=false: 戻る・進む操作時（履歴を変えない）
+   */
+  async function navigateTo(path, newStack, addToHistory = true) {
+    const normalizedPath = normalizePath(path);
+    currentPath = normalizedPath;
+    breadcrumbStack.length = 0;
+    newStack.forEach((s) => breadcrumbStack.push({
+      ...s, path: normalizePath(s.path)
+    }));
+
+    // フォルダ絞り込みをクリア
+    if (folderKwFilter) {
+      folderKwFilter = "";
+      if (folderKwInput) { folderKwInput.value = ""; }
+      if (folderKwClear) { folderKwClear.style.display = "none"; }
+    }
+
+    // 履歴管理：addToHistory=true のときのみ記録
+    if (addToHistory) {
+      // 現在位置より先の履歴を切り捨て（新しい分岐）
+      navHistory.splice(navHistoryIndex + 1);
+      navHistory.push({ path: normalizedPath, stack: [...breadcrumbStack] });
+      navHistoryIndex = navHistory.length - 1;
+    }
+    updateNavButtons();
+
+    renderBreadcrumb();
+    renderLoading();
+
+    const res = await browser.runtime.sendMessage({ type: "LIST_DIR", path: normalizedPath });
+
+    if (!res || !res.ok) {
+      renderError(res ? res.error : "ネイティブアプリに接続できません");
+      return;
+    }
+
+    currentEntries = res.entries;
+    currentResolvedPath = normalizePath(res.path);
+    renderEntries(currentEntries, currentResolvedPath);
+    updatePathDisplay(null);
+    updateSaveButton();
+    updateBookmarkBtn();
+    await updateAddCandidateBtn();
+    updateTagFilterBtn();
+    if (tagFilterActive) applyTagFilter();
+    updateNewFolderTagBtn();
+    // a1: フォルダ遷移後にバナーを更新
+    updateCurrentPathBanner();
+  }
+
+  function renderLoading() {
+    const view = document.getElementById("tree-view");
+    view["innerHTML"] = `<div class="tree-message">読み込み中…</div>`;
+  }
+
+  function renderError(msg) {
+    const view = document.getElementById("tree-view");
+    view["innerHTML"] = `<div class="tree-message error">⚠ ${escapeHtml(msg)}</div>`;
+  }
+
+  // 最後のエントリ（並び順変更時の再描画用）
+  let lastEntries = null;
+  let lastResolvedPath = undefined;
+
+  /** エントリ一覧を現在の viewMode で描画 */
+  function renderEntries(entries, resolvedPath) {
+    lastEntries = entries;
+    lastResolvedPath = resolvedPath;
+
+    const view = document.getElementById("tree-view");
+    view.className = `tree-view view-${viewMode}`;
+    view["innerHTML"] = "";
+
+    let dirs = entries.filter((e) => e.isDir);
+
+    // キーワード絞り込み
+    if (folderKwFilter) {
+      const kw = folderKwFilter.toLowerCase();
+      dirs = dirs.filter(e => e.name.toLowerCase().includes(kw));
+    }
+
+    // フォルダ並び順を適用
+    const [sortKey, sortDir] = currentFolderSort.split("-");
+    if (sortKey === "name") {
+      // Python側でStrCmpLogicalW（Windowsエクスプローラー互換）でソート済みのため
+      // 「名前↑」はそのまま使用、「名前↓」のみ逆順にする
+      if (sortDir === "desc") dirs = dirs.slice().reverse();
+    } else {
+      // 作成日ソートはJS側で処理
+      dirs = dirs.slice().sort((a, b) => {
+        const va = a.createdAt ?? 0;
+        const vb = b.createdAt ?? 0;
+        if (va < vb) return sortDir === "asc" ? -1 : 1;
+        if (va > vb) return sortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+    }
+
+    if (dirs.length === 0 && !resolvedPath) {
+      view["innerHTML"] += `<div class="tree-message">フォルダが見つかりません</div>`;
+      return;
+    }
+
+    dirs.forEach((entry) => {
+      const fullPath = resolvedPath
+        ? normalizePath(`${resolvedPath}\\${entry.name}`)
+        : entry.name;
+
+      const row = document.createElement("div");
+      row.className = "tree-row" + (selectedPath === fullPath ? " selected" : "");
+      row.dataset.name = entry.name;
+
+      if (viewMode === "detail") {
+        // 詳細表示：大アイコン＋名前＋フルパス
+        row["innerHTML"] = `
+          <span class="row-icon">📁</span>
+          <div class="row-text">
+            <span class="row-name">${escapeHtml(entry.name)}</span>
+            <span class="row-path">${escapeHtml(fullPath)}</span>
+          </div>
+          <span class="row-arrow">▶</span>`;
+      } else if (viewMode === "tile") {
+        // タイル表示：アイコン大＋名前のみ
+        row["innerHTML"] = `
+          <span class="row-icon">📁</span>
+          <span class="row-name">${escapeHtml(entry.name)}</span>`;
+      } else {
+        // リスト表示（デフォルト）
+        row["innerHTML"] = `
+          <span class="row-icon">📁</span>
+          <span class="row-name">${escapeHtml(entry.name)}</span>
+          <span class="row-arrow">▶</span>`;
+      }
+
+      row.addEventListener("click", () => {
+        // フォルダ遷移時に絞り込みを解除
+        if (tagFilterActive) {
+          tagFilterActive = false;
+          btnTagFilter.classList.remove("active");
+          clearTagFilter();
+        }
+        navigateTo(fullPath, [
+          ...breadcrumbStack,
+          { label: entry.name, path: fullPath },
+        ]);
+      });
+
+      view.appendChild(row);
+    });
+
+    if (dirs.length === 0 && resolvedPath) {
+      const msg = document.createElement("div");
+      msg.className = "tree-message";
+      msg.textContent = "サブフォルダはありません";
+      view.appendChild(msg);
+    }
+
+    // フォルダ絞り込み解除後のスクロール位置復元
+    if (!folderKwFilter && folderScrollPos > 0) {
+      requestAnimationFrame(() => {
+        const tv = document.getElementById("tree-view");
+        if (tv) tv.scrollTop = folderScrollPos;
+      });
+    }
+  }
+
+  // ③ 初期ロード：優先度設定に従って開始フォルダを決定
+  // startPriority === "lastSave": 前回保存先 → 初期フォルダ → PCルート の順で優先
+  // startPriority === "rootPath": 初期フォルダ → 前回保存先 → PCルート の順で優先
+  const startPath = (() => {
+    if (startPriority === "rootPath") {
+      return explorerRootPath || lastSaveDir || null;
+    }
+    // デフォルト "lastSave"
+    return lastSaveDir || explorerRootPath || null;
+  })();
+
+  if (startPath) {
+    const parts = normalizePath(startPath).split("\\").filter(Boolean);
+    const stack = parts.reduce((acc, seg, i) => {
+      acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
+      return acc;
+    }, []);
+    navigateTo(startPath, stack);
+  } else {
+    navigateTo(null, []);
+  }
+
+  // ================================================================
+  // ② 直近タグ描画（左カラム下部）
+  // ================================================================
+  const recentSection = document.getElementById("recent-tags-section");
+  const recentList    = document.getElementById("recent-tags-list");
+
+  if (recentTags && recentTags.length > 0) {
+    recentSection.style.display = "";
+    // renderRecentTags() は selectedTags 宣言後に定義・呼び出す
+  }
+
+  // ---- 新規フォルダ作成 ----
+  const newFolderInput = document.getElementById("new-folder-input");
+  const newFolderBtn   = document.getElementById("new-folder-btn");
+
+  async function createNewFolder() {
+    const name = newFolderInput.value.trim();
+    if (!name || !currentPath) {
+      if (!currentPath) alert("フォルダを作成するには、まず親フォルダを開いてください");
+      return;
+    }
+    newFolderInput.value = "";
+
+    // ネイティブアプリにフォルダ作成を依頼
+    // ※ EXECUTE_SAVE（画像保存用）ではなく専用の MKDIR メッセージを使う
+    const newPath = `${currentPath}\\${name}`;
+    const res = await browser.runtime.sendMessage({
+      type: "MKDIR",
+      path: newPath,
+      contextPath: currentPath,
+    });
+
+    // 作成後に現在ディレクトリを再読み込み
+    await navigateTo(currentPath, [...breadcrumbStack]);
+
+    // 新しいフォルダを自動選択
+    selectedPath = newPath;
+    updatePathDisplay(newPath);
+    updateSaveButton();
+  }
+
+  newFolderBtn.addEventListener("click", createNewFolder);
+  newFolderInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); createNewFolder(); }
+  });
+
+  // ---- 🏷 タグ名でフォルダ作成 ----
+  const newFolderTagBtn = document.getElementById("new-folder-tag-btn");
+
+  /** タグ名で作成ボタンの有効/無効 */
+  function updateNewFolderTagBtn() {
+    newFolderTagBtn.disabled = selectedTags.length === 0 || !currentPath;
+  }
+
+  newFolderTagBtn.addEventListener("click", async () => {
+    if (!currentPath || selectedTags.length === 0) return;
+
+    // 使用するタグ名を決定（1件 → 即作成、複数 → 選択ダイアログ）
+    if (selectedTags.length === 1) {
+      await createFolderByTagNames([selectedTags[0]]);
+    } else {
+      showTagFolderDialog(selectedTags);
+    }
+  });
+
+  /** 選択したタグ名でフォルダを作成または絞り込む */
+  async function createFolderByTagNames(tagNames) {
+    if (!currentPath) return;
+    for (const tagName of tagNames) {
+      const newPath = normalizePath(`${currentPath}\\${tagName}`);
+      // 既に存在する場合は絞込に切り替え
+      const check = await browser.runtime.sendMessage({ type: "LIST_DIR", path: newPath });
+      if (check?.ok) {
+        // 存在する → 絞込フィルタを適用してそのフォルダを強調
+        tagFilterActive = true;
+        btnTagFilter.classList.add("active");
+        btnTagFilter.title = `絞込中: ${tagName}（再クリックで解除）`;
+        const view = document.getElementById("tree-view");
+        view.querySelectorAll(".tree-row").forEach(el => {
+          const name = (el.dataset.name || "").toLowerCase();
+          el.style.display = name.includes(tagName.toLowerCase()) ? "" : "none";
+        });
+        showToast(shadow, `「${tagName}」は既に存在します。絞込表示に切り替えました`);
+      } else {
+        // 存在しない → 作成
+        await browser.runtime.sendMessage({ type: "MKDIR", path: newPath, contextPath: currentPath });
+        showToast(shadow, `✅ フォルダ「${tagName}」を作成しました`);
+      }
+    }
+    await navigateTo(currentPath, [...breadcrumbStack]);
+  }
+
+  /** 複数タグ選択ダイアログを表示 */
+  function showTagFolderDialog(tags) {
+    // 既存のダイアログを閉じる
+    document.querySelectorAll(".tag-folder-dialog").forEach(d => d.remove());
+
+    const dialog = document.createElement("div");
+    dialog.className = "tag-folder-dialog";
+    dialog["innerHTML"] = `
+      <div class="tfd-title">🏷 作成するタグを選択</div>
+      <div class="tfd-list">
+        ${tags.map((t, i) => `
+          <label class="tfd-item">
+            <input type="checkbox" data-tag="${escapeHtml(t)}" checked />
+            ${escapeHtml(t)}
+          </label>`).join("")}
+      </div>
+      <div class="tfd-actions">
+        <button class="tfd-btn confirm">作成</button>
+        <button class="tfd-btn cancel">キャンセル</button>
+      </div>`;
+
+    // dest-tabbar の直後に表示
+    document.getElementById("dest-tabbar").appendChild(dialog);
+
+    dialog.querySelector(".tfd-btn.cancel").addEventListener("click", () => dialog.remove());
+    dialog.querySelector(".tfd-btn.confirm").addEventListener("click", async () => {
+      const checked = [...dialog.querySelectorAll("input[type=checkbox]:checked")]
+        .map(cb => cb.dataset.tag);
+      dialog.remove();
+      if (checked.length > 0) await createFolderByTagNames(checked);
+    });
+  }
+
+  // ================================================================
+  // タグ入力
+  // ================================================================
+  const selectedTags  = [];
+  const selectedSubTags = [];
+  let recentSubTagsList = recentSubTags || [];
+  const tagInput      = document.getElementById("tag-input");
+  const tagArea       = document.getElementById("dest-tabbar-tag-area");
+  const suggestionsEl = document.getElementById("suggestions");
+  const subTagInput   = document.getElementById("subtag-input");
+  const subTagArea    = document.getElementById("dest-tabbar-subtag-area");
+  const subSuggestEl  = document.getElementById("subtag-suggestions");
+
+  // ② 直近タグ描画（selectedTags 宣言後に定義することで参照エラーを回避）
+  function renderRecentTags() {
+    recentList["innerHTML"] = "";
+    for (const tag of recentTags.slice(0, recentTagDisplayCount)) {
+      const item = document.createElement("div");
+      const isActive = selectedTags.includes(tag);
+      item.className = "recent-tag-item" + (isActive ? " active" : "");
+      item["innerHTML"] = `<span class="recent-tag-icon">${isActive ? "✅" : "🏷"}</span>${escapeHtml(tag)}`;
+      item.title = isActive ? "追加済み（クリックで削除）" : "クリックで追加";
+
+      item.addEventListener("click", () => {
+        if (selectedTags.includes(tag)) {
+          // 追加済みなら削除
+          const idx = selectedTags.indexOf(tag);
+          selectedTags.splice(idx, 1);
+          // チップも削除（v1.26.6: chip は tag-area 内に配置）
+          document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach((chip) => {
+            if (chip.textContent.replace("×", "").trim() === tag) chip.remove();
+          });
+          refreshCandidatePanel();
+          renderRecentTags();
+          // タグが0件になったら候補で選んでいた保存先をリセット
+          if (selectedTags.length === 0 && destMode === "suggest") {
+            selectedPath = null;
+            updatePathDisplay(null);
+            updateSaveButton();
+          }
+          updateAddCandidateBtn();
+          updateTagFilterBtn();
+          updateNewFolderTagBtn();
+        } else {
+          addTag(tag);
+          renderRecentTags();
+        }
+      });
+
+      recentList.appendChild(item);
+    }
+  }
+
+  // 直近タグがあれば左カラムに表示
+  if (recentTags && recentTags.length > 0) {
+    recentSection.style.display = "";
+    renderRecentTags();
+  }
+
+  // ================================================================
+  // 保存先候補パネル
+  // ================================================================
+  const destPanel      = document.getElementById("dest-panel");
+  const destCandidates = document.getElementById("dest-candidates");
+  const destTabbar     = document.getElementById("dest-tabbar");
+  const destTabSuggest  = document.getElementById("dest-tab-suggest");
+  const destTabExplorer = document.getElementById("dest-tab-explorer");
+
+  // 初期状態：タブバーを常時表示、タグが0件なのでタブボタンは非表示
+  destTabbar.classList.add("visible");
+  destTabSuggest.style.display  = "none";
+  destTabExplorer.style.display = "none";
+
+  // a3: 初期表示時に権利者エリアとチップエリアの表示状態を反映
+  updateMainTabbarExtras();
+  const explorerSection = document.getElementById("explorer-wrapper");
+  const destMultiFooter = document.getElementById("dest-multi-footer");
+  const destMultiCount  = document.getElementById("dest-multi-count");
+  const btnMultiSave    = document.getElementById("btn-multi-save");
+
+  // 複数選択された候補パス（Set）
+  const selectedPaths = new Set();
+
+  /**
+   * 現在のタグ配列に関連する保存先候補をすべて収集して返す。
+   * 同じパスが複数タグに紐付いている場合は統合し、関連タグを付記する。
+   */
+  function collectCandidates(tags) {
+    // path → { id, path, label, relatedTags[] } のマップで重複除去
+    const map = new Map();
+    for (const tag of tags) {
+      const dests = tagDestinations[tag] || [];
+      for (const d of dests) {
+        if (!map.has(d.path)) {
+          map.set(d.path, { ...d, relatedTags: [tag] });
+        } else {
+          map.get(d.path).relatedTags.push(tag);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }
+
+  /** 候補パネルを更新する（タグ追加・削除のたびに呼ぶ） */
+  function refreshCandidatePanel() {
+    const candidates = collectCandidates(selectedTags);
+
+    if (selectedTags.length === 0) {
+      // タグ0個：タブバーは表示したまま（タグ入力欄を含むため）、タブボタンだけ隠す
+      destTabbar.classList.add("visible");
+      destTabSuggest.style.display = "none";
+      destTabExplorer.style.display = "none";
+      destPanel.classList.remove("visible");
+      explorerSection.style.display = "flex";
+      // 複数選択もリセット
+      selectedPaths.clear();
+      destMultiFooter.style.display = "none";
+      return;
+    }
+
+    // タグ1個以上：タブボタンを表示してモードを確定
+    destTabbar.classList.add("visible");
+    destTabSuggest.style.display = "";
+    destTabExplorer.style.display = "";
+    switchDestMode(destMode);
+
+    // 候補リストを描画
+    renderCandidateList(candidates);
+
+    // 候補が0件の場合は自動的に explorer モードへ
+    if (candidates.length === 0 && destMode === "suggest") {
+      switchDestMode("explorer");
+    }
+
+    // ---- 候補が1件のみの場合は自動チェック ----
+    if (candidates.length === 1 && destMode === "suggest") {
+      const onlyPath = candidates[0].path;
+      if (!selectedPaths.has(onlyPath)) {
+        selectedPaths.add(onlyPath);
+        selectedPath = onlyPath; // 通常保存ボタン用にも反映
+        updateMultiFooter();
+        updatePathDisplay(onlyPath);
+        updateSaveButton();
+        // チェックボックスのUI反映
+        const item = destCandidates.querySelector(".dest-candidate-item");
+        if (item) {
+          item.classList.add("selected");
+          const chk = item.querySelector(".dest-cand-check");
+          if (chk) chk.checked = true;
+        }
+        // エクスプローラー側も自動選択されたパスへナビゲート
+        // （候補クリック時と同等の挙動にして、フォルダツリーと表示を同期させる）
+        navigateToCandidatePath(onlyPath);
+      }
+    }
+  }
+
+  /** 候補パスをエクスプローラーのナビゲーション状態に反映する共通処理 */
+  function navigateToCandidatePath(p) {
+    const parts = normalizePath(p).split("\\").filter(Boolean);
+    const stack = parts.reduce((acc, seg, i) => {
+      acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
+      return acc;
+    }, []);
+    navigateTo(p, stack);
+  }
+
+  /** 複数選択フッターの表示を更新 */
+  function updateMultiFooter() {
+    const count = selectedPaths.size;
+    if (count === 0) {
+      destMultiFooter.style.display = "none";
+    } else {
+      destMultiFooter.style.display = "flex";
+      destMultiCount.textContent = `${count} 件選択中`;
+      btnMultiSave.disabled = false;
+    }
+  }
+
+  /** 候補リストのDOM描画（複数選択対応） */
+  function renderCandidateList(candidates) {
+    destCandidates["innerHTML"] = "";
+
+    if (candidates.length === 0) {
+      destCandidates["innerHTML"] =
+        `<div class="dest-empty">このタグに関連する保存先がまだありません</div>`;
+      updateMultiFooter();
+      return;
+    }
+
+    for (const cand of candidates) {
+      const isSelected = selectedPaths.has(cand.path);
+      const item = document.createElement("div");
+      item.className = "dest-candidate-item" + (isSelected ? " selected" : "");
+
+      const labelText  = cand.label || cand.path.split("\\").pop();
+      const isAutoLabel = !cand.label;
+
+      item["innerHTML"] = `
+        <div class="dest-cand-check">${isSelected ? "✓" : ""}</div>
+        <span class="dest-cand-icon">📁</span>
+        <div class="dest-cand-text">
+          <div class="dest-cand-label ${isAutoLabel ? "no-label" : ""}">${escapeHtml(labelText)}</div>
+          <div class="dest-cand-path">${escapeHtml(cand.path)}</div>
+          <div class="dest-cand-tags">
+            ${cand.relatedTags.map(t => `<span class="dest-cand-tag">${escapeHtml(t)}</span>`).join("")}
+          </div>
+        </div>
+        <button class="btn-open-explorer" title="パスを編集">✏️</button>
+        <button class="btn-open-explorer" title="エクスプローラーで開く">📂</button>`;
+
+      // ✏️ 編集ボタン
+      item.querySelectorAll(".btn-open-explorer")[0].addEventListener("click", (e) => {
+        e.stopPropagation();
+        // インライン編集フォームを表示
+        item.classList.add("editing");
+        const textDiv = item.querySelector(".dest-cand-text");
+        const origHTML = textDiv.innerHTML;
+
+        textDiv["innerHTML"] = `
+          <div class="dest-cand-edit-form">
+            <input class="dest-cand-edit-input" value="${escapeHtml(cand.path)}"
+              placeholder="新しいパスを入力..." />
+            <div class="dest-cand-edit-actions">
+              <button class="dest-cand-edit-btn save">保存</button>
+              <button class="dest-cand-edit-btn cancel">キャンセル</button>
+            </div>
+          </div>`;
+
+        const input = textDiv.querySelector(".dest-cand-edit-input");
+        input.focus();
+        input.select();
+
+        // キャンセル
+        textDiv.querySelector(".dest-cand-edit-btn.cancel").addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          renderCandidateList(collectCandidates(selectedTags));
+        });
+
+        // 保存
+        const saveEdit = async (ev) => {
+          if (ev) ev.stopPropagation();
+          const newPath = normalizePath(input.value.trim());
+          if (!newPath || newPath === cand.path) {
+            renderCandidateList(collectCandidates(selectedTags));
+            return;
+          }
+          // tagDestinations の全タグでこのパスを更新
+          const res = await browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" });
+          const td  = res?.tagDestinations || {};
+          let updated = false;
+          for (const tag of Object.keys(td)) {
+            const idx = td[tag].findIndex(d => d.path === cand.path);
+            if (idx >= 0) {
+              td[tag][idx] = { ...td[tag][idx], path: newPath };
+              updated = true;
+            }
+          }
+          if (updated) {
+            await browser.runtime.sendMessage({ type: "SET_TAG_DESTINATIONS", data: td });
+            // ローカル更新
+            for (const tag of Object.keys(td)) {
+              tagDestinations[tag] = td[tag];
+            }
+            // selectedPaths も更新
+            if (selectedPaths.has(cand.path)) {
+              selectedPaths.delete(cand.path);
+              selectedPaths.add(newPath);
+            }
+            showToast(shadow, `✅ パスを更新しました`);
+          }
+          renderCandidateList(collectCandidates(selectedTags));
+        };
+
+        textDiv.querySelector(".dest-cand-edit-btn.save").addEventListener("click", saveEdit);
+        input.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") { ev.preventDefault(); saveEdit(); }
+          if (ev.key === "Escape") { ev.preventDefault(); renderCandidateList(collectCandidates(selectedTags)); }
+        });
+      });
+
+      // 📂 エクスプローラーで開くボタン
+      item.querySelectorAll(".btn-open-explorer")[1].addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await browser.runtime.sendMessage({ type: "OPEN_EXPLORER", path: cand.path });
+      });
+
+      item.addEventListener("click", (e) => {
+        // 編集中はクリックでの選択を無効
+        if (item.classList.contains("editing")) return;
+
+        if (selectedPaths.has(cand.path)) {
+          selectedPaths.delete(cand.path);
+        } else {
+          selectedPaths.add(cand.path);
+        }
+
+        selectedPath = selectedPaths.size > 0 ? [...selectedPaths][0] : null;
+        updatePathDisplay(selectedPath);
+        updateSaveButton();
+        updateMultiFooter();
+        renderCandidateList(collectCandidates(selectedTags));
+
+        navigateToCandidatePath(cand.path);
+      });
+
+      destCandidates.appendChild(item);
+    }
+
+    updateMultiFooter();
+  }
+
+  /** 候補/エクスプローラーのモード切り替え（右カラム全体を排他使用） */
+  function switchDestMode(mode) {
+    destMode = mode;
+    if (mode === "suggest") {
+      destTabSuggest.classList.add("active");
+      destTabExplorer.classList.remove("active");
+      destPanel.classList.add("visible");
+      explorerSection.style.display = "none";
+    } else {
+      destTabExplorer.classList.add("active");
+      destTabSuggest.classList.remove("active");
+      destPanel.classList.remove("visible");
+      explorerSection.style.display = "flex";
+    }
+    // モード切替後にパス表示と保存ボタンを更新
+    updatePathDisplay(null);
+    updateSaveButton();
+    // a1: currentPath バナーを更新
+    updateCurrentPathBanner();
+  }
+
+  /** a1: 候補パネル上部の currentPath バナーを更新する */
+  function updateCurrentPathBanner() {
+    const banner = document.getElementById("current-path-banner");
+    if (!banner) return;
+    if (destMode === "suggest" && currentPath) {
+      document.getElementById("current-path-banner-text").textContent = currentPath;
+      banner.style.display = "flex";
+    } else {
+      banner.style.display = "none";
+    }
+  }
+
+  destTabSuggest.addEventListener("click",  () => switchDestMode("suggest"));
+  destTabExplorer.addEventListener("click", () => switchDestMode("explorer"));
+
+  // 初期状態：エクスプローラー表示（flex）・候補パネル非表示
+  explorerSection.style.display = "flex";
+
+  function addTag(value) {
+    const tag = value.trim();
+    if (!tag || selectedTags.includes(tag)) return;
+    selectedTags.push(tag);
+    // v1.26.6 (GROUP-22): chip を tag 入力 box 内の input 後ろに配置
+    const chipArea = document.getElementById("dest-tabbar-tag-area");
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.dataset.type = "main";
+    // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側の chip × にも tabindex=-1
+    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" tabindex="-1" title="削除">×</button>`;
+    chipArea.appendChild(chip);
+    chip.querySelector("button").addEventListener("click", () => {
+      chip.remove();
+      selectedTags.splice(selectedTags.indexOf(tag), 1);
+      refreshCandidatePanel();
+      if (recentTags && recentTags.length > 0) renderRecentTags();
+      if (selectedTags.length === 0 && destMode === "suggest") {
+        selectedPath = null;
+        updatePathDisplay(null);
+        updateSaveButton();
+      }
+      updateAddCandidateBtn();
+      updateTagFilterBtn();
+      updateNewFolderTagBtn();
+    });
+    tagInput.value = "";
+    hideSuggestions();
+    refreshCandidatePanel();
+    if (recentTags && recentTags.length > 0) renderRecentTags();
+    updateAddCandidateBtn();
+    updateTagFilterBtn();
+    updateNewFolderTagBtn();
+  }
+
+  function addSubTag(value) {
+    const tag = value.trim();
+    if (!tag || selectedSubTags.includes(tag)) return;
+    selectedSubTags.push(tag);
+    // v1.26.6 (GROUP-22): chip を subtag 入力 box 内の input 後ろに配置
+    const chipArea = document.getElementById("dest-tabbar-subtag-area");
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.dataset.type = "sub";
+    chip.style.cssText = "background:#ede9f9;border-color:#c3b1e1;color:#5a3fa0;";
+    // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側の chip × にも tabindex=-1
+    chip["innerHTML"] = `${escapeHtml(tag)}<button type="button" tabindex="-1" title="削除">×</button>`;
+    chipArea.appendChild(chip);
+    chip.querySelector("button").addEventListener("click", () => {
+      chip.remove();
+      selectedSubTags.splice(selectedSubTags.indexOf(tag), 1);
+    });
+    subTagInput.value = "";
+    // サブタグ直近リストを更新
+    browser.runtime.sendMessage({ type: "UPDATE_RECENT_SUBTAGS", tags: [tag] }).catch(() => {});
+    recentSubTagsList = [tag, ...recentSubTagsList.filter(t => t !== tag)].slice(0, 20);
+    // v1.21.1: 入力中にフォーカスがある場合は続けて選べるよう再表示。
+    // フォーカスが外れている（外部呼び出し：初期復元など）ときは非表示のまま。
+    if (document.activeElement === subTagInput) {
+      showSubSuggestions("");
+    } else {
+      hideSubSuggestions();
+    }
+  }
+
+  function showSubSuggestions(q) {
+    // 入力中（q あり）：全タグプール existingTags から前方一致サジェスト（メインタグ欄に準拠）
+    // 空入力（フォーカス時）：直近サブタグ 20 件を表示（近道用）
+    // どちらの経路でも、既選択メイン／サブの重複語は除外（同一語を両系統に入れる操作は通常意図しない）
+    const matches = q
+      ? existingTags.filter(t => tagMatches(t, q) && !selectedSubTags.includes(t) && !selectedTags.includes(t))
+      : (recentSubTagsList).filter(t => !selectedSubTags.includes(t) && !selectedTags.includes(t));
+    if (!matches.length) { hideSubSuggestions(); return; }
+    subSuggestEl["innerHTML"] = matches.slice(0, 8)
+      .map((t, i) => `<div class="suggestion-item" data-index="${i}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)
+      .join("");
+    subSuggestEl.classList.add("visible");
+    subSuggestEl.querySelectorAll(".suggestion-item").forEach(el => {
+      el.addEventListener("mousedown", e => {
+        e.preventDefault();
+        addSubTag(el.dataset.tag);
+        subTagInput.focus();
+      });
+    });
+  }
+
+  function hideSubSuggestions() {
+    subSuggestEl.classList.remove("visible");
+    subSuggestEl["innerHTML"] = "";
+  }
+
+  // サブタグ入力イベント
+  subTagInput.title = "Enter でサブタグを設定";
+  subTagInput.addEventListener("input", () => {
+    if (subTagInput.value) showSubSuggestions(subTagInput.value);
+    else hideSubSuggestions();
+  });
+  subTagInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      if (subTagInput.value.trim()) {
+        e.preventDefault();
+        addSubTag(subTagInput.value);
+      }
+    } else if (e.key === "Backspace" && !subTagInput.value) {
+      // 入力が空の状態でバックスペース → 末尾のサブタグを削除（タグ入力欄と同仕様）
+      // v1.26.6: chip は subtag-area 内に配置
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      selectedSubTags.pop();
+    }
+    if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
+  });
+  subTagInput.addEventListener("focus", () => {
+    // サブタグ入力欄にフォーカスが当たった時点で、入力が空でも直近サブタグを提示する
+    // （直近タグ数ではなく直近サブタグ数を参照。以前の条件は参照先を誤っていた）
+    if (!subTagInput.value && recentSubTagsList.length > 0) {
+      showSubSuggestions("");
+    }
+  });
+  subTagInput.addEventListener("blur", () => { setTimeout(hideSubSuggestions, 150); });
+  subTagArea.addEventListener("click", () => subTagInput.focus());
+
+  /** ひらがな⇔カタカナ相互変換して両方でマッチする */
+  function toHiragana(str) {
+    return str.replace(/[\u30A1-\u30F6]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+  }
+  function toKatakana(str) {
+    return str.replace(/[\u3041-\u3096]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
+  }
+  /** 全角英数記号→半角 */
+  function toHalfWidth(str) {
+    return str.replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+              .replace(/\u3000/g, " ");
+  }
+  /** 半角英数記号→全角 */
+  function toFullWidth(str) {
+    return str.replace(/[\u0021-\u007E]/g, c => String.fromCharCode(c.charCodeAt(0) + 0xFEE0))
+              .replace(/ /g, "\u3000");
+  }
+  function tagMatches(tag, q) {
+    const tL  = tag.toLowerCase();
+    const qL  = q.toLowerCase();
+    // 全角・半角の両方に正規化してマッチ
+    const tH  = toHalfWidth(toHiragana(tL));
+    const qH  = toHalfWidth(toHiragana(qL));
+    const tK  = toHalfWidth(toKatakana(tL));
+    const qK  = toHalfWidth(toKatakana(qL));
+    const tFH = toFullWidth(toHiragana(tL));
+    const qFH = toFullWidth(toHiragana(qL));
+    const tFK = toFullWidth(toKatakana(tL));
+    const qFK = toFullWidth(toKatakana(qL));
+    const tHalf = toHalfWidth(tL);
+    const qHalf = toHalfWidth(qL);
+    // v1.26.6 (BUG-modal-suggest-match): 部分一致（2 文字以上）分岐を廃止、常に前方一致に統一。
+    // 設定画面の保存履歴タグ絞り込み（v1.21.2）と整合。
+    return tHalf.startsWith(qHalf) || tH.startsWith(qH) || tK.startsWith(qK) ||
+           tFH.startsWith(qFH)     || tFK.startsWith(qFK);
+  }
+
+  function showSuggestions(q) {
+    const matches = existingTags.filter(
+      (t) => tagMatches(t, q) && !selectedTags.includes(t)
+    );
+    if (!matches.length) { hideSuggestions(); return; }
+    suggestionsEl["innerHTML"] = matches.slice(0, 8)
+      .map((t, i) => `<div class="suggestion-item" data-index="${i}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</div>`)
+      .join("");
+    suggestionsEl.classList.add("visible");
+    suggestionsEl.querySelectorAll(".suggestion-item").forEach((el) => {
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        addTag(el.dataset.tag);
+        tagInput.focus();
+      });
+    });
+  }
+
+  function hideSuggestions() {
+    suggestionsEl.classList.remove("visible");
+    suggestionsEl["innerHTML"] = "";
+  }
+
+  /**
+   * currentPath に関連付けられたタグをサジェスト表示する。
+   * タグ入力フォーカス時かつ入力が空の場合に呼ばれる。
+   */
+  function showFolderTagSuggestions() {
+    if (!currentPath) return;
+    // tagDestinations を逆引き：currentPath を持つタグを列挙
+    const relatedTags = Object.entries(tagDestinations)
+      .filter(([, dests]) => dests.some((d) => d.path === currentPath))
+      .map(([tag]) => tag)
+      .filter((t) => !selectedTags.includes(t));
+    if (!relatedTags.length) return;
+    suggestionsEl["innerHTML"] = relatedTags.slice(0, 8)
+      .map((t, i) => `<div class="suggestion-item" data-index="${i}" data-tag="${escapeHtml(t)}">🔗 ${escapeHtml(t)}</div>`)
+      .join("");
+    suggestionsEl.classList.add("visible");
+    suggestionsEl.querySelectorAll(".suggestion-item").forEach((el) => {
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        addTag(el.dataset.tag);
+        tagInput.focus();
+      });
+    });
+  }
+
+  function moveSuggestionActive(dir) {
+    const items = suggestionsEl.querySelectorAll(".suggestion-item");
+    if (!items.length) return;
+    const cur = suggestionsEl.querySelector(".suggestion-item.active");
+    let idx = -1;
+    items.forEach((el, i) => { if (el === cur) idx = i; });
+    items.forEach((el) => el.classList.remove("active"));
+    items[(idx + dir + items.length) % items.length].classList.add("active");
+  }
+
+  tagInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const active = suggestionsEl.querySelector(".suggestion-item.active");
+      if (active) {
+        addTag(active.dataset.tag);
+      } else if (tagInput.value.trim()) {
+        addTag(tagInput.value);
+      } else if (selectedTags.length > 0) {
+        // 入力が空でEnter → タグで絞り込みを実行
+        if (!btnTagFilter.disabled) btnTagFilter.click();
+      }
+    } else if (e.key === "Backspace" && !tagInput.value) {
+      // v1.26.6: chip は tag-area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
+      selectedTags.pop();
+    } else if (e.key === "ArrowDown") { e.preventDefault(); moveSuggestionActive(1); }
+      else if (e.key === "ArrowUp")   { e.preventDefault(); moveSuggestionActive(-1); }
+      else if (e.key === "Escape")    { closeModal(); }
+  });
+  tagInput.title = "Enter でタグを設定";
+  tagInput.addEventListener("input", () => {
+    if (tagInput.value) {
+      showSuggestions(tagInput.value);
+    } else {
+      hideSuggestions();
+    }
+  });
+
+  // フォーカス時：入力途中でなければ currentPath に関連付けられたタグをサジェスト表示
+  tagInput.addEventListener("focus", () => {
+    if (tagInput.value.trim()) return; // 入力途中はスキップ
+    showFolderTagSuggestions();
+  });
+  tagInput.addEventListener("blur",   () => setTimeout(hideSuggestions, 150));
+  tagArea.addEventListener("click",   (e) => { if (e.target === tagArea) tagInput.focus(); });
+
+  // ================================================================
+  // 閉じる
+  // ================================================================
+  function closeModal() {
+    if (onCleanup) onCleanup();
+    window.close();
+  }
+
+  /** 保存後最小化用：ウィンドウを閉じずにUIをリセット（closeModalと同じリセット内容） */
+  function resetModalUI() {
+    // タグをリセット（引き継ぎOFFのみ）
+    if (!retainTag) {
+      selectedTags.length = 0;
+      // v1.26.6: chip は各 area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
+      tagInput.value = "";
+      hideSuggestions();
+    }
+    // サブタグをリセット（引き継ぎOFFのみ）
+    if (!retainSubTag) {
+      selectedSubTags.length = 0;
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
+      subTagInput.value = "";
+      hideSubSuggestions();
+    }
+    // 権利者をリセット（引き継ぎOFFのみ）
+    if (!retainAuthor) {
+      selectedAuthors = [];
+      renderAuthorChips();
+    }
+    // ファイル名をリセット
+    document.getElementById("input-filename").value = "";
+    // プレビューをリセット
+    const previewEl = document.getElementById("preview");
+    if (previewEl) { previewEl.src = ""; previewEl.style.display = "none"; }
+    // 保存先をリセット
+    selectedPath = null;
+    selectedPaths.clear();
+    updatePathDisplay(null);
+    updateSaveButton();
+    refreshCandidatePanel();
+    // 直近タグのチェック状態をリセット
+    if (recentTags && recentTags.length > 0) renderRecentTags();
+  }
+
+  /**
+   * 連続保存モード用：ウィンドウを閉じずにUIをリセットして次の保存に備える。
+   * background.jsに通知してmodalWindowIdを保持したままにする。
+   */
+  async function stayOpenForContinuous() {
+    // 保存ウィンドウを最小化してバックグラウンドに退避
+    try {
+      const modalWin = await browser.windows.getCurrent();
+      await browser.windows.update(modalWin.id, { state: "minimized" });
+    } catch {}
+
+    // ファイル名をリセット
+    document.getElementById("input-filename").value = "";
+
+    // タグをリセット（引き継ぎOFFのみ）
+    if (!retainTag) {
+      selectedTags.length = 0;
+      // v1.26.6: chip は各 area 内に配置
+      document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
+      tagInput.value = "";
+      hideSuggestions();
+    }
+
+    // サブタグをリセット（引き継ぎOFFのみ）
+    if (!retainSubTag) {
+      selectedSubTags.length = 0;
+      document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
+      subTagInput.value = "";
+      hideSubSuggestions();
+    }
+
+    // 権利者をリセット（引き継ぎOFFのみ）
+    if (!retainAuthor) {
+      selectedAuthors = [];
+      renderAuthorChips();
+    }
+
+    // プレビューをリセット
+    const previewEl = document.getElementById("preview");
+    previewEl.src = "";
+
+    // サジェスト・絞り込みをリセット（retainTagがOFFの場合は既に呼び済みだが副作用なし）
+    if (retainTag) hideSuggestions();
+
+    // 保存ボタンを再び無効化（次の画像が来るまで押せない状態に）
+    const btnSave = document.getElementById("btn-save");
+    btnSave.disabled = true;
+    btnSave.textContent = "保存";
+    btnMultiSave.disabled = true;
+    btnMultiSave.textContent = "選択した候補に保存";
+  }
+
+  document.getElementById("overlay").addEventListener("click", (e) => {
+    if (e.target === document.getElementById("overlay")) closeModal();
+  });
+
+  // ================================================================
+  // 保存
+  // ================================================================
+
+  /**
+   * ページのコンテキストでサムネイルを取得して Base64 を返す。
+   * 1. DOM上の <img> から同ホストの画像を探してCanvas描画を試みる
+   *    （注: crossOrigin属性なしの外部ドメイン画像はCanvas汚染でエラーになるため
+   *          SecurityErrorをキャッチしてフォールバックへ）
+   * 2. fetch（credentials:include）で取得を試みる
+   * いずれも失敗した場合は null を返し background.js の XHR にフォールバックする
+   */
+  async function fetchThumbnailInPage(url) {
+    try {
+      const MAX = 600;
+
+      // v1.26.1 (GROUP-14-a/b): gif は Python 側 MAKE_GIF_THUMB_FILE 経由で
+      // アニメ保持サムネが生成されるため、ここでの Canvas→JPEG 変換を回避して
+      // null を返す。これにより background.js handleSave の優先度ロジック
+      // （thumbDataUrl || pyThumb）で Python 生成の gif アニメサムネが採用される。
+      if (/\.gif(\?|#|$)/i.test(url)) return null;
+
+      // v1.31.3 GROUP-15-impl-A-phase1-hotfix-thumb：
+      // 動画→GIF 変換経由の場合、imageUrl は `data:image/gif;base64,...` の
+      // data URL。上の .gif 拡張子判定では引っかからないため個別に bypass。
+      // これにより Native Python の make_gif_thumbnail 経由の
+      // アニメーション GIF サムネが IDB に保存される。
+      // （過去の TODO コメント「変換済み gif はこの関数を bypass」の実装）
+      if (/^data:image\/gif[;,]/i.test(url)) return null;
+
+      // ① DOM上の同ホスト <img> を crossOrigin="anonymous" で再ロードしてCanvas描画
+      // （crossOriginなしで読み込まれた画像はCanvas汚染でblob取得不可のため再取得）
+      let targetImg = null;
+      try {
+        const urlHostname = new URL(url).hostname;
+        const allImgs = [...document.querySelectorAll("img")]
+          .filter(el => {
+            try { return new URL(el.currentSrc || el.src).hostname === urlHostname; } catch { return false; }
+          })
+          .filter(el => el.complete && el.naturalWidth > 0);
+        targetImg = allImgs.find(el => el.src === url || el.currentSrc === url)
+          || allImgs.sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0]
+          || null;
+      } catch {}
+
+      if (targetImg) {
+        // crossOrigin="anonymous" で同URLを再ロード → Canvas汚染を回避
+        const reloadedImg = await new Promise((resolve) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload  = () => resolve(img);
+          img.onerror = () => resolve(null);
+          img.src = targetImg.currentSrc || targetImg.src;
+          // タイムアウト（2秒）
+          setTimeout(() => resolve(null), 2000);
+        });
+
+        if (reloadedImg) {
+          try {
+            const scale = Math.min(MAX / reloadedImg.naturalWidth, MAX / reloadedImg.naturalHeight, 1);
+            const w = Math.round(reloadedImg.naturalWidth  * scale);
+            const h = Math.round(reloadedImg.naturalHeight * scale);
+            const canvas = new OffscreenCanvas(w, h);
+            canvas.getContext("2d").drawImage(reloadedImg, 0, 0, w, h);
+            const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+            // v1.41.8:dataUrl 化（btoa）を skip し Blob を直接 return。
+            // sendMessage は structured clone で Blob をコピー転送（CPU は削減、メモリコピーは残る）。
+            // background は payload.thumbBlob を直接 saveThumbToIDB へ流せるため atob も不要。
+            return { blob: jpegBlob, width: w, height: h };
+          } catch (canvasErr) {
+            console.warn("[ImageSaver] Canvas error after reload:", canvasErr.message);
+          }
+        } else {
+        }
+      }
+
+      // ② fetch（credentials:include）で取得
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) return null;
+      // v1.26.1 (GROUP-14-a/b): 拡張子なし/隠蔽 URL で gif が漏れた場合の捕捉。
+      // Python 側の gif サムネ経路へ委譲する。
+      if (/image\/gif/i.test(response.headers.get("content-type") || "")) return null;
+      const blob   = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+      const scale  = Math.min(MAX / bitmap.width, MAX / bitmap.height, 1);
+      const w = Math.round(bitmap.width  * scale);
+      const h = Math.round(bitmap.height * scale);
+      const canvas = new OffscreenCanvas(w, h);
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+      bitmap.close();
+      const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+      // v1.41.8:dataUrl 化を skip し Blob を直接 return
+      return { blob: jpegBlob, width: w, height: h };
+    } catch (e) {
+      console.warn("[ImageSaver] fetchThumbnailInPage error:", e.message);
+      return null;
+    }
+  }
+
+  // ================================================================
+  // 引き継ぎチェック
+  // ================================================================
+  let retainTag    = initialRetainTag;
+  let retainSubTag = initialRetainSubTag;
+  let retainAuthor = initialRetainAuthor;
+
+  const chkRetainTag    = document.getElementById("chk-retain-tag");
+  const chkRetainSubtag = document.getElementById("chk-retain-subtag");
+  const chkRetainAuthor = document.getElementById("chk-retain-author");
+
+  chkRetainTag.checked    = retainTag;
+  chkRetainSubtag.checked = retainSubTag;
+  chkRetainAuthor.checked = retainAuthor;
+
+  // v1.46.9 GROUP-68：引き継ぎチェックボックスの OFF 時自動クリアを廃止。
+  // 「引き継ぎ OFF」の意味は「次回保存後に retainedTags/Authors を上書きしない」であり、
+  // 「OFF にした瞬間に現在の入力もクリア」は過剰な副作用。明示的リセットは btn-retain-reset 専用。
+  chkRetainTag.addEventListener("change", () => {
+    retainTag = chkRetainTag.checked;
+    browser.storage.local.set({ retainTag });
+  });
+  chkRetainSubtag.addEventListener("change", () => {
+    retainSubTag = chkRetainSubtag.checked;
+    browser.storage.local.set({ retainSubTag });
+  });
+  chkRetainAuthor.addEventListener("change", () => {
+    retainAuthor = chkRetainAuthor.checked;
+    browser.storage.local.set({ retainAuthor });
+  });
+
+  // 引き継ぎリセットボタン：チェックを全OFF + 現在の入力・保存済み引き継ぎ値をクリア
+  document.getElementById("btn-retain-reset").addEventListener("click", () => {
+    retainTag    = false;
+    retainSubTag = false;
+    retainAuthor = false;
+    chkRetainTag.checked    = false;
+    chkRetainSubtag.checked = false;
+    chkRetainAuthor.checked = false;
+    // フォームクリア（v1.26.6: chip は各 area 内に配置）
+    selectedTags.length = 0;
+    document.getElementById("dest-tabbar-tag-area").querySelectorAll('.tag-chip[data-type="main"]').forEach(c => c.remove());
+    tagInput.value = "";
+    hideSuggestions();
+    selectedSubTags.length = 0;
+    document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach(c => c.remove());
+    subTagInput.value = "";
+    hideSubSuggestions();
+    selectedAuthors = [];
+    renderAuthorChips();
+    // storage.local に保存
+    browser.storage.local.set({
+      retainTag:       false,
+      retainSubTag:    false,
+      retainAuthor:    false,
+      retainedTags:    [],
+      retainedSubTags: [],
+      retainedAuthors: [],
+    });
+  });
+
+  // ================================================================
+  // 連続保存モード
+  // ================================================================
+  const chkContinuous   = document.getElementById("chk-continuous");
+  const continuousBadge = document.getElementById("continuous-badge");
+
+  // セッション状態（ローカル管理）
+  let csSession = continuousSession
+    ? { ...continuousSession }
+    : null; // null = OFF
+
+  // 初期状態を反映
+  function applyContinuousState() {
+    const active = !!csSession;
+    chkContinuous.checked = active;
+    continuousBadge.classList.toggle("active", active);
+    // 連続保存モード中でも保存先は固定せず、候補パネルの通常操作を許可する
+  }
+  applyContinuousState();
+
+  chkContinuous.addEventListener("change", async () => {
+    if (chkContinuous.checked) {
+      // ON にする → 新しいセッション開始
+      csSession = {
+        id:        crypto.randomUUID(),
+        startedAt: new Date().toISOString(),
+        count:     0,
+      };
+      await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
+      continuousBadge.classList.add("active");
+    } else {
+      // OFF にする → 確認ダイアログ
+      chkContinuous.checked = true; // いったん戻す
+      const result = await showContinuousEndDialog();
+      if (!result) return; // キャンセル
+      if (result === "newSession") {
+        // 現在グループ化に用いているセッションIDを完了し、新しいセッションIDで再開始
+        csSession = {
+          id:        crypto.randomUUID(),
+          startedAt: new Date().toISOString(),
+          count:     0,
+        };
+        await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
+        // モジュールレベルの保存先変数と UI もリセット
+        selectedPath = null;
+        selectedPaths.clear();
+        updatePathDisplay(null);
+        updateSaveButton();
+        chkContinuous.checked = true;
+        return;
+      }
+      // 終了：セッション破棄と保存先変数のリセット
+      chkContinuous.checked = false;
+      csSession = null;
+      await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: null });
+      selectedPath = null;
+      selectedPaths.clear();
+      updatePathDisplay(null);
+      updateSaveButton();
+      continuousBadge.classList.remove("active");
+    }
+  });
+
+  /** 連続保存終了確認ダイアログ */
+  function showContinuousEndDialog() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = `
+        position:fixed;inset:0;background:rgba(0,0,0,.5);
+        z-index:2147483646;display:flex;align-items:center;justify-content:center;
+      `;
+      overlay.innerHTML = `
+        <div style="background:#fff;border-radius:10px;padding:22px 26px 18px;
+          box-shadow:0 8px 32px rgba(0,0,0,.28);max-width:340px;font-family:'Segoe UI',sans-serif;">
+          <div style="font-size:14px;font-weight:700;color:#2c3e50;margin-bottom:10px">
+            🔴 連続保存モードを終了しますか？
+          </div>
+          <div style="font-size:13px;color:#666;line-height:1.6;margin-bottom:16px">
+            OFFにするとセッションIDが途切れ、次回保存から新しいグループになります。
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+            <button id="cs-cancel" style="padding:6px 16px;border-radius:6px;border:1px solid #ddd;
+              background:#f0f0f0;color:#555;cursor:pointer;font-size:13px">キャンセル</button>
+            <button id="cs-new" style="padding:6px 16px;border-radius:6px;border:none;
+              background:#2980b9;color:#fff;cursor:pointer;font-size:13px;font-weight:600">新セッションで継続</button>
+            <button id="cs-ok" style="padding:6px 16px;border-radius:6px;border:none;
+              background:#e67e22;color:#fff;cursor:pointer;font-size:13px;font-weight:600">終了する</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelector("#cs-ok").addEventListener("click", () => { overlay.remove(); resolve(true); });
+      overlay.querySelector("#cs-new").addEventListener("click", () => { overlay.remove(); resolve("newSession"); });
+      overlay.querySelector("#cs-cancel").addEventListener("click", () => { overlay.remove(); resolve(false); });
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+    });
+  }
+
+  /** 連続保存モード中の同名ファイル重複確認ダイアログ */
+  function showDuplicateFileDialog(filename, savedAt) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = `
+        position:fixed;inset:0;background:rgba(0,0,0,.5);
+        z-index:2147483646;display:flex;align-items:center;justify-content:center;
+      `;
+      overlay.innerHTML = `
+        <div style="background:#fff;border-radius:10px;padding:22px 26px 18px;
+          box-shadow:0 8px 32px rgba(0,0,0,.28);max-width:360px;font-family:'Segoe UI',sans-serif;">
+          <div style="font-size:14px;font-weight:700;color:#2c3e50;margin-bottom:10px">
+            ⚠️ 同名のファイルが既に保存されています
+          </div>
+          <div style="font-size:13px;color:#666;line-height:1.6;margin-bottom:16px">
+            <b style="color:#2c3e50">${escapeHtml(filename)}</b> は<br>
+            このセッション内で ${escapeHtml(savedAt)} に保存済みです。<br>
+            同じページを重複して保存していませんか？
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px">
+            <button id="dup-cancel" style="padding:6px 16px;border-radius:6px;border:1px solid #ddd;
+              background:#f0f0f0;color:#555;cursor:pointer;font-size:13px">キャンセル</button>
+            <button id="dup-ok" style="padding:6px 16px;border-radius:6px;border:none;
+              background:#4a90e2;color:#fff;cursor:pointer;font-size:13px;font-weight:600">保存する</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelector("#dup-ok").addEventListener("click", () => { overlay.remove(); resolve(true); });
+      overlay.querySelector("#dup-cancel").addEventListener("click", () => { overlay.remove(); resolve(false); });
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+    });
+  }
+
+  /** 保存成功後にセッション情報を更新（カウントのみ管理、保存先は固定しない） */
+  async function updateContinuousSession() {
+    if (!csSession) return;
+    csSession.count = (csSession.count || 0) + 1;
+    await browser.runtime.sendMessage({ type: "SET_CONTINUOUS_SESSION", session: csSession });
+  }
+
+  // ---- 一括保存ボタン（候補複数選択時） ----
+  btnMultiSave.addEventListener("click", async () => {
+    if (selectedPaths.size === 0) return;
+    const filename = document.getElementById("input-filename").value.trim() || defaultFilename;
+    if (tagInput.value.trim()) addTag(tagInput.value);
+
+    // ---- 連続保存モード：同名ファイルの重複確認 ----
+    if (csSession) {
+      const dupEntry = saveHistory.find(e =>
+        e.sessionId === csSession.id && e.filename === filename
+      );
+      if (dupEntry) {
+        const dupDate = new Date(dupEntry.savedAt).toLocaleString("ja-JP");
+        const proceed = await showDuplicateFileDialog(filename, dupDate);
+        if (!proceed) return;
+      }
+    }
+
+    btnMultiSave.disabled = true;
+    btnMultiSave.textContent = "⏳ 保存中…";
+    btnMultiSave.title = "前回の保存処理が実行中です";
+
+    // ページコンテキストでサムネイル取得（pixiv 等のクッキー認証に対応）
+    const thumb = await fetchThumbnailInPage(imageUrl);
+
+    // v1.41.5:fire-and-forget 化（一括保存も同パターン）
+    const jobIdMulti = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const payloadFFMulti = {
+      imageUrl, filename,
+      savePaths: [...selectedPaths], tags: [...selectedTags],
+      subTags:   [...selectedSubTags],
+      authors: selectedAuthors,
+      pageUrl: pageUrl || null,
+      // v1.41.8:dataUrl ではなく Blob を直送（btoa/atob 削減）
+      thumbBlob:    thumb?.blob      || null,
+      thumbDataUrl: null,
+      thumbWidth:   thumb?.width     || null,
+      thumbHeight:  thumb?.height    || null,
+      skipTagRecord: destMode === "suggest",
+      sessionId:    csSession?.id    || null,
+      sessionIndex: csSession ? (csSession.count + 1) : null,
+      associatedAudio: window.__pendingAssociatedAudio || null,
+    };
+    const resultPromiseMulti = new Promise((resolve) => {
+      const listener = (msg) => {
+        if (msg?.type === "SAVE_RESULT" && msg.jobId === jobIdMulti) {
+          browser.runtime.onMessage.removeListener(listener);
+          resolve(msg);
+        }
+      };
+      browser.runtime.onMessage.addListener(listener);
+    });
+    browser.runtime.sendMessage({ type: "EXECUTE_SAVE_FF", jobId: jobIdMulti, payload: payloadFFMulti }).catch(() => {});
+
+    // 即時最小化
+    try {
+      const winsCur = await browser.windows.getCurrent();
+      await browser.windows.update(winsCur.id, { state: "minimized" });
+    } catch (_) { /* ignore */ }
+
+    const result = await resultPromiseMulti;
+
+    btnMultiSave.disabled = false;
+    btnMultiSave.textContent = "選択した候補に保存";
+    btnMultiSave.title = "";
+
+    // 一括保存：1 件でも失敗があれば失敗扱いで modal 復元（Q--detail-2 = a）
+    if (result && result.ok) {
+      await updateContinuousSession();
+      await browser.storage.local.set({
+        retainedTags:    [...selectedTags],
+        retainedSubTags: [...selectedSubTags],
+        retainedAuthors: [...selectedAuthors],
+      });
+      if (csSession) {
+        await stayOpenForContinuous();
+      } else {
+        resetModalUI();
+      }
+    } else {
+      try {
+        const winsCur = await browser.windows.getCurrent();
+        await browser.windows.update(winsCur.id, { state: "normal", focused: true });
+      } catch (_) { /* ignore */ }
+      showSaveFailurePopup(shadow, result?.error || "不明なエラー");
+    }
+  });
+  document.getElementById("btn-save").addEventListener("click", async () => {
+    const savePath = getEffectiveSavePath();
+    if (!savePath) return;
+
+    // ---- タグ絞り込み中の警告 ----
+    if (tagFilterActive) {
+      showToast(null,
+        "⚠️ タグで絞り込み中です。\n表示されているフォルダ内のみが対象となっています。\n意図したフォルダを選択しているか確認してください。",
+        true
+      );
+      return;
+    }
+
+    const filename = document.getElementById("input-filename").value.trim() || defaultFilename;
+    if (tagInput.value.trim()) addTag(tagInput.value);
+
+    // ---- 連続保存モード：同名ファイルの重複確認 ----
+    if (csSession) {
+      const dupEntry = saveHistory.find(e =>
+        e.sessionId === csSession.id && e.filename === filename
+      );
+      if (dupEntry) {
+        const dupDate = new Date(dupEntry.savedAt).toLocaleString("ja-JP");
+        const proceed = await showDuplicateFileDialog(filename, dupDate);
+        if (!proceed) return;
+      }
+    }
+
+    const btn = document.getElementById("btn-save");
+    btn.disabled = true;
+    btn.textContent = "⏳ 保存中…";
+    btn.title = "前回の保存処理が実行中です";
+    // v1.41.7:modal の LIST_DIR 早期チェックを廃止。Native の handle_save_image 内で
+    // フォルダ不在を errorCode "DIR_NOT_FOUND" で検出し、SAVE_RESULT 失敗で modal 復元＋失敗ポップアップに表示。
+    // sendNative 往復 1 回削減＋ UX は modal 復元時にエラー詳細「保存先フォルダが存在しません: ...」が出る。
+
+    // ページコンテキストでサムネイル取得（pixiv 等のクッキー認証に対応）
+    const thumb = await fetchThumbnailInPage(imageUrl);
+
+    // v1.41.5:fire-and-forget 化
+    // 1) jobId 発行＋ EXECUTE_SAVE_FF を await せずに送信
+    // 2) 即時最小化（待ち時間なしで進行）
+    // 3) SAVE_RESULT 受信時に成功 → 既存リセット経路、失敗 → modal 復元＋失敗ポップアップ
+    const jobId = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const payloadFF = {
+      imageUrl, filename, savePath,
+      tags:    [...selectedTags],
+      subTags: [...selectedSubTags],
+      authors: selectedAuthors,
+      pageUrl: pageUrl || null,
+      // v1.41.8:dataUrl ではなく Blob を直送（btoa/atob 削減）
+      thumbBlob:    thumb?.blob      || null,
+      thumbDataUrl: null,
+      thumbWidth:   thumb?.width     || null,
+      thumbHeight:  thumb?.height    || null,
+      skipTagRecord: destMode === "suggest",
+      sessionId:    csSession?.id    || null,
+      sessionIndex: csSession ? (csSession.count + 1) : null,
+      associatedAudio: window.__pendingAssociatedAudio || null,
+    };
+    // SAVE_RESULT を待つ Promise（jobId 一致のみ resolve）
+    const resultPromise = new Promise((resolve) => {
+      const listener = (msg) => {
+        if (msg?.type === "SAVE_RESULT" && msg.jobId === jobId) {
+          browser.runtime.onMessage.removeListener(listener);
+          resolve(msg);
+        }
+      };
+      browser.runtime.onMessage.addListener(listener);
+    });
+    // 送信は await しない（fire-and-forget、background は即時 ack）
+    browser.runtime.sendMessage({ type: "EXECUTE_SAVE_FF", jobId, payload: payloadFF }).catch(() => {});
+
+    // 即時最小化
+    try {
+      const winsCur = await browser.windows.getCurrent();
+      await browser.windows.update(winsCur.id, { state: "minimized" });
+    } catch (_) { /* ignore */ }
+
+    // SAVE_RESULT 待ち（最小化中も listener は生存）
+    const result = await resultPromise;
+
+    btn.disabled = false;
+    btn.textContent = "保存";
+    btn.title = "";
+
+    if (result && result.ok) {
+      await updateContinuousSession();
+      await browser.storage.local.set({
+        retainedTags:    [...selectedTags],
+        retainedSubTags: [...selectedSubTags],
+        retainedAuthors: [...selectedAuthors],
+      });
+      if (csSession) {
+        await stayOpenForContinuous();
+      } else {
+        // 通常保存成功時は既に最小化済み。minimizeAfterSave 設定にかかわらず最小化維持＋ resetModalUI のみ
+        resetModalUI();
+      }
+    } else {
+      // 失敗時は modal を normal 復元＋失敗ポップアップ表示、入力欄は維持（リセットスキップ済）
+      try {
+        const winsCur = await browser.windows.getCurrent();
+        await browser.windows.update(winsCur.id, { state: "normal", focused: true });
+      } catch (_) { /* ignore */ }
+      showSaveFailurePopup(shadow, result?.error || "不明なエラー");
+    }
+  });
+
+  // ヘッダーのファイル名入力欄に初期値をセット（テンプレートリテラルのvalue属性は動作しないため）
+  const filenameInput = document.getElementById("input-filename");
+  filenameInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const btnSave = document.getElementById("btn-save");
+    if (!btnSave.disabled) btnSave.click();
+  });
+  // ================================================================
+  // 作者入力欄（複数対応 チップ式）
+  // ================================================================
+  const authorInput       = document.getElementById("author-input");
+  const authorInputClear  = document.getElementById("author-input-clear");
+  const authorSuggestEl   = document.getElementById("author-suggestions");
+  const authorChipsEl     = document.getElementById("author-chips");
+  const allAuthors        = [...new Set([...(recentAuthors || []), ...(globalAuthors || [])])];
+  let selectedAuthors     = [];
+
+  // GROUP-74-eslint（v1.46.17 ESLint 導入）：本ファイルには line 2475 に同名 renderAuthorChips
+  // が既に定義されているが、両者は別役割（line 2475 は履歴フィルター chip、本関数は保存先入力
+  // chip）。JS の関数宣言ホイスティングで 2 番目が 1 番目を上書きするが、setupModalEvents 内で
+  // 双方の callsite が「自身に近い」定義を期待してきた経緯があり、そのまま運用継続。
+  // 本来はリネーム整理（renderFilterAuthorChips / renderDestAuthorChips）が望ましいが、
+  // 本リリース範囲外。eslint-disable コメントで no-redeclare を本関数のみ抑止。
+  // eslint-disable-next-line no-redeclare
+  function renderAuthorChips() {
+    authorChipsEl.innerHTML = "";
+    selectedAuthors.forEach(a => {
+      const chip = document.createElement("span");
+      chip.style.cssText = "display:inline-flex;align-items:center;gap:2px;background:#e8eeff;" +
+        "color:#3a5ac8;border-radius:10px;padding:1px 7px;font-size:10px;white-space:nowrap;";
+      chip.textContent = a;
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "×";
+      delBtn.style.cssText = "background:none;border:none;cursor:pointer;color:#8a9adc;" +
+        "font-size:12px;padding:0 0 0 2px;line-height:1;";
+      delBtn.title = `${a} を削除`;
+      delBtn.tabIndex = -1; // GROUP-71：v1.46.10 GROUP-22-tab で見落とした保存ウィンドウ dest-tabbar 側
+      delBtn.addEventListener("click", () => {
+        selectedAuthors = selectedAuthors.filter(x => x !== a);
+        renderAuthorChips();
+      });
+      chip.appendChild(delBtn);
+      authorChipsEl.appendChild(chip);
+    });
+  }
+
+  // 引き継ぎ設定による初期値復元（次回ウィンドウ起動時）
+  if (retainTag && initialRetainedTags.length) {
+    for (const t of initialRetainedTags) if (!selectedTags.includes(t)) addTag(t);
+  }
+  if (retainSubTag && initialRetainedSubTags.length) {
+    for (const t of initialRetainedSubTags) if (!selectedSubTags.includes(t)) addSubTag(t);
+  }
+  if (retainAuthor && initialRetainedAuthors.length) {
+    selectedAuthors = [...initialRetainedAuthors];
+    renderAuthorChips();
+  }
+
+  function addAuthorChip(name) {
+    const v = name.trim();
+    if (!v || selectedAuthors.includes(v)) return;
+    selectedAuthors.push(v);
+    renderAuthorChips();
+    authorInput.value = "";
+    authorInputClear.style.display = "none";
+    hideAuthorSuggestions();
+  }
+
+  function showAuthorSuggestions(q) {
+    // v1.26.7: 未入力時は全件表示、1 文字以上で前方一致（autocomplete 用途のため）
+    // タグ・サブタグ入力と同様、入力欄フォーカス中は候補を提示する UX に合わせる
+    const matches = (q
+      ? allAuthors.filter(a => tagMatches(a, q))
+      : allAuthors
+    ).filter(a => !selectedAuthors.includes(a));
+    if (!matches.length) { hideAuthorSuggestions(); return; }
+    authorSuggestEl.innerHTML = matches.slice(0, 8).map(a =>
+      `<div style="padding:5px 9px;cursor:pointer;color:#1a1a1a;" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
+    ).join("");
+    authorSuggestEl.style.display = "block";
+    authorSuggestEl.querySelectorAll("[data-author]").forEach(el => {
+      el.addEventListener("mouseenter", () => el.style.background = "#f0f4ff");
+      el.addEventListener("mouseleave", () => el.style.background = "");
+      el.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        addAuthorChip(el.dataset.author);
+      });
+    });
+  }
+
+  function hideAuthorSuggestions() {
+    authorSuggestEl.style.display = "none";
+    authorSuggestEl.innerHTML = "";
+  }
+
+  if (authorInput) {
+    authorInput.addEventListener("input", () => {
+      authorInputClear.style.display = authorInput.value ? "" : "none";
+      showAuthorSuggestions(authorInput.value);
+    });
+    authorInput.addEventListener("focus", () => showAuthorSuggestions(authorInput.value));
+    authorInput.addEventListener("blur", () => setTimeout(hideAuthorSuggestions, 150));
+    authorInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (authorInput.value.trim()) addAuthorChip(authorInput.value);
+      } else if (e.key === "Escape") {
+        authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+      }
+    });
+    authorInputClear.addEventListener("click", () => {
+      authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+    });
+  }
+
+  // v1.26.7 hotfix: 旧 v1.26.6 のリサイズ永続化ロジックは overflow:auto 経由で
+  // suggestions ドロップダウンを clipping してしまう問題が発覚したため撤回済み。
+  // リサイズ機能は overflow:hidden を使わない方式（例：JS カスタム handle）で
+  // 再実装予定。
+
+  // ================================================================
+  const colLeft    = document.getElementById("col-left");
+  const colResizer = document.getElementById("col-resizer");
+  const body       = document.querySelector(".body");
+
+  // 保存済みの幅を復元（異なる解像度モニターでも上限クランプ）
+  if (modalSize?.colLeftWidth) {
+    const maxW = Math.floor(window.innerWidth * 0.5);
+    colLeft.style.width = Math.min(modalSize.colLeftWidth, maxW) + "px";
+  }
+
+  let resizerDragging = false;
+  let resizerStartX   = 0;
+  let resizerStartW   = 0;
+
+  colResizer.addEventListener("mousedown", (e) => {
+    resizerDragging = true;
+    resizerStartX   = e.clientX;
+    resizerStartW   = colLeft.getBoundingClientRect().width;
+    colResizer.classList.add("dragging");
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!resizerDragging) return;
+    const bodyW  = body.getBoundingClientRect().width;
+    const newW   = Math.min(
+      Math.max(120, resizerStartW + (e.clientX - resizerStartX)),
+      bodyW * 0.5
+    );
+    colLeft.style.width = newW + "px";
+  });
+
+  document.addEventListener("mouseup", async () => {
+    if (!resizerDragging) return;
+    resizerDragging = false;
+    colResizer.classList.remove("dragging");
+    // 幅を storage に保存（modalSize に統合）
+    const w = colLeft.getBoundingClientRect().width;
+    const cur = await browser.storage.local.get("modalSize");
+    const ms  = cur.modalSize || {};
+    ms.colLeftWidth = Math.round(w);
+    await browser.storage.local.set({ modalSize: ms });
+  });
+
+  // ================================================================
+  // プレビューリサイザー（縦方向）
+  // ================================================================
+  let _panelInitReady = false;
+  const previewResizer = document.getElementById("preview-resizer");
+  const PREVIEW_MIN_H  = 40;
+
+  if (modalSize?.previewHeight) {
+    previewEl.style.height = modalSize.previewHeight + "px";
+  } else if (leftPanelHeights?.["preview"]) {
+    previewEl.style.height = (leftPanelHeights["preview"] - 5) + "px";
+  }
+
+  let previewDragging = false;
+  let previewStartY   = 0;
+  let previewStartH   = 0;
+
+  previewResizer.addEventListener("mousedown", (e) => {
+    previewDragging = true;
+    previewStartY   = e.clientY;
+    previewStartH   = previewEl.getBoundingClientRect().height;
+    previewResizer.classList.add("dragging");
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!previewDragging) return;
+    const newH = Math.max(PREVIEW_MIN_H, previewStartH + (e.clientY - previewStartY));
+    previewEl.style.height = newH + "px";
+  });
+
+  document.addEventListener("mouseup", async () => {
+    if (!_panelInitReady) return;
+    if (!previewDragging) return;
+    previewDragging = false;
+    previewResizer.classList.remove("dragging");
+    const imgH = Math.round(previewEl.getBoundingClientRect().height);
+    const { modalSize: ms } = await browser.storage.local.get("modalSize");
+    const s = ms || {};
+    s.previewHeight = imgH;
+    await browser.storage.local.set({ modalSize: s });
+  });
+
+  // ================================================================
+  // 左カラム パネル並び替え (a) ・パネル間リサイズ (b)
+  // ================================================================
+  (() => {
+    const scroll = document.querySelector(".col-left-scroll");
+    if (!scroll) return;
+
+    // 管理するパネルID → 要素
+    const panelDefs = {
+      "preview":     [document.getElementById("preview"), document.getElementById("preview-resizer")],
+      "recent-tags": [document.getElementById("recent-tags-section")],
+      "bookmarks":   [document.getElementById("bookmark-section")],
+    };
+
+    const order   = [...leftPanelOrder];
+    const heights = { ...leftPanelHeights };
+
+    // ラッパーを生成（既存要素を包む）
+    const wrappers = {};
+    for (const [id, els] of Object.entries(panelDefs)) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "left-panel";
+      wrapper.dataset.panelId = id;
+
+      // リオーダーボタン：最初の要素の先頭に挿入
+      const reorderDiv = document.createElement("div");
+      reorderDiv.className = "left-panel-reorder";
+      const upBtn = document.createElement("button");
+      upBtn.textContent = "▲"; upBtn.title = "上へ移動";
+      const dnBtn = document.createElement("button");
+      dnBtn.textContent = "▼"; dnBtn.title = "下へ移動";
+      upBtn.addEventListener("click", (e) => { e.stopPropagation(); movePanel(id, -1); });
+      dnBtn.addEventListener("click", (e) => { e.stopPropagation(); movePanel(id,  1); });
+      reorderDiv.appendChild(upBtn);
+      reorderDiv.appendChild(dnBtn);
+      wrapper.appendChild(reorderDiv);
+      els.forEach(el => wrapper.appendChild(el));
+
+      if (heights[id]) {
+        const maxH = Math.floor(window.innerHeight * 0.7);
+        let h = Math.min(heights[id], maxH);
+        // preview パネルは img 高さを下回るクリップを禁止
+        if (id === "preview") {
+          const imgH = parseFloat(previewEl.style.height) || 360;
+          h = Math.max(h, imgH + 5); // +5 は preview-resizer の高さ分
+        }
+        wrapper.style.height   = h + "px";
+        wrapper.style.overflow = "hidden";
+      }
+      wrappers[id] = wrapper;
+    }
+
+    function applyOrder() {
+      scroll.innerHTML = "";
+      order.forEach((id, i) => {
+        if (!wrappers[id]) return;
+        scroll.appendChild(wrappers[id]);
+        if (i < order.length - 1) {
+          const rz = document.createElement("div");
+          rz.className = "left-row-resizer";
+          rz.dataset.abovePanel = id;
+          scroll.appendChild(rz);
+          wireRowResizer(rz, id);
+        }
+      });
+    }
+
+    function movePanel(id, delta) {
+      const idx = order.indexOf(id);
+      const newIdx = idx + delta;
+      if (newIdx < 0 || newIdx >= order.length) return;
+      [order[idx], order[newIdx]] = [order[newIdx], order[idx]];
+      applyOrder();
+      browser.storage.local.set({ leftPanelOrder: [...order] });
+    }
+
+    function wireRowResizer(rz, aboveId) {
+      let dragging = false;
+      let startY = 0;
+      let startH = 0;
+
+      rz.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startY = e.clientY;
+        startH = wrappers[aboveId].getBoundingClientRect().height;
+        rz.classList.add("dragging");
+        e.preventDefault();
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const newH = Math.max(40, startH + (e.clientY - startY));
+        wrappers[aboveId].style.height   = newH + "px";
+        wrappers[aboveId].style.overflow = "hidden";
+      });
+      document.addEventListener("mouseup", () => {
+        if (!_panelInitReady) return;
+        if (!dragging) return;
+        dragging = false;
+        rz.classList.remove("dragging");
+        const h = Math.round(wrappers[aboveId].getBoundingClientRect().height);
+        heights[aboveId] = h;
+        browser.storage.local.set({ leftPanelHeights: { ...heights } });
+      });
+    }
+
+    // パネル入れ替えモード チェックボックス
+    const reorderChkWrap = document.createElement("div");
+    reorderChkWrap.style.cssText = "padding: 2px 6px 0; display: flex; justify-content: flex-end;";
+    const reorderChk = document.createElement("input");
+    reorderChk.type = "checkbox";
+    reorderChk.id = "chk-panel-reorder";
+    const reorderLbl = document.createElement("label");
+    reorderLbl.id = "chk-panel-reorder-label";
+    reorderLbl.htmlFor = "chk-panel-reorder";
+    reorderLbl.textContent = "並替";
+    reorderLbl.title = "パネル入れ替えモード";
+    reorderLbl.prepend(reorderChk);
+    reorderChkWrap.appendChild(reorderLbl);
+    scroll.parentNode.insertBefore(reorderChkWrap, scroll);
+    reorderChk.addEventListener("change", () => {
+      scroll.classList.toggle("panel-reorder-mode", reorderChk.checked);
+    });
+
+    applyOrder();
+    _panelInitReady = true;
+  })();
+
+  // ================================================================
+  filenameInput.value = defaultFilename;
+  // GROUP-58 (v1.46.x)：保存ウィンドウ起動直後の auto-focus race を解消。
+  // 50ms 経過時点で他要素（タグ入力欄等）にフォーカスがあれば skip し、
+  // body or filename 自身がフォーカス対象であれば従来どおり filename へ移動する。
+  // first commit から無条件 setTimeout focus が「タグ入力中に
+  // ファイル名欄へ focus が奪われる」事象（modal.js:5781-5782 race condition）
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (active === document.body || active === filenameInput || active === null) {
+      filenameInput.focus();
+    }
+  }, 50);
+
+}
+
+// ----------------------------------------------------------------
+// トースト
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// トースト通知（キュー方式・縦積み）
+// ----------------------------------------------------------------
+const _toastQueue = [];
+let _toastActive = false;
+
+// ----------------------------------------------------------------
+// 保存履歴インラインライトボックス（設定画面の showGroupLightbox と同仕様）
+// ----------------------------------------------------------------
+async function showModalLightbox(groupEntries, startGroupIdx, allEntries, startGlobalIdx, isGroupChild) {
+  // isGroupChild=true: 展開後の子タイル → ◀▶=グループ内、▲▼=全体
+  // isGroupChild=false/undefined: 通常タイル → ◀▶=全体ナビ、▲▼非表示
+  document.querySelector(".modal-lightbox-overlay")?.remove();
+
+  const btnStyle = "position:fixed;background:rgba(255,255,255,.2);border:none;color:#fff;" +
+    "font-size:32px;width:50px;height:50px;border-radius:50%;cursor:pointer;" +
+    "display:flex;align-items:center;justify-content:center;transition:background .15s;z-index:10001;";
+
+  const ov = document.createElement("div");
+  ov.className = "modal-lightbox-overlay";
+  ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:10000;" +
+    "display:flex;align-items:center;justify-content:center;";
+  ov.innerHTML = `
+    <button class="mlb-close" style="position:fixed;top:14px;right:18px;${btnStyle}font-size:20px;width:34px;height:34px;">✕</button>
+    <button class="mlb-left"  title="${isGroupChild ? "前の画像(グループ内)" : "前の履歴（全体）"}" style="${btnStyle}left:20px;top:50%;">&#8249;</button>
+    <button class="mlb-right" title="${isGroupChild ? "次の画像(グループ内)" : "次の履歴（全体）"}" style="${btnStyle}right:20px;top:50%;">&#8250;</button>
+    <button class="mlb-up"   title="前の履歴（全体）" style="${btnStyle}font-size:24px;top:20px;left:50%;">&#8963;</button>
+    <button class="mlb-down" title="次の履歴（全体）" style="${btnStyle}font-size:24px;bottom:60px;left:50%;">&#8964;</button>
+    <img class="mlb-img" style="max-width:90vw;max-height:85vh;object-fit:contain;border-radius:4px;box-shadow:0 8px 32px rgba(0,0,0,.5);cursor:default;" />
+    <div class="mlb-fallback-note" style="display:none;position:fixed;bottom:52px;left:50%;transform:translateX(-50%);
+      background:rgba(160,80,0,.88);color:#fff;font-size:11px;padding:4px 14px;border-radius:16px;
+      white-space:nowrap;z-index:10001;"></div>
+    <div class="mlb-info" style="position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+      background:rgba(0,0,0,.6);color:#fff;font-size:11px;padding:4px 14px;border-radius:16px;
+      display:flex;gap:12px;align-items:center;white-space:nowrap;z-index:10001;">
+      <span class="mlb-group-label" style="color:rgba(255,255,255,.6);font-size:10px;">${isGroupChild ? "グループ内" : ""}</span>
+      <span class="mlb-counter"></span>
+      <span class="mlb-global-label" style="color:rgba(255,255,255,.6);font-size:10px;"></span>
+      <span class="mlb-filename"></span>
+    </div>
+  `;
+  document.body.appendChild(ov);
+
+  const img          = ov.querySelector(".mlb-img");
+  const fallbackNote = ov.querySelector(".mlb-fallback-note");
+  const counter    = ov.querySelector(".mlb-counter");
+  const filename   = ov.querySelector(".mlb-filename");
+  const globalLbl  = ov.querySelector(".mlb-global-label");
+  const leftBtn    = ov.querySelector(".mlb-left");
+  const rightBtn   = ov.querySelector(".mlb-right");
+  const upBtn      = ov.querySelector(".mlb-up");
+  const downBtn    = ov.querySelector(".mlb-down");
+
+  const total      = groupEntries.length;
+  const totalAll   = allEntries.length;
+  let curGroup     = startGroupIdx;
+  let curGlobal    = startGlobalIdx;
+
+  // グループが1枚の場合は左右ナビを非表示
+  // グループ内に複数枚ある場合のみ左右ボタンを表示（isGroupChildでない場合は全体ナビとして常時表示）
+  if (total <= 1 && isGroupChild) { leftBtn.style.display = "none"; rightBtn.style.display = "none"; }
+
+  function reposNavBtns() {
+    const r = img.getBoundingClientRect();
+    if (!r.width) return;
+    const cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+    const bw = 50;
+    // 左右
+    let ll = cx / 2 - bw / 2;
+    if (ll + bw > r.left - 8) ll = Math.max(8, r.left - bw - 8);
+    leftBtn.style.left = `${Math.max(8,ll)}px`; leftBtn.style.right = "auto";
+    leftBtn.style.top  = `${cy - bw/2}px`; leftBtn.style.transform = "none";
+    let rl = cx + cx / 2 - bw / 2;
+    if (rl < r.right + 8) rl = r.right + 8;
+    rightBtn.style.left = `${Math.min(window.innerWidth-bw-8,rl)}px`; rightBtn.style.right = "auto";
+    rightBtn.style.top  = `${cy - bw/2}px`; rightBtn.style.transform = "none";
+    // 上下
+    let ut = cy / 2 - bw / 2;
+    if (ut + bw > r.top - 8) ut = Math.max(8, r.top - bw - 8);
+    upBtn.style.top = `${Math.max(8,ut)}px`; upBtn.style.bottom = "auto";
+    upBtn.style.left = `${cx - bw/2}px`; upBtn.style.transform = "none";
+    let dt = cy + cy / 2 - bw / 2;
+    if (dt < r.bottom + 8) dt = r.bottom + 8;
+    downBtn.style.top = `${Math.min(window.innerHeight-bw-8,dt)}px`; downBtn.style.bottom = "auto";
+    downBtn.style.left = `${cx - bw/2}px`; downBtn.style.transform = "none";
+  }
+
+  async function loadEntry(entry) {
+    img.src = "";
+    fallbackNote.style.display = "none";
+    const p = (Array.isArray(entry.savePaths) ? entry.savePaths[0] : entry.savePath) || "";
+
+    if (!p || !entry.filename) {
+      await _loadThumbFallback(entry, "保存先情報がありません");
+      return;
+    }
+
+    const filePath = p.replace(/[\\/]+$/, "") + "\\" + entry.filename;
+    const res = await browser.runtime.sendMessage({ type: "FETCH_FILE_AS_DATAURL", path: filePath });
+    if (res?.ok && res.dataUrl) {
+      _revokeCurrentBlobUrl();
+      img.src = res.dataUrl;
+      img.alt = entry.filename;
+      if (img.complete && img.naturalWidth) reposNavBtns();
+      else img.onload = () => { reposNavBtns(); img.onload = null; };
+    } else if (res?.ok && Array.isArray(res.chunksB64)) {
+      // v1.22.9: 大容量 GIF は base64 チャンクを受け取り、この場で Blob URL を組み立てる
+      try {
+        const arrays = [];
+        for (const b64 of res.chunksB64) {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          arrays.push(arr);
+        }
+        const blob = new Blob(arrays, { type: res.mime || "image/gif" });
+        _revokeCurrentBlobUrl();
+        _currentBlobUrl = URL.createObjectURL(blob);
+        img.src = _currentBlobUrl;
+        img.alt = entry.filename;
+        if (img.complete && img.naturalWidth) reposNavBtns();
+        else img.onload = () => { reposNavBtns(); img.onload = null; };
+      } catch (err) {
+        await _loadThumbFallback(entry, `Blob 組み立てに失敗: ${err?.message || err}`);
+      }
+    } else {
+      const reason = res?.error || "ファイルが見つかりません";
+      await _loadThumbFallback(entry, reason);
+    }
+  }
+
+  let _currentBlobUrl = null;
+  function _revokeCurrentBlobUrl() {
+    if (_currentBlobUrl) {
+      try { URL.revokeObjectURL(_currentBlobUrl); } catch (_) {}
+      _currentBlobUrl = null;
+    }
+  }
+
+  async function _loadThumbFallback(entry, reason) {
+    if (entry.thumbId) {
+      const thumbRes = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
+        .catch(() => null);
+      if (thumbRes?.dataUrl) {
+        img.src = thumbRes.dataUrl;
+        img.alt = entry.filename;
+        if (img.complete && img.naturalWidth) reposNavBtns();
+        else img.onload = () => { reposNavBtns(); img.onload = null; };
+        fallbackNote.textContent = `⚠️ ${reason} — サムネイルを表示しています`;
+        fallbackNote.style.display = "";
+        return;
+      }
+    }
+    fallbackNote.textContent = `⚠️ ${reason} — プレビューを表示できません`;
+    fallbackNote.style.display = "";
+  }
+
+  function updateGroup(idx) {
+    curGroup = idx;
+    const entry = groupEntries[idx];
+    counter.textContent = `${idx + 1} / ${total}`;
+    filename.textContent = entry?.filename || "";
+    leftBtn.style.opacity  = idx > 0 ? "1" : "0.3";
+    rightBtn.style.opacity = idx < total - 1 ? "1" : "0.3";
+    updateGlobalLabel();
+    loadEntry(entry);
+  }
+
+  function updateGlobalLabel() {
+    if (curGlobal < 0) { globalLbl.textContent = ""; return; }
+    globalLbl.textContent = `全体 ${totalAll - curGlobal} / ${totalAll}`;
+    upBtn.style.opacity   = curGlobal > 0 ? "1" : "0.3";
+    downBtn.style.opacity = curGlobal < totalAll - 1 ? "1" : "0.3";
+  }
+
+  function goGlobalPrev() {
+    if (curGlobal <= 0) return;
+    curGlobal--;
+    const e = allEntries[curGlobal];
+    counter.textContent = "1 / 1"; filename.textContent = e?.filename || "";
+    // グループ子タイルから全体ナビで移動した場合のみ左右（グループ内）を隠す
+    if (isGroupChild) { leftBtn.style.display = "none"; rightBtn.style.display = "none"; }
+    updateGlobalLabel();
+    loadEntry(e);
+  }
+  function goGlobalNext() {
+    if (curGlobal >= totalAll - 1) return;
+    curGlobal++;
+    const e = allEntries[curGlobal];
+    counter.textContent = "1 / 1"; filename.textContent = e?.filename || "";
+    if (isGroupChild) { leftBtn.style.display = "none"; rightBtn.style.display = "none"; }
+    updateGlobalLabel();
+    loadEntry(e);
+  }
+
+  // isGroupChildでない場合：左右=全体ナビ、上下=非表示
+  // isGroupChildの場合：左右=グループ内ナビ、上下=全体ナビ
+  if (!isGroupChild) {
+    upBtn.style.display   = "none";
+    downBtn.style.display = "none";
+    leftBtn.addEventListener("click",  (e) => { e.stopPropagation(); goGlobalPrev(); });
+    rightBtn.addEventListener("click", (e) => { e.stopPropagation(); goGlobalNext(); });
+  } else {
+    leftBtn.addEventListener("click",  (e) => { e.stopPropagation(); if (curGroup > 0) updateGroup(curGroup - 1); });
+    rightBtn.addEventListener("click", (e) => { e.stopPropagation(); if (curGroup < total - 1) updateGroup(curGroup + 1); });
+    upBtn.addEventListener("click",    (e) => { e.stopPropagation(); goGlobalPrev(); });
+    downBtn.addEventListener("click",  (e) => { e.stopPropagation(); goGlobalNext(); });
+  }
+
+  const onResize = () => reposNavBtns();
+  window.addEventListener("resize", onResize);
+
+  function close() {
+    ov.remove();
+    window.removeEventListener("resize", onResize);
+    document.removeEventListener("keydown", onKey);
+  }
+  ov.querySelector(".mlb-close").addEventListener("click", close);
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+    else if (!isGroupChild) {
+      if (e.key === "ArrowLeft")  goGlobalPrev();
+      if (e.key === "ArrowRight") goGlobalNext();
+    } else {
+      if (e.key === "ArrowLeft"  && curGroup > 0) updateGroup(curGroup - 1);
+      if (e.key === "ArrowRight" && curGroup < total - 1) updateGroup(curGroup + 1);
+      if (e.key === "ArrowUp")   goGlobalPrev();
+      if (e.key === "ArrowDown") goGlobalNext();
+    }
+  };
+  document.addEventListener("keydown", onKey);
+
+  // 初期表示
+  updateGroup(startGroupIdx);
+}
+
+function showToast(shadow, message, isError = false) {
+  _toastQueue.push({ message, isError });
+  if (!_toastActive) _processToastQueue();
+}
+
+// v1.41.5:保存失敗時のポップアップ
+// 入力欄はリセットスキップで保持されているので、閉じてそのまま再保存ボタンを押せる
+function showSaveFailurePopup(shadow, errorMessage) {
+  const existing = document.getElementById("save-failure-popup");
+  if (existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "save-failure-popup";
+  overlay.style.cssText = `
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2147483647; font-family: "Segoe UI", sans-serif;
+  `;
+  const card = document.createElement("div");
+  card.style.cssText = `
+    background: #fff; border-radius: 10px; padding: 22px 28px;
+    min-width: 340px; max-width: 80vw; box-shadow: 0 8px 28px rgba(0,0,0,0.25);
+  `;
+  card.innerHTML = `
+    <div style="font-size:16px;font-weight:700;color:#c53030;margin-bottom:10px;">❌ 保存に失敗しました</div>
+    <div style="font-size:13px;color:#444;margin-bottom:6px;">入力情報は保持されています。閉じて再度「保存」ボタンを押してください。</div>
+    <pre style="background:#fef4f4;border:1px solid #f0b8b8;border-radius:6px;padding:10px;font-size:11px;color:#721c24;margin:10px 0;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto;"></pre>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button id="save-failure-close" style="padding:6px 14px;font-size:13px;border:1px solid #4a90e2;background:#4a90e2;color:#fff;border-radius:6px;cursor:pointer;font-family:inherit;">閉じる</button>
+    </div>
+  `;
+  card.querySelector("pre").textContent = String(errorMessage || "不明なエラー");
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  card.querySelector("#save-failure-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+}
+
+function _processToastQueue() {
+  if (_toastQueue.length === 0) { _toastActive = false; return; }
+  _toastActive = true;
+  const { message, isError } = _toastQueue.shift();
+
+  const toast = document.createElement("div");
+  toast.style.cssText = `
+    position: fixed; top: 50%; left: 50%; transform: translateX(-50%) translateY(-50%);
+    background: ${isError ? "#e74c3c" : "#27ae60"}; color: #fff;
+    padding: 14px 28px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    z-index: 2147483647; box-shadow: 0 6px 28px rgba(0,0,0,.35);
+    font-family: "Segoe UI", sans-serif;
+    white-space: pre-wrap; text-align: center; max-width: 480px;
+    animation: toast-in .2s ease;
+  `;
+  toast.textContent = message;
+
+  // アニメーション用スタイル（初回のみ追加）
+  if (!document.getElementById("toast-style")) {
+    const s = document.createElement("style");
+    s.id = "toast-style";
+    s.textContent = `@keyframes toast-in { from { opacity:0; transform:translateX(-50%) translateY(calc(-50% + 12px)); } to { opacity:1; transform:translateX(-50%) translateY(-50%); } }`;
+    document.head.appendChild(s);
+  }
+
+  document.body.appendChild(toast);
+  const duration = isError ? 4000 : 2500;
+  setTimeout(() => {
+    toast.remove();
+    // 次のトーストを少し間をあけて表示
+    setTimeout(_processToastQueue, 150);
+  }, duration);
+}
+
+// ----------------------------------------------------------------
+// ユーティリティ
+// ----------------------------------------------------------------
+function guessFilename(url) {
+  // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：data URL の場合は MIME から拡張子推定。
+  // data URL を URL オブジェクトで parse すると pathname に base64 本体が入ってしまい
+  // 適切なファイル名が得られない（従来は全て .jpg にフォールバックしていた）。
+  if (typeof url === "string" && url.startsWith("data:")) {
+    const m = url.match(/^data:([a-zA-Z0-9/.+-]+)(?:;|,)/);
+    if (m) {
+      const mime = m[1];
+      // "image/gif" → "gif"、"image/jpeg" → "jpg"、"image/webp" → "webp" 等
+      const sub = (mime.split("/")[1] || "").toLowerCase();
+      const ext = sub === "jpeg" ? "jpg" : (sub || "bin");
+      return `image.${ext}`;
+    }
+    return "image.bin";
+  }
+  try {
+    const parts = new URL(url).pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1] || "image";
+    return /\.\w{2,5}$/.test(last) ? last : `${last}.jpg`;
+  } catch { return "image.jpg"; }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// v1.44.0 GROUP-16-a2：ID 貼付確認ダイアログ（modal.js 用、settings.js と機能等価）
+function _showIdPasteConfirmDialog(src) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById("id-paste-confirm-overlay");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "id-paste-confirm-overlay";
+    overlay.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2147483647; font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic", sans-serif;
+    `;
+    const card = document.createElement("div");
+    card.style.cssText = `
+      background: #fff; border-radius: 10px; padding: 18px 22px;
+      min-width: 420px; max-width: 80vw; max-height: 80vh; overflow: auto;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.3); font-size: 13px; color: #333;
+    `;
+    const tags = Array.isArray(src.tags) ? src.tags : [];
+    const authors = Array.isArray(src.authors) ? src.authors.filter(Boolean) : [];
+    const hasPageUrl = !!src.pageUrl;
+    let html = `
+      <div style="font-size:15px;font-weight:700;color:#2c3e50;margin-bottom:8px;">📥 反映対象を選択</div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px;word-break:break-all;">元エントリ: ${escapeHtml(src.filename || "(無名)")}<br>識別情報: <code>${escapeHtml(src.id)}</code></div>
+    `;
+    if (tags.length === 0 && authors.length === 0 && !hasPageUrl) {
+      html += `<div style="color:#c53030;margin:8px 0;">この保存履歴にはコピー可能なフィールドがありません（タグ・権利者・ページ URL 全て空）。</div>`;
+      html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button id="id-paste-cancel" style="padding:6px 14px;font-size:13px;border:1px solid #999;background:#fff;color:#444;border-radius:6px;cursor:pointer;font-family:inherit;">閉じる</button></div>`;
+      card.innerHTML = html;
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      const close = () => { overlay.remove(); resolve(null); };
+      card.querySelector("#id-paste-cancel").addEventListener("click", close);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+      return;
+    }
+    if (tags.length > 0) {
+      html += `<div style="font-weight:600;margin:10px 0 4px;">🏷️ タグ（チェックで反映、ラジオでメインタグ指定）</div>`;
+      html += tags.map((t, i) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+          <input type="checkbox" class="id-paste-tag-cb" data-tag="${escapeHtml(t)}" checked />
+          <input type="radio" name="id-paste-main-tag" class="id-paste-tag-radio" value="${escapeHtml(t)}" ${i === 0 ? "checked" : ""} title="メインタグに指定" />
+          <span>${escapeHtml(t)}</span>
+        </div>`).join("");
+    }
+    if (authors.length > 0) {
+      html += `<div style="font-weight:600;margin:12px 0 4px;">✏️ 権利者</div>`;
+      html += authors.map((a) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+          <input type="checkbox" class="id-paste-author-cb" data-author="${escapeHtml(a)}" checked />
+          <span>${escapeHtml(a)}</span>
+        </div>`).join("");
+    }
+    if (hasPageUrl) {
+      html += `<div style="font-weight:600;margin:12px 0 4px;">🔗 ページ URL</div>`;
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+        <input type="checkbox" id="id-paste-pageurl-cb" />
+        <span style="word-break:break-all;font-size:11px;color:#555;">${escapeHtml(src.pageUrl)}</span>
+      </div>`;
+    }
+    html += `
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;border-top:1px solid #eee;padding-top:12px;">
+        <button id="id-paste-cancel" style="padding:6px 14px;font-size:13px;border:1px solid #999;background:#fff;color:#444;border-radius:6px;cursor:pointer;font-family:inherit;">キャンセル</button>
+        <button id="id-paste-apply" style="padding:6px 14px;font-size:13px;border:1px solid #4a90e2;background:#4a90e2;color:#fff;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:600;">📥 反映</button>
+      </div>
+    `;
+    card.innerHTML = html;
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    const cancel = () => { overlay.remove(); resolve(null); };
+    card.querySelector("#id-paste-cancel").addEventListener("click", cancel);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cancel(); });
+    card.querySelector("#id-paste-apply").addEventListener("click", () => {
+      const selectedTags = [...card.querySelectorAll(".id-paste-tag-cb")]
+        .filter(cb => cb.checked).map(cb => cb.dataset.tag);
+      const mainTagRadio = card.querySelector(".id-paste-tag-radio:checked");
+      const mainTag = mainTagRadio ? mainTagRadio.value : (selectedTags[0] || null);
+      const finalMain = (mainTag && selectedTags.includes(mainTag)) ? mainTag : (selectedTags[0] || null);
+      const selectedAuthors = [...card.querySelectorAll(".id-paste-author-cb")]
+        .filter(cb => cb.checked).map(cb => cb.dataset.author);
+      const pageUrlCb = card.querySelector("#id-paste-pageurl-cb");
+      const applyPageUrl = !!(pageUrlCb && pageUrlCb.checked);
+      overlay.remove();
+      resolve({
+        tags: selectedTags,
+        mainTag: finalMain,
+        authors: selectedAuthors,
+        applyPageUrl,
+      });
+    });
+  });
+}
+
+// =============================================================================
+// v1.41.4 GROUP-44：保存ウィンドウへの busy modal 移植（settings.js と同等の挙動）
+// =============================================================================
+// settings.js の busy modal は HTML 静的要素として settings.html に定義されているが、
+// modal.html は modal-root のシェルのみのため、modal.js 側で DOM を動的生成する。
+// API：
+// showBusyModal(message, sub, historyArr)  → 表示開始（spinner + プレビュー）
+// completeBusyModal(doneMessage)           → 「✅ 完了」状態へ遷移、閉じるボタン表示
+// hideBusyModal()                          → 完了状態なら no-op、それ以外は即時非表示
+// historyArr は saveHistory のスナップショットを引き渡し、お気に入りプレビューに使う。
+// =============================================================================
+let _busyState = "hidden"; // hidden / busy / done
+let _busyPreviewToken = 0;
+let _busyHistorySnapshot = null;
+
+function _ensureBusyModalDom() {
+  if (document.getElementById("busy-modal-overlay")) return;
+  const frag = document.createElement("template");
+  frag.innerHTML = `
+    <div id="busy-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:99999;align-items:center;justify-content:center;font-family:inherit;">
+      <div id="busy-modal-card" style="background:#fff;border-radius:10px;padding:18px 22px;min-width:260px;max-width:80vw;box-shadow:0 8px 24px rgba(0,0,0,0.2);text-align:center;display:inline-block;">
+        <img id="busy-modal-preview" style="display:none;max-width:none;max-height:240px;width:auto;height:auto;object-fit:contain;border-radius:6px;margin:0 auto 6px;box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
+        <div id="busy-modal-caption" style="display:none;font-size:10px;color:#888;margin-bottom:10px;line-height:1.3;"></div>
+        <div id="busy-modal-status-row" style="display:flex;align-items:center;justify-content:center;gap:8px;min-height:30px;">
+          <div id="busy-modal-spinner" style="width:20px;height:20px;border:3px solid #e0e0e0;border-top-color:#4a90e2;border-radius:50%;animation:busy-spin 0.8s linear infinite;flex:0 0 auto;"></div>
+          <div id="busy-modal-icon" style="display:none;font-size:20px;line-height:1;flex:0 0 auto;">✅</div>
+          <div id="busy-modal-message" style="font-size:13px;color:#333;font-weight:600;line-height:1.4;flex:0 1 auto;">処理中…</div>
+          <button id="busy-modal-close" style="display:none;padding:4px 12px;font-size:12px;border:1px solid #4a90e2;background:#fff;color:#4a90e2;border-radius:4px;cursor:pointer;font-family:inherit;flex:0 0 auto;margin-left:4px;">閉じる</button>
+        </div>
+        <div id="busy-modal-sub" style="font-size:11px;color:#666;margin-top:4px;"></div>
+      </div>
+    </div>
+    <style>
+      @keyframes busy-spin { to { transform: rotate(360deg); } }
+      #busy-modal-overlay[data-shown="1"] { display: flex !important; }
+      #busy-modal-close:hover { background:#4a90e2; color:#fff; }
+    </style>
+  `;
+  while (frag.content.firstChild) document.body.appendChild(frag.content.firstChild);
+}
+
+async function _loadBusyPreview(token) {
+  try {
+    const list = (_busyHistorySnapshot || []).filter(e => e?.thumbId);
+    if (list.length === 0) return;
+    const favs = list.filter(e => !!e.favorite);
+    const isFavSource = favs.length > 0;
+    const pool = isFavSource ? favs : list;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    // v1.46.0 GROUP-57: GIF は Blob URL 経由で fetch（busy modal は単発表示だが GIF dataUrl は 38MB+ で
+    // モーダル開閉ごとに retain 蓄積、複数回 busy 発火で乗算）
+    const isGif = _isGifEntry(pick);
+    let imgSrc = null;
+    let blobUrl = null;
+    if (isGif) {
+      blobUrl = await _loadThumbAsBlobUrl(pick.thumbId, "image/gif");
+      imgSrc = blobUrl;
+    } else {
+      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: pick.thumbId });
+      imgSrc = r?.dataUrl || null;
+    }
+    if (token !== _busyPreviewToken) {
+      if (blobUrl) try { URL.revokeObjectURL(blobUrl); } catch (_) {}
+      return;
+    }
+    if (_busyState !== "busy" && _busyState !== "done") {
+      if (blobUrl) try { URL.revokeObjectURL(blobUrl); } catch (_) {}
+      return;
+    }
+    if (imgSrc) {
+      const img = document.getElementById("busy-modal-preview");
+      const caption = document.getElementById("busy-modal-caption");
+      if (img) {
+        if (blobUrl) {
+          _attachBlobUrlToImg(img, blobUrl);
+        } else {
+          img.src = imgSrc;
+        }
+        img.style.display = "block";
+      }
+      if (caption) {
+        caption.textContent = isFavSource
+          ? "処理待ちの間お気に入りからランダムに表示しています"
+          : "処理待ちの間ランダムな画像を表示しています";
+        caption.style.display = "block";
+      }
+    }
+  } catch (_) { /* プレビュー失敗は致命的ではないので握りつぶす */ }
+}
+
+function showBusyModal(message, sub, historyArr) {
+  _ensureBusyModalDom();
+  const overlay = document.getElementById("busy-modal-overlay");
+  if (!overlay) return;
+  _busyForceHide();
+  _busyState = "busy";
+  _busyHistorySnapshot = Array.isArray(historyArr) ? historyArr : null;
+  const token = ++_busyPreviewToken;
+  const msg = document.getElementById("busy-modal-message");
+  const subEl = document.getElementById("busy-modal-sub");
+  const spinner = document.getElementById("busy-modal-spinner");
+  const icon = document.getElementById("busy-modal-icon");
+  const closeBtn = document.getElementById("busy-modal-close");
+  const preview = document.getElementById("busy-modal-preview");
+  const caption = document.getElementById("busy-modal-caption");
+  if (msg) msg.textContent = message || "処理中…";
+  if (subEl) subEl.textContent = sub || "";
+  if (spinner) spinner.style.display = "block";
+  if (icon) icon.style.display = "none";
+  if (closeBtn) closeBtn.style.display = "none";
+  if (preview) { preview.style.display = "none"; preview.removeAttribute("src"); }
+  if (caption) { caption.style.display = "none"; caption.textContent = ""; }
+  overlay.dataset.shown = "1";
+  overlay.style.display = "flex";
+  _loadBusyPreview(token);
+}
+
+function completeBusyModal(doneMessage) {
+  if (_busyState === "hidden") return;
+  _busyState = "done";
+  const msg = document.getElementById("busy-modal-message");
+  const subEl = document.getElementById("busy-modal-sub");
+  const spinner = document.getElementById("busy-modal-spinner");
+  const icon = document.getElementById("busy-modal-icon");
+  const closeBtn = document.getElementById("busy-modal-close");
+  if (spinner) spinner.style.display = "none";
+  if (icon) icon.style.display = "block";
+  if (msg) msg.textContent = doneMessage || "完了";
+  if (subEl) subEl.textContent = "";
+  if (closeBtn) {
+    closeBtn.style.display = "inline-block";
+    closeBtn.onclick = () => { _busyForceHide(); };
+  }
+}
+
+function _busyForceHide() {
+  const overlay = document.getElementById("busy-modal-overlay");
+  if (!overlay) return;
+  _busyState = "hidden";
+  overlay.dataset.shown = "0";
+  overlay.style.display = "none";
+}
+
+function hideBusyModal() {
+  if (_busyState === "done") return;
+  _busyForceHide();
+}

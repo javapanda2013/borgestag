@@ -4904,12 +4904,10 @@ async function _toggleAudioSelected() {
         // ダミー btn を用意して _toggleHistAudio を再利用
         const iconBtn = document.querySelector(`.hist-card-audio-icon[data-audio-entry-id="${entry.id}"]`);
         if (iconBtn) {
-          // eslint-disable-next-line no-await-in-loop
           await _toggleHistAudio(entry, iconBtn);
         } else {
           // DOM にボタンがない（別ページ等）場合はダミー element で呼出
           const dummy = document.createElement("button");
-          // eslint-disable-next-line no-await-in-loop
           await _toggleHistAudio(entry, dummy);
         }
       }

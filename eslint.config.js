@@ -143,6 +143,12 @@ module.exports = [
       sourceType: "script",
       globals: browserGlobals,
     },
+    // GROUP-98 リリース 1（2026-05-19、Q-98-1 = d Plan c）：unused suppress を error 化。
+    // GROUP-97 root cause = `eslint-disable-next-line no-redeclare` で suppress + 放置だった反省。
+    // 不要な eslint-disable 注釈は即時 error で削除を強制（auditable な意図的 suppress のみ存続）。
+    linterOptions: {
+      reportUnusedDisableDirectives: "error",
+    },
     rules: {
       "no-undef": "error",
       // builtinGlobals=false：globals に登録した名前を local 関数で再定義しても error にしない。

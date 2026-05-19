@@ -2318,7 +2318,6 @@ function setupModalEvents(
           if (_modalAudioPlayingIds.has(entry.id)) continue;
           const iconBtn = document.querySelector(`.history-audio-icon[data-audio-entry-id="${entry.id}"]`);
           const useBtn = iconBtn || document.createElement("button");
-          // eslint-disable-next-line no-await-in-loop
           await _modalToggleAudio(entry, useBtn);
         }
       }

@@ -5,6 +5,16 @@
 
 ---
 
+## [1.46.25] - 2026-05-19
+
+### Internal — ESLint suppress 検出強化と既存 unused suppress の cleanup
+
+開発側の静的解析強化として、ESLint 設定に `reportUnusedDisableDirectives: "error"` を追加。これにより、不要になった `eslint-disable` 注釈が即座にエラー化され、suppress を付けたまま放置される構造的問題を予防。既存の `no-await-in-loop` の unused suppress 3 件（保存ウィンドウと設定画面の保存履歴一括音声再生処理）を検出して削除。挙動変更なし。
+
+[design-doc-skip: ESLint config / lint cleanup のみで API/挙動変更なし、設計書 anchor 更新不要]
+
+---
+
 ## [1.46.24] - 2026-05-18
 
 ### Fixed — 保存ウィンドウの保存履歴 権利者フィルタ チップが表示されない / 解除されない不具合修正

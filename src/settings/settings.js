@@ -2325,6 +2325,60 @@ function _normalizeForMatch(s) {
 }
 
 /**
+ * v1.46.27 GROUP-100：サジェスト用 ArrowUp / ArrowDown 共通ヘルパ
+ * - サジェスト表示中に上下キーで active 項目を移動（wrap あり）
+ * - pickActive() で確定対象を取得（Enter 処理は各 site が既存ロジックで実施、active あれば優先）
+ * - reset() でハイライト解除（hide 時に呼ぶ）
+ * @param {Object} opt
+ * @param {HTMLElement} opt.input - キー入力を受ける input 要素
+ * @param {Function} opt.getItems - サジェスト項目の NodeList/配列を返す関数
+ * @param {Function} opt.isVisible - サジェストが表示中か返す関数（bool）
+ * @param {string} [opt.activeClass="active"] - active 項目に付与する class 名
+ * @returns {{pickActive: Function, reset: Function, setActive: Function}}
+ */
+function _setupSuggestKbdNav({ input, getItems, isVisible, activeClass = "active" }) {
+  let activeIdx = -1;
+  function clearActive() {
+    const items = getItems();
+    if (!items) return;
+    for (const el of items) el.classList.remove(activeClass);
+  }
+  function setActive(idx) {
+    const items = getItems();
+    if (!items || !items.length) { activeIdx = -1; return; }
+    const n = items.length;
+    if (idx < 0) idx = n - 1;
+    if (idx >= n) idx = 0;
+    clearActive();
+    items[idx].classList.add(activeClass);
+    activeIdx = idx;
+    if (items[idx].scrollIntoView) items[idx].scrollIntoView({ block: "nearest" });
+  }
+  function pickActive() {
+    const items = getItems();
+    if (!items || activeIdx < 0 || activeIdx >= items.length) return null;
+    return items[activeIdx];
+  }
+  function reset() {
+    clearActive();
+    activeIdx = -1;
+  }
+  input.addEventListener("keydown", (e) => {
+    if (!isVisible()) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      setActive(activeIdx + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      setActive(activeIdx - 1);
+    }
+  });
+  return { pickActive, reset, setActive };
+}
+
+/**
  * 履歴絞り込みチップ入力コントローラ（v1.21.1）
  * タグ絞り込み / 権利者絞り込みで共通利用。
  *
@@ -2430,13 +2484,38 @@ function _setupHistChipInput({
     wrap.classList.remove("focused");
     setTimeout(hideSuggest, 150);
   });
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _nav = _setupSuggestKbdNav({
+    input,
+    getItems: () => suggest.querySelectorAll(".hist-sug-item"),
+    isVisible: () => suggest.classList.contains("visible"),
+  });
+  function commitFromActive() {
+    const active = _nav.pickActive();
+    if (!active || !suggest.classList.contains("visible")) return false;
+    const val = active.dataset.val;
+    if (!val) return false;
+    const chips = getChips();
+    const normalized = val.toLowerCase();
+    if (!chips.includes(normalized)) {
+      setChips([...chips, normalized]);
+      renderChips();
+    }
+    input.value = "";
+    _nav.reset();
+    hideSuggest();
+    return true;
+  }
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === ",") {
+      // v1.46.27 GROUP-100：active があれば優先
+      if (commitFromActive()) { e.preventDefault(); return; }
       if (input.value.trim()) {
         e.preventDefault();
         commitInput();
       }
     } else if (e.key === " " && commitOnSpace) {
+      if (commitFromActive()) { e.preventDefault(); return; }
       if (input.value.trim()) {
         e.preventDefault();
         commitInput();
@@ -2449,6 +2528,7 @@ function _setupHistChipInput({
       }
     } else if (e.key === "Escape") {
       hideSuggest();
+      _nav.reset();
       input.blur();
     }
   });
@@ -3000,8 +3080,22 @@ function setupHistoryTab() {
       }
 
       input.addEventListener("input", () => updateSuggest(input.value));
+      // v1.46.27 GROUP-100：上下キー active 移動
+      const _atdNav = _setupSuggestKbdNav({
+        input,
+        getItems: () => suggestBox.querySelectorAll(".atd-sug"),
+        isVisible: () => suggestBox.style.display !== "none" && suggestBox.children.length > 0,
+      });
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === "," || e.key === " ") {
+          // v1.46.27 GROUP-100：active があれば優先
+          const active = _atdNav.pickActive();
+          if (active && suggestBox.style.display !== "none") {
+            e.preventDefault();
+            addChip(active.dataset.tag);
+            _atdNav.reset();
+            return;
+          }
           e.preventDefault();
           if (input.value.trim()) addChip(input.value);
         } else if (e.key === "Backspace" && !input.value) {
@@ -3009,7 +3103,7 @@ function setupHistoryTab() {
           if (chips.length) chips[chips.length - 1].querySelector("button").click();
         }
       });
-      input.addEventListener("blur", () => setTimeout(() => { suggestBox.style.display = "none"; }, 150));
+      input.addEventListener("blur", () => setTimeout(() => { suggestBox.style.display = "none"; _atdNav.reset(); }, 150));
       chipArea.addEventListener("click", () => input.focus());
     });
 
@@ -3128,8 +3222,22 @@ function setupHistoryTab() {
       }
 
       input.addEventListener("input", () => updateSuggest(input.value));
+      // v1.46.27 GROUP-100：上下キー active 移動
+      const _aadNav = _setupSuggestKbdNav({
+        input,
+        getItems: () => suggestBox.querySelectorAll(".aad-sug"),
+        isVisible: () => suggestBox.style.display !== "none" && suggestBox.children.length > 0,
+      });
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === ",") {
+          // v1.46.27 GROUP-100：active があれば優先
+          const active = _aadNav.pickActive();
+          if (active && suggestBox.style.display !== "none") {
+            e.preventDefault();
+            addChip(active.dataset.author);
+            _aadNav.reset();
+            return;
+          }
           e.preventDefault();
           if (input.value.trim()) addChip(input.value);
         } else if (e.key === "Backspace" && !input.value) {
@@ -3137,7 +3245,7 @@ function setupHistoryTab() {
           if (chips.length) chips[chips.length - 1].querySelector("button").click();
         }
       });
-      input.addEventListener("blur", () => setTimeout(() => { suggestBox.style.display = "none"; }, 150));
+      input.addEventListener("blur", () => setTimeout(() => { suggestBox.style.display = "none"; _aadNav.reset(); }, 150));
       chipArea.addEventListener("click", () => input.focus());
     });
 
@@ -6015,8 +6123,31 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ---- タグ入力配線 ----
   editorInput.addEventListener("input", () => showTagSuggestions(editorInput.value.trim()));
   editorInput.addEventListener("blur", () => { setTimeout(() => { editorSuggestions.style.display = "none"; }, 150); });
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _editorTagNav = _setupSuggestKbdNav({
+    input: editorInput,
+    getItems: () => editorSuggestions.querySelectorAll(".suggestion-item"),
+    isVisible: () => editorSuggestions.style.display !== "none" && editorSuggestions.children.length > 0,
+  });
   editorInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
+      // v1.46.27 GROUP-100：active があれば優先
+      const active = _editorTagNav.pickActive();
+      if (active && editorSuggestions.style.display !== "none") {
+        e.preventDefault();
+        const val = active.textContent;
+        if (val && !pendingTags.has(val)) {
+          _undoStack.push({ type: "addTag", tag: val });
+          pendingTags.add(val);
+          editorInput.value = "";
+          editorSuggestions.style.display = "none";
+          renderEditorChips();
+          saveEntryNow();
+          updateUndoBtn();
+        }
+        _editorTagNav.reset();
+        return;
+      }
       e.preventDefault();
       const val = editorInput.value.trim();
       if (val) {
@@ -6036,8 +6167,31 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ---- 作者入力配線 ----
   authorInput.addEventListener("input", () => showAuthorEditorSuggestions(authorInput.value.trim()));
   authorInput.addEventListener("blur", () => { setTimeout(() => { authorSugEl.style.display = "none"; }, 150); });
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _editorAuthorNav = _setupSuggestKbdNav({
+    input: authorInput,
+    getItems: () => authorSugEl.querySelectorAll(".suggestion-item"),
+    isVisible: () => authorSugEl.style.display !== "none" && authorSugEl.children.length > 0,
+  });
   authorInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
+      // v1.46.27 GROUP-100：active があれば優先
+      const active = _editorAuthorNav.pickActive();
+      if (active && authorSugEl.style.display !== "none") {
+        e.preventDefault();
+        const val = active.textContent;
+        if (val && !pendingAuthors.includes(val)) {
+          _undoStack.push({ type: "addAuthor", author: val });
+          pendingAuthors.push(val);
+          renderAuthorEditorChips();
+          saveEntryNow();
+          updateUndoBtn();
+        }
+        authorInput.value = "";
+        authorSugEl.style.display = "none";
+        _editorAuthorNav.reset();
+        return;
+      }
       e.preventDefault();
       const val = authorInput.value.trim();
       if (val && !pendingAuthors.includes(val)) {
@@ -6798,7 +6952,28 @@ async function setupExternalImportTab() {
     renderAuthorChips();
   };
   document.getElementById("ext-author-add").addEventListener("click", () => addAuthor());
-  authorInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addAuthor(); } });
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _extAuthorNav = authorSugg ? _setupSuggestKbdNav({
+    input: authorInput,
+    getItems: () => authorSugg.querySelectorAll(".ext-sug-item"),
+    isVisible: () => authorSugg.style.display !== "none" && authorSugg.children.length > 0,
+  }) : null;
+  authorInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      // v1.46.27 GROUP-100：active があれば優先
+      if (_extAuthorNav) {
+        const active = _extAuthorNav.pickActive();
+        if (active && authorSugg.style.display !== "none") {
+          e.preventDefault();
+          addAuthor(active.dataset.val);
+          _extAuthorNav.reset();
+          return;
+        }
+      }
+      e.preventDefault();
+      addAuthor();
+    }
+  });
   authorInput.addEventListener("input", () => {
     if (!authorSugg) return;
     const q = authorInput.value.trim().toLowerCase();
@@ -6808,6 +6983,8 @@ async function setupExternalImportTab() {
     authorSugg.innerHTML = "";
     matches.slice(0, 8).forEach(a => {
       const item = document.createElement("div");
+      item.className = "ext-sug-item";  // v1.46.27 GROUP-100：nav 用 class
+      item.dataset.val = a;
       item.textContent = a;
       item.style.cssText = "padding:5px 10px;cursor:pointer;";
       item.addEventListener("mousedown", (e) => { e.preventDefault(); addAuthor(a); });
@@ -6818,40 +6995,128 @@ async function setupExternalImportTab() {
     authorSugg.style.display = "";
   });
   authorInput.addEventListener("blur", () => {
-    setTimeout(() => { if (authorSugg) authorSugg.style.display = "none"; }, 150);
+    setTimeout(() => { if (authorSugg) { authorSugg.style.display = "none"; if (_extAuthorNav) _extAuthorNav.reset(); } }, 150);
   });
 
-  // 手動メインタグ
+  // 手動メインタグ（v1.46.27 GROUP-100：サジェスト追加）
   const manualTagInput = document.getElementById("ext-manual-tag-input");
   const manualTagChips = document.getElementById("ext-manual-tag-chips");
+  const manualTagSugg  = document.getElementById("ext-manual-tag-sugg");
   const renderManualTagChips = () => {
     _extRenderChips(_extManualTags, manualTagChips, renderManualTagChips);
   };
-  const addManualTag = () => {
-    const v = manualTagInput.value.trim();
-    if (!v || _extManualTags.includes(v)) { manualTagInput.value = ""; return; }
+  const addManualTag = (val) => {
+    const v = val !== undefined ? val : manualTagInput.value.trim();
+    if (!v || _extManualTags.includes(v)) { manualTagInput.value = ""; if (manualTagSugg) manualTagSugg.style.display = "none"; return; }
     _extManualTags.push(v);
     manualTagInput.value = "";
+    if (manualTagSugg) manualTagSugg.style.display = "none";
     renderManualTagChips();
   };
-  document.getElementById("ext-manual-tag-add").addEventListener("click", addManualTag);
-  manualTagInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addManualTag(); } });
+  document.getElementById("ext-manual-tag-add").addEventListener("click", () => addManualTag());
+  const _manualTagNav = manualTagSugg ? _setupSuggestKbdNav({
+    input: manualTagInput,
+    getItems: () => manualTagSugg.querySelectorAll(".ext-sug-item"),
+    isVisible: () => manualTagSugg.style.display !== "none" && manualTagSugg.children.length > 0,
+  }) : null;
+  manualTagInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      if (_manualTagNav) {
+        const active = _manualTagNav.pickActive();
+        if (active && manualTagSugg.style.display !== "none") {
+          e.preventDefault();
+          addManualTag(active.dataset.val);
+          _manualTagNav.reset();
+          return;
+        }
+      }
+      e.preventDefault();
+      addManualTag();
+    }
+  });
+  manualTagInput.addEventListener("input", () => {
+    if (!manualTagSugg) return;
+    const q = manualTagInput.value.trim().toLowerCase();
+    if (!q) { manualTagSugg.style.display = "none"; return; }
+    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !_extManualTags.includes(t)).slice(0, 8);
+    if (!matches.length) { manualTagSugg.style.display = "none"; return; }
+    manualTagSugg.innerHTML = "";
+    matches.forEach(t => {
+      const item = document.createElement("div");
+      item.className = "ext-sug-item";
+      item.dataset.val = t;
+      item.textContent = t;
+      item.style.cssText = "padding:5px 10px;cursor:pointer;";
+      item.addEventListener("mousedown", (ev) => { ev.preventDefault(); addManualTag(t); });
+      item.addEventListener("mouseover", () => { item.style.background = "#f0f5ff"; });
+      item.addEventListener("mouseout",  () => { item.style.background = ""; });
+      manualTagSugg.appendChild(item);
+    });
+    manualTagSugg.style.display = "";
+  });
+  manualTagInput.addEventListener("blur", () => {
+    setTimeout(() => { if (manualTagSugg) { manualTagSugg.style.display = "none"; if (_manualTagNav) _manualTagNav.reset(); } }, 150);
+  });
 
-  // 手動サブタグ
+  // 手動サブタグ（v1.46.27 GROUP-100：サジェスト追加）
   const manualSubTagInput = document.getElementById("ext-manual-subtag-input");
   const manualSubTagChips = document.getElementById("ext-manual-subtag-chips");
+  const manualSubTagSugg  = document.getElementById("ext-manual-subtag-sugg");
   const renderManualSubTagChips = () => {
     _extRenderChips(_extManualSubTags, manualSubTagChips, renderManualSubTagChips);
   };
-  const addManualSubTag = () => {
-    const v = manualSubTagInput.value.trim();
-    if (!v || _extManualSubTags.includes(v)) { manualSubTagInput.value = ""; return; }
+  const addManualSubTag = (val) => {
+    const v = val !== undefined ? val : manualSubTagInput.value.trim();
+    if (!v || _extManualSubTags.includes(v)) { manualSubTagInput.value = ""; if (manualSubTagSugg) manualSubTagSugg.style.display = "none"; return; }
     _extManualSubTags.push(v);
     manualSubTagInput.value = "";
+    if (manualSubTagSugg) manualSubTagSugg.style.display = "none";
     renderManualSubTagChips();
   };
-  document.getElementById("ext-manual-subtag-add").addEventListener("click", addManualSubTag);
-  manualSubTagInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addManualSubTag(); } });
+  document.getElementById("ext-manual-subtag-add").addEventListener("click", () => addManualSubTag());
+  const _manualSubTagNav = manualSubTagSugg ? _setupSuggestKbdNav({
+    input: manualSubTagInput,
+    getItems: () => manualSubTagSugg.querySelectorAll(".ext-sug-item"),
+    isVisible: () => manualSubTagSugg.style.display !== "none" && manualSubTagSugg.children.length > 0,
+  }) : null;
+  manualSubTagInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      if (_manualSubTagNav) {
+        const active = _manualSubTagNav.pickActive();
+        if (active && manualSubTagSugg.style.display !== "none") {
+          e.preventDefault();
+          addManualSubTag(active.dataset.val);
+          _manualSubTagNav.reset();
+          return;
+        }
+      }
+      e.preventDefault();
+      addManualSubTag();
+    }
+  });
+  manualSubTagInput.addEventListener("input", () => {
+    if (!manualSubTagSugg) return;
+    const q = manualSubTagInput.value.trim().toLowerCase();
+    if (!q) { manualSubTagSugg.style.display = "none"; return; }
+    const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !_extManualSubTags.includes(t)).slice(0, 8);
+    if (!matches.length) { manualSubTagSugg.style.display = "none"; return; }
+    manualSubTagSugg.innerHTML = "";
+    matches.forEach(t => {
+      const item = document.createElement("div");
+      item.className = "ext-sug-item";
+      item.dataset.val = t;
+      item.textContent = t;
+      item.style.cssText = "padding:5px 10px;cursor:pointer;";
+      item.addEventListener("mousedown", (ev) => { ev.preventDefault(); addManualSubTag(t); });
+      item.addEventListener("mouseover", () => { item.style.background = "#f0f5ff"; });
+      item.addEventListener("mouseout",  () => { item.style.background = ""; });
+      manualSubTagSugg.appendChild(item);
+    });
+    manualSubTagSugg.style.display = "";
+  });
+  manualSubTagInput.addEventListener("blur", () => {
+    setTimeout(() => { if (manualSubTagSugg) { manualSubTagSugg.style.display = "none"; if (_manualSubTagNav) _manualSubTagNav.reset(); } }, 150);
+  });
 
   // 離脱警告
   window.addEventListener("beforeunload", (e) => {
@@ -7034,27 +7299,32 @@ async function renderFolderTable(folders, folderTokens, scanPath, rootsInfo = nu
     }
 
     const tr = document.createElement("tr");
+    // v1.46.27 GROUP-100：各行 input の position を relative にして suggest container を absolute 配置
+    const _sugStyle = "display:none;position:absolute;top:100%;right:0;z-index:100;background:#fff;border:1px solid #d0d0d0;border-radius:3px;width:200px;max-height:200px;overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,.1);font-size:11px;";
     tr.innerHTML = `
       <td style="padding:4px 8px;border:1px solid #e0e0e0;${multiRoot ? "" : "white-space:nowrap;"}font-size:11px;
         ${multiRoot ? "" : "font-weight:600;"}color:#2c3e50;vertical-align:top;">${displayName}</td>
       <td style="padding:4px 8px;border:1px solid #e0e0e0;">
-        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;">
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;position:relative;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">メイン:</span>
           <div class="ext-ftag-main-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
-          <input type="text" class="ext-ftag-main-input" placeholder="Enter で追加"
+          <input type="text" class="ext-ftag-main-input" placeholder="Enter で追加" autocomplete="off"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+          <div class="ext-ftag-main-sugg" style="${_sugStyle}"></div>
         </div>
-        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;position:relative;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">サブ:</span>
           <div class="ext-ftag-sub-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
-          <input type="text" class="ext-ftag-sub-input" placeholder="Enter で追加"
+          <input type="text" class="ext-ftag-sub-input" placeholder="Enter で追加" autocomplete="off"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+          <div class="ext-ftag-sub-sugg" style="${_sugStyle}"></div>
         </div>
-        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;">
+        <div class="ext-frow" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-top:1px dashed #f0f0f0;position:relative;">
           <span style="font-size:10px;color:#888;white-space:nowrap;padding-top:4px;min-width:44px;">権利者:</span>
           <div class="ext-ftag-auth-chips" style="display:flex;flex-wrap:wrap;gap:3px;flex:1;min-height:22px;"></div>
-          <input type="text" class="ext-ftag-auth-input" placeholder="Enter で追加"
+          <input type="text" class="ext-ftag-auth-input" placeholder="Enter で追加" autocomplete="off"
             style="font-size:11px;padding:2px 5px;border:1px solid #d0d0d0;border-radius:3px;width:110px;font-family:inherit;" />
+          <div class="ext-ftag-auth-sugg" style="${_sugStyle}"></div>
         </div>
       </td>
     `;
@@ -7136,17 +7406,73 @@ async function renderFolderTable(folders, folderTokens, scanPath, rootsInfo = nu
       });
     });
 
-    const addTag = (input, type) => {
-      const v = input.value.trim();
+    const addTag = (input, type, val) => {
+      const v = val !== undefined ? val : input.value.trim();
       if (!v) return;
       const arr = _extFolderTagMap[tagKey][type + "Tags"];
       if (!arr.includes(v)) { arr.push(v); renderChips(type); }
       input.value = "";
     };
 
+    // v1.46.27 GROUP-100：suggest containers
+    const suggs = {
+      main: tr.querySelector(".ext-ftag-main-sugg"),
+      sub:  tr.querySelector(".ext-ftag-sub-sugg"),
+      auth: tr.querySelector(".ext-ftag-auth-sugg"),
+    };
+
     ["main", "sub", "auth"].forEach(type => {
-      inputs[type].addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); addTag(inputs[type], type); }
+      const input = inputs[type];
+      const sugg  = suggs[type];
+      // v1.46.27 GROUP-100：上下キー active 移動
+      const _nav = sugg ? _setupSuggestKbdNav({
+        input,
+        getItems: () => sugg.querySelectorAll(".ext-sug-item"),
+        isVisible: () => sugg.style.display !== "none" && sugg.children.length > 0,
+      }) : null;
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          if (_nav) {
+            const active = _nav.pickActive();
+            if (active && sugg.style.display !== "none") {
+              e.preventDefault();
+              addTag(input, type, active.dataset.val);
+              if (sugg) sugg.style.display = "none";
+              _nav.reset();
+              return;
+            }
+          }
+          e.preventDefault();
+          addTag(input, type);
+          if (sugg) sugg.style.display = "none";
+        }
+      });
+      // v1.46.27 GROUP-100：suggest 表示（フォルダ別タグマップ）
+      input.addEventListener("input", () => {
+        if (!sugg) return;
+        const q = input.value.trim().toLowerCase();
+        if (!q) { sugg.style.display = "none"; return; }
+        const source = (type === "auth") ? globalAuthors : globalTags;
+        const existing = _extFolderTagMap[tagKey][type + "Tags"];
+        const matches = (source || []).filter(s =>
+          s.toLowerCase().includes(q) && !existing.includes(s)).slice(0, 8);
+        if (!matches.length) { sugg.style.display = "none"; return; }
+        sugg.innerHTML = "";
+        matches.forEach(s => {
+          const item = document.createElement("div");
+          item.className = "ext-sug-item";
+          item.dataset.val = s;
+          item.textContent = s;
+          item.style.cssText = "padding:4px 8px;cursor:pointer;";
+          item.addEventListener("mousedown", (ev) => { ev.preventDefault(); addTag(input, type, s); sugg.style.display = "none"; });
+          item.addEventListener("mouseover", () => { item.style.background = "#f0f5ff"; });
+          item.addEventListener("mouseout",  () => { item.style.background = ""; });
+          sugg.appendChild(item);
+        });
+        sugg.style.display = "";
+      });
+      input.addEventListener("blur", () => {
+        setTimeout(() => { if (sugg) { sugg.style.display = "none"; if (_nav) _nav.reset(); } }, 150);
       });
     });
 
@@ -9336,8 +9662,26 @@ function _extB1SetupChipInput(kind) {
   const input   = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-input`);
   const sugg    = document.getElementById(`ext-b1-${kind === "tag" ? "tag" : kind === "subtag" ? "subtag" : "author"}-sugg`);
   if (!input) return;
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _b1Nav = sugg ? _setupSuggestKbdNav({
+    input,
+    getItems: () => sugg.querySelectorAll(".ext-b1-sug-item"),
+    isVisible: () => sugg.style.display !== "none" && sugg.children.length > 0,
+  }) : null;
   input.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
+      // v1.46.27 GROUP-100：active があれば優先
+      if (_b1Nav) {
+        const active = _b1Nav.pickActive();
+        if (active && sugg.style.display !== "none") {
+          ev.preventDefault();
+          _extB1AddChip(kind, active.dataset.val);
+          input.value = "";
+          sugg.style.display = "none";
+          _b1Nav.reset();
+          return;
+        }
+      }
       ev.preventDefault();
       const v = input.value.trim();
       if (!v) return;
@@ -9347,7 +9691,7 @@ function _extB1SetupChipInput(kind) {
     }
   });
   input.addEventListener("input", () => _extB1UpdateSugg(kind));
-  input.addEventListener("blur", () => setTimeout(() => { if (sugg) sugg.style.display = "none"; }, 150));
+  input.addEventListener("blur", () => setTimeout(() => { if (sugg) { sugg.style.display = "none"; if (_b1Nav) _b1Nav.reset(); } }, 150));
 }
 
 function _extB1UpdateSugg(kind) {
@@ -9366,6 +9710,8 @@ function _extB1UpdateSugg(kind) {
   sugg.innerHTML = "";
   for (const c of cands) {
     const item = document.createElement("div");
+    item.className = "ext-b1-sug-item";  // v1.46.27 GROUP-100：nav 用 class
+    item.dataset.val = c;
     item.style.cssText = "padding:4px 8px;cursor:pointer;";
     item.textContent = c;
     item.onmouseover = () => item.style.background = "#f0f6ff";

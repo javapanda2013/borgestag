@@ -447,6 +447,12 @@
     }
     .hist-chip-suggest .hist-sug-item:hover,
     .hist-chip-suggest .hist-sug-item.active { background: #f0f4ff; }
+    /* v1.46.27 GROUP-100：上下キー active のハイライト */
+    .atd-sug.active,
+    .aad-sug.active,
+    .ext-sug-item.active,
+    .ext-b1-sug-item.active { background: #f0f4ff !important; }
+    .suggestion-item.active { background: #f0f4ff; }
     .hist-btn-sm {
       background: none; border: none; cursor: pointer;
       font-size: 11px; color: #aaa; padding: 2px 5px; border-radius: 3px;
@@ -1521,10 +1527,13 @@
             メインタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
           </div>
           <div id="ext-manual-tag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
-          <div style="display:flex;gap:6px;">
+          <div style="position:relative;display:flex;gap:6px;">
             <input type="text" id="ext-manual-tag-input" placeholder="メインタグを追加（Enter）"
+              autocomplete="off"
               style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
             <button id="ext-manual-tag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+            <!-- v1.46.27 GROUP-100：サジェスト containers -->
+            <div id="ext-manual-tag-sugg" style="display:none;position:absolute;top:100%;left:0;right:60px;z-index:100;background:#fff;border:1px solid #d0d0d0;border-radius:4px;max-height:200px;overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,.1);font-size:12px;"></div>
           </div>
         </div>
 
@@ -1533,10 +1542,13 @@
             サブタグを手動追加（パスに含まれない文字列も可・全エントリに付与）:
           </div>
           <div id="ext-manual-subtag-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;min-height:22px;"></div>
-          <div style="display:flex;gap:6px;">
+          <div style="position:relative;display:flex;gap:6px;">
             <input type="text" id="ext-manual-subtag-input" placeholder="サブタグを追加（Enter）"
+              autocomplete="off"
               style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
             <button id="ext-manual-subtag-add" class="backup-btn" style="padding:3px 10px;font-size:12px;">追加</button>
+            <!-- v1.46.27 GROUP-100：サジェスト containers -->
+            <div id="ext-manual-subtag-sugg" style="display:none;position:absolute;top:100%;left:0;right:60px;z-index:100;background:#fff;border:1px solid #d0d0d0;border-radius:4px;max-height:200px;overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,.1);font-size:12px;"></div>
           </div>
         </div>
 

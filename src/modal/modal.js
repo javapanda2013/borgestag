@@ -2543,6 +2543,60 @@ function setupModalEvents(
   }
 
   /**
+   * v1.46.27 GROUP-100：サジェスト用 ArrowUp / ArrowDown 共通ヘルパ
+   * - サジェスト表示中に上下キーで active 項目を移動（wrap あり）
+   * - pickActive() で確定対象を取得（Enter 処理は各 site が既存ロジックで実施、active あれば優先）
+   * - reset() でハイライト解除（hide 時に呼ぶ）
+   * @param {Object} opt
+   * @param {HTMLElement} opt.input - キー入力を受ける input 要素
+   * @param {Function} opt.getItems - サジェスト項目の NodeList/配列を返す関数
+   * @param {Function} opt.isVisible - サジェストが表示中か返す関数（bool）
+   * @param {string} [opt.activeClass="active"] - active 項目に付与する class 名
+   * @returns {{pickActive: Function, reset: Function, setActive: Function}}
+   */
+  function _setupSuggestKbdNav({ input, getItems, isVisible, activeClass = "active" }) {
+    let activeIdx = -1;
+    function clearActive() {
+      const items = getItems();
+      if (!items) return;
+      for (const el of items) el.classList.remove(activeClass);
+    }
+    function setActive(idx) {
+      const items = getItems();
+      if (!items || !items.length) { activeIdx = -1; return; }
+      const n = items.length;
+      if (idx < 0) idx = n - 1;
+      if (idx >= n) idx = 0;
+      clearActive();
+      items[idx].classList.add(activeClass);
+      activeIdx = idx;
+      if (items[idx].scrollIntoView) items[idx].scrollIntoView({ block: "nearest" });
+    }
+    function pickActive() {
+      const items = getItems();
+      if (!items || activeIdx < 0 || activeIdx >= items.length) return null;
+      return items[activeIdx];
+    }
+    function reset() {
+      clearActive();
+      activeIdx = -1;
+    }
+    input.addEventListener("keydown", (e) => {
+      if (!isVisible()) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setActive(activeIdx + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setActive(activeIdx - 1);
+      }
+    });
+    return { pickActive, reset, setActive };
+  }
+
+  /**
    * チップ入力の共通セットアップ
    *   box: .hist-chip-box 要素
    *   input: 入力欄
@@ -3827,9 +3881,32 @@ function setupModalEvents(
         else { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }
       });
       tagEditorIn.addEventListener("blur", () => setTimeout(() => { tagSugPanel.classList.remove("visible"); tagSugPanel.innerHTML = ""; }, 150));
+      // v1.46.27 GROUP-100：上下キー active 移動
+      const _infoTagNav = _setupSuggestKbdNav({
+        input: tagEditorIn,
+        getItems: () => tagSugPanel.querySelectorAll(".suggestion-item"),
+        isVisible: () => tagSugPanel.classList.contains("visible"),
+      });
       tagEditorIn.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
+          // v1.46.27 GROUP-100：active があれば優先
+          const active = _infoTagNav.pickActive();
+          if (active && tagSugPanel.classList.contains("visible")) {
+            e.preventDefault();
+            const val = active.dataset.tag || active.textContent;
+            if (val && !pendingTags.has(val)) {
+              _undoStack.push({ type: "addTag", tag: val });
+              pendingTags.add(val);
+              renderInfoTagChips();
+              _modalSaveEntryNow();
+              _modalUpdateUndoBtn();
+            }
+            tagEditorIn.value = "";
+            tagSugPanel.classList.remove("visible");
+            _infoTagNav.reset();
+            return;
+          }
           e.preventDefault();
           const val = tagEditorIn.value.trim();
           if (val && !pendingTags.has(val)) {
@@ -3857,9 +3934,32 @@ function setupModalEvents(
 
       authInput.addEventListener("input", () => showInfoAuthorSuggestions(authInput.value.trim()));
       authInput.addEventListener("blur", () => setTimeout(() => { authSugPanel.classList.remove("visible"); authSugPanel.innerHTML = ""; }, 150));
+      // v1.46.27 GROUP-100：上下キー active 移動
+      const _infoAuthorNav = _setupSuggestKbdNav({
+        input: authInput,
+        getItems: () => authSugPanel.querySelectorAll(".suggestion-item"),
+        isVisible: () => authSugPanel.classList.contains("visible"),
+      });
       authInput.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
+          // v1.46.27 GROUP-100：active があれば優先
+          const active = _infoAuthorNav.pickActive();
+          if (active && authSugPanel.classList.contains("visible")) {
+            e.preventDefault();
+            const val = active.textContent;
+            if (val && !pendingAuthors.includes(val)) {
+              _undoStack.push({ type: "addAuthor", author: val });
+              pendingAuthors.push(val);
+              renderInfoAuthorChips();
+              _modalSaveEntryNow();
+              _modalUpdateUndoBtn();
+            }
+            authInput.value = "";
+            authSugPanel.classList.remove("visible");
+            _infoAuthorNav.reset();
+            return;
+          }
           e.preventDefault();
           const val = authInput.value.trim();
           if (val && !pendingAuthors.includes(val)) {
@@ -5087,9 +5187,21 @@ function setupModalEvents(
     if (subTagInput.value) showSubSuggestions(subTagInput.value);
     else hideSubSuggestions();
   });
+  // v1.46.27 GROUP-100：上下キー active 移動
+  const _subTagNav = _setupSuggestKbdNav({
+    input: subTagInput,
+    getItems: () => subSuggestEl.querySelectorAll(".suggestion-item"),
+    isVisible: () => subSuggestEl.classList.contains("visible"),
+  });
   subTagInput.addEventListener("keydown", e => {
     if (e.key === "Enter") {
-      if (subTagInput.value.trim()) {
+      // v1.46.27 GROUP-100：active サジェストがあれば優先
+      const active = _subTagNav.pickActive();
+      if (active && subSuggestEl.classList.contains("visible")) {
+        e.preventDefault();
+        addSubTag(active.dataset.tag || active.textContent);
+        _subTagNav.reset();
+      } else if (subTagInput.value.trim()) {
         e.preventDefault();
         addSubTag(subTagInput.value);
       }
@@ -5099,7 +5211,7 @@ function setupModalEvents(
       document.getElementById("dest-tabbar-subtag-area").querySelectorAll('.tag-chip[data-type="sub"]').forEach((c, i, a) => { if (i === a.length - 1) c.remove(); });
       selectedSubTags.pop();
     }
-    if (e.key === "Escape") { hideSubSuggestions(); subTagInput.blur(); }
+    if (e.key === "Escape") { hideSubSuggestions(); _subTagNav.reset(); subTagInput.blur(); }
   });
   subTagInput.addEventListener("focus", () => {
     // サブタグ入力欄にフォーカスが当たった時点で、入力が空でも直近サブタグを提示する
@@ -5936,16 +6048,30 @@ function setupModalEvents(
     });
     authorInput.addEventListener("focus", () => showAuthorSuggestions(authorInput.value));
     authorInput.addEventListener("blur", () => setTimeout(hideAuthorSuggestions, 150));
+    // v1.46.27 GROUP-100：上下キー active 移動（authorSuggestEl は display:block で表示制御）
+    const _destAuthorNav = _setupSuggestKbdNav({
+      input: authorInput,
+      getItems: () => authorSuggestEl.querySelectorAll("[data-author]"),
+      isVisible: () => authorSuggestEl.style.display !== "none" && authorSuggestEl.children.length > 0,
+    });
     authorInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
-        e.preventDefault();
-        if (authorInput.value.trim()) addAuthorChip(authorInput.value);
+        // v1.46.27 GROUP-100：active があれば優先
+        const active = _destAuthorNav.pickActive();
+        if (active && authorSuggestEl.style.display !== "none") {
+          e.preventDefault();
+          addAuthorChip(active.dataset.author || active.textContent);
+          _destAuthorNav.reset();
+        } else if (authorInput.value.trim()) {
+          e.preventDefault();
+          addAuthorChip(authorInput.value);
+        }
       } else if (e.key === "Escape") {
-        authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+        authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions(); _destAuthorNav.reset();
       }
     });
     authorInputClear.addEventListener("click", () => {
-      authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions();
+      authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions(); _destAuthorNav.reset();
     });
   }
 

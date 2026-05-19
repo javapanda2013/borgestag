@@ -4401,10 +4401,10 @@ function setupModalEvents(
 
     let dirs = entries.filter((e) => e.isDir);
 
-    // キーワード絞り込み
+    // キーワード絞り込み（v1.46.26 GROUP-99：NFKC + lowercase + カタカナ→ひらがなで「アサ/あさ/ｱｻ」同一視）
     if (folderKwFilter) {
-      const kw = folderKwFilter.toLowerCase();
-      dirs = dirs.filter(e => e.name.toLowerCase().includes(kw));
+      const kw = _normalizeForMatch(folderKwFilter);
+      dirs = dirs.filter(e => _normalizeForMatch(e.name).includes(kw));
     }
 
     // フォルダ並び順を適用

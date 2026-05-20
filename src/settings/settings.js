@@ -9650,12 +9650,18 @@ let _extB1LastCarryValues = { tags: [], subtags: [], authors: [], savepath: "" }
 let _extB1CopyToDest = false;
 // v1.23.0: GROUP-4 絞り込み状態（セッション開始直後は「残り」のみ ON）
 // session.uiFilter として保持するが、初期値として使用
+// v1.46.28 GROUP-51-b1-optimistic（Q-51-1 = d）：filter 自体の構造は変えず、pending フィルタを
+// 「未保存系の全状態（pending + saving + save-failed）」を表示する semantics に拡張（_extB1MatchesFilter で対応）
 const _EXT_B1_FILTER_DEFAULT = { done: false, skipped: false, pending: true };
 // v1.23.0: GROUP-4 ステータス色（パターン 2）
+// v1.46.28 GROUP-51-b1-optimistic：「保存中」（青グレー）/「保存失敗」（赤）を追加。saving / save-failed 共に
+// filter UI 上は「未保存」（pending と同列）に集約、絞り込みチェックは pending 1 つで全てカバー
 const _EXT_STATUS_COLOR = {
-  done:    "#2ecc71",
-  skipped: "#e67e22",
-  pending: "#3498db",
+  done:          "#2ecc71",
+  skipped:       "#e67e22",
+  pending:       "#3498db",
+  saving:        "#7f8c8d",  // 保存処理中（背後実行中）
+  "save-failed": "#e74c3c",  // 保存失敗
 };
 
 function _extB1SetupChipInput(kind) {
@@ -9886,8 +9892,9 @@ async function _extB1LoadCurrent() {
   }
   const cur2 = session.queue[session.cursor];
 
-  // pending 以外（完了済・スキップ）の項目でも閲覧可能。編集は pending のみ（下で分岐）
-  const isPending = cur2 && cur2.status === "pending";
+  // pending 以外（完了済・スキップ・保存中）の項目でも閲覧可能。編集は pending と save-failed（再保存）のみ
+  // v1.46.28 GROUP-51-b1-optimistic：save-failed も pending と同じく編集可能・引き継ぎ値適用
+  const isPending = cur2 && (cur2.status === "pending" || cur2.status === "save-failed");
 
   // 初期値セット（v1.23.0: GROUP-1-a2 引き継ぎに応じて前回値を復元）
   if (isPending && _extCarryover.tags)    _extB1MainTags = [..._extB1LastCarryValues.tags];
@@ -10059,16 +10066,27 @@ function _extB1IsSameFolder(dirA, dirB) {
 }
 
 // @spec 設計書類/画面別/12_設定画面_外部取り込みタブ_詳細.md
+// v1.46.28 GROUP-51-b1-optimistic（Q-51-1 = d）：保存ボタン押下時の即遷移化
+// - 押下時：cur.status を即「saving」に設定 → 次画像へ即遷移
+// - 背後で：リネーム → サムネ生成 → 保存履歴書込 → ファイルコピー
+// - 成功時：cur.status = "done"、失敗時：cur.status = "save-failed" + 通知メッセージ
+// - 失敗 entry は絞り込み「未保存」表示時に再保存可能（保存ボタンは pending / save-failed 両方を受付）
 async function _extB1SaveAndNext() {
   const session = _extActiveSession;
   if (!session) return;
   const cur = session.queue[session.cursor];
   if (!cur) return;
-  if (cur.status !== "pending") {
-    showStatus("⚠️ 完了済み／スキップ済みのため保存できません", true);
+  // pending（未保存）/ save-failed（再保存）の両方を受付
+  if (cur.status !== "pending" && cur.status !== "save-failed") {
+    showStatus("⚠️ 完了済み／スキップ済み／保存中のため保存できません", true);
     return;
   }
 
+  // 即時 race-gate：以降の await race / 連打を排除するため status を最初に同期で更新
+  cur.status = "saving";
+  delete cur.lastError;
+
+  // sync 値キャプチャ（後続の await や cursor 進行に影響されないよう全て先に確保）
   const savePathInput = document.getElementById("ext-b1-savepath");
   const savePath = (savePathInput?.value || "").trim() || _extDirname(cur.filePath);
 
@@ -10084,7 +10102,6 @@ async function _extB1SaveAndNext() {
   _extB1LastCarryValues.savepath = savePath;
 
   // v1.24.0 GROUP-5-A: メタ付与名を一本化（saveHistory と物理操作の両方で同じ値を使う）
-  // v1.23.1 の「両側原名で整合」を逆向きに「両側メタ名で整合」へ揃える改修
   const fnameSettings = await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
   const effectiveFilename = _extB1BuildFilenameWithMeta(cur.fileName, tags, subTags, authors, {
     filenameIncludeTag:    !!fnameSettings.filenameIncludeTag,
@@ -10094,135 +10111,142 @@ async function _extB1SaveAndNext() {
   const metaChanged = (effectiveFilename !== cur.fileName);
 
   // v1.24.0 GROUP-5-A: 物理的同一フォルダ判定
-  // - `_extB1CopyToDest` OFF：物理ファイルはその場（原フォルダ）に残るため「同一フォルダ扱い」
-  // - `_extB1CopyToDest` ON かつ savePath == 原フォルダ：同上
   const srcDir = _extDirname(cur.filePath);
   const physicallySameFolder = !_extB1CopyToDest || _extB1IsSameFolder(srcDir, savePath);
 
-  // v1.24.0 GROUP-5-A: 同一フォルダ × メタ付与 ON の場合は RENAME_FILE を先に発火
-  // RENAME 失敗は「保存なし扱い」で即終了（saveHistory にも書かず、カーソルも進めない）
-  // 衝突時（ターゲット既存）も勝手に別名で残さず失敗として扱う（Native 側で ok:false）
-  if (physicallySameFolder && metaChanged) {
-    const newPath = `${srcDir}\\${effectiveFilename}`;
-    let renameRes;
-    try {
-      renameRes = await browser.runtime.sendMessage({
-        type:    "RENAME_FILE",
-        srcPath: cur.filePath,
-        dstPath: newPath,
-      });
-    } catch (e) {
-      showStatus(`⚠️ リネーム送信エラー: ${e.message || ""}`, true);
-      return;
-    }
-    if (!renameRes?.ok) {
-      showStatus(`⚠️ リネーム失敗: ${renameRes?.error || "不明"}`, true);
-      return;
-    }
-    // queue 側のパスも更新（後続のサムネ生成・閲覧・エクスポートで使う）
-    cur.filePath = renameRes.savedPath || newPath;
-    cur.fileName = effectiveFilename;
-  }
-
-  // サムネイル生成（Python 経由）— リネーム後のパスを使う
-  let thumbId = null;
-  try {
-    const res = await browser.runtime.sendMessage({
-      type:  "GENERATE_THUMBS_BATCH",
-      paths: [cur.filePath],
-    });
-    const b64 = res?.thumbs?.[cur.filePath];
-    if (b64) {
-      thumbId = crypto.randomUUID();
-      const mime = res?.thumbMimes?.[cur.filePath] || "image/jpeg";
-      await browser.runtime.sendMessage({
-        type:   "IMPORT_IDB_THUMBS",
-        thumbs: [{ id: thumbId, dataUrl: `data:${mime};base64,${b64}` }],
-      });
-    }
-  } catch (_) { /* サムネ失敗は無視 */ }
-
-  // v1.24.0 GROUP-5-A: saveHistory にエントリ追加（filename はメタ付与後の effectiveFilename）
-  const entry = {
-    id:         crypto.randomUUID(),
-    savedAt:    cur.mtime || new Date().toISOString(),
-    imageUrl:   "",
-    pageUrl:    "",
-    savePaths:  [savePath],
-    filename:   effectiveFilename,
-    tags:       allTags,
-    authors:    authors,
-    thumbId:    thumbId,
-    source:     "external_import",
-  };
-
-  // v1.45.5 Phase C-2: saveHistory は migration aware
-  const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"])) };
-  const merged = [...(stored.saveHistory || []), entry]
-    .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
-  const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
-  const gAuthorSet = new Set([...(stored.globalAuthors || []), ...authors]);
-
-  // recentTags / recentSubTags / recentAuthors の更新（先頭に追加して重複排除）
-  const recentTags    = [...tags,    ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
-  const recentSubTags = [...subTags, ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
-  const recentAuthors = [...authors, ...(stored.recentAuthors || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
-
-  // tagDestinations の更新（メインタグのみ）
-  for (const t of tags) {
-    if (!tagDestinations[t]) tagDestinations[t] = [];
-    if (!tagDestinations[t].some(d => d.path === savePath)) {
-      tagDestinations[t].push({ id: crypto.randomUUID(), path: savePath, label: "" });
-    }
-  }
-
-  await _setStorageWithHistoryMirror({
-    saveHistory:   merged,
-    globalTags:    [...gTagSet],
-    globalAuthors: [...gAuthorSet],
-    recentTags, recentSubTags, recentAuthors,
-    tagDestinations,
-  });
-  _historyData  = merged;
-  globalTags    = [...gTagSet];
-  globalAuthors = [...gAuthorSet];
-
-  // queue を更新
-  cur.status  = "done";
-  cur.entryId = entry.id;
-  // v1.25.0 GROUP-7-b-save-reuse（案 A）:
-  // サムネ一覧モーダルで再表示する際、保存済みアイテムは既存 `thumbnails` IDB から
-  // 流用するため、queue 側にも thumbId を記録しておく（saveHistory 全走査を避ける）
-  cur.thumbId = thumbId;
-  // v1.23.0: 絞り込み結果内で次の該当アイテムへ進む
-  _extB1AdvanceCursorInFiltered(session);
+  // 状態反映 + 次画像へ即遷移（user 体感最大化）
   session.updatedAt = new Date().toISOString();
-  await browser.storage.local.set({ extImportSessions: _extSessions });
-
   _extRenderSessionsList();
-
-  // v1.24.0 GROUP-5-A: 別フォルダの場合のみ COPY_LOCAL_FILE を発火（同一フォルダは RENAME で処理済み）
-  // COPY 失敗は v1.23.0 からの既存仕様を踏襲：saveHistory は書込済み、警告表示のみ
-  if (_extB1CopyToDest && !physicallySameFolder) {
-    try {
-      const copyRes = await browser.runtime.sendMessage({
-        type:    "COPY_LOCAL_FILE",
-        srcPath: cur.filePath,
-        dstDir:  savePath,
-        filename: effectiveFilename,
-        tags, subTags, authors,
-      });
-      if (!copyRes?.ok) {
-        showStatus(`⚠️ 保存は成功、コピー失敗: ${copyRes?.error || "不明"}`, true);
-      }
-    } catch (e) {
-      showStatus(`⚠️ 保存は成功、コピー送信エラー: ${e.message || ""}`, true);
-    }
-  }
-
-  // 次へ
+  _extB1AdvanceCursorInFiltered(session);
   await _extB1LoadCurrent();
+
+  // 背後で保存処理（fire-and-forget、await しない）
+  // closure で cur 参照を保持（cursor 進行後も targetCur は元 entry を指し続ける）
+  (async () => {
+    const targetCur = cur;
+    const _failWith = async (msg) => {
+      targetCur.status = "save-failed";
+      targetCur.lastError = msg;
+      showStatus(`⚠️ 「${targetCur.fileName}」${msg}`, true);
+      _extRenderSessionsList();
+      try { await browser.storage.local.set({ extImportSessions: _extSessions }); } catch (_) { /* 失敗時の保存失敗は無視 */ }
+    };
+
+    // 1. リネーム（同一フォルダ × メタ付与 ON のみ）— 失敗時は save-failed
+    if (physicallySameFolder && metaChanged) {
+      const newPath = `${srcDir}\\${effectiveFilename}`;
+      let renameRes;
+      try {
+        renameRes = await browser.runtime.sendMessage({
+          type:    "RENAME_FILE",
+          srcPath: targetCur.filePath,
+          dstPath: newPath,
+        });
+      } catch (e) {
+        await _failWith(`リネーム送信エラー: ${e.message || ""}`);
+        return;
+      }
+      if (!renameRes?.ok) {
+        await _failWith(`リネーム失敗: ${renameRes?.error || "不明"}`);
+        return;
+      }
+      targetCur.filePath = renameRes.savedPath || newPath;
+      targetCur.fileName = effectiveFilename;
+    }
+
+    // 2. サムネ生成 + IDB 書込（失敗は既存通り無視、thumbId は null のまま続行）
+    let thumbId = null;
+    try {
+      const res = await browser.runtime.sendMessage({
+        type:  "GENERATE_THUMBS_BATCH",
+        paths: [targetCur.filePath],
+      });
+      const b64 = res?.thumbs?.[targetCur.filePath];
+      if (b64) {
+        thumbId = crypto.randomUUID();
+        const mime = res?.thumbMimes?.[targetCur.filePath] || "image/jpeg";
+        await browser.runtime.sendMessage({
+          type:   "IMPORT_IDB_THUMBS",
+          thumbs: [{ id: thumbId, dataUrl: `data:${mime};base64,${b64}` }],
+        });
+      }
+    } catch (_) { /* サムネ失敗は無視 */ }
+
+    // 3. saveHistory + globalTags/Authors + recent + tagDestinations 更新
+    const entry = {
+      id:         crypto.randomUUID(),
+      savedAt:    targetCur.mtime || new Date().toISOString(),
+      imageUrl:   "",
+      pageUrl:    "",
+      savePaths:  [savePath],
+      filename:   effectiveFilename,
+      tags:       allTags,
+      authors:    authors,
+      thumbId:    thumbId,
+      source:     "external_import",
+    };
+
+    try {
+      const _hist = await _readSaveHistory();
+      const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"])) };
+      const merged = [...(stored.saveHistory || []), entry]
+        .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+      const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
+      const gAuthorSet = new Set([...(stored.globalAuthors || []), ...authors]);
+
+      const recentTags    = [...tags,    ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
+      const recentSubTags = [...subTags, ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+      const recentAuthors = [...authors, ...(stored.recentAuthors || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+
+      for (const t of tags) {
+        if (!tagDestinations[t]) tagDestinations[t] = [];
+        if (!tagDestinations[t].some(d => d.path === savePath)) {
+          tagDestinations[t].push({ id: crypto.randomUUID(), path: savePath, label: "" });
+        }
+      }
+
+      await _setStorageWithHistoryMirror({
+        saveHistory:   merged,
+        globalTags:    [...gTagSet],
+        globalAuthors: [...gAuthorSet],
+        recentTags, recentSubTags, recentAuthors,
+        tagDestinations,
+      });
+      _historyData  = merged;
+      globalTags    = [...gTagSet];
+      globalAuthors = [...gAuthorSet];
+    } catch (e) {
+      await _failWith(`保存履歴 書込失敗: ${e.message || ""}`);
+      return;
+    }
+
+    // 4. queue を更新（saveHistory 書込成功で done 確定）
+    targetCur.status  = "done";
+    targetCur.entryId = entry.id;
+    targetCur.thumbId = thumbId;
+    delete targetCur.lastError;
+    session.updatedAt = new Date().toISOString();
+    try { await browser.storage.local.set({ extImportSessions: _extSessions }); } catch (_) { /* 既存と同様、失敗は無視 */ }
+    _extRenderSessionsList();
+
+    // 5. ファイルコピー（別フォルダのみ、既存仕様：失敗時は警告のみ、saveHistory は維持）
+    if (_extB1CopyToDest && !physicallySameFolder) {
+      try {
+        const copyRes = await browser.runtime.sendMessage({
+          type:    "COPY_LOCAL_FILE",
+          srcPath: targetCur.filePath,
+          dstDir:  savePath,
+          filename: effectiveFilename,
+          tags, subTags, authors,
+        });
+        if (!copyRes?.ok) {
+          showStatus(`⚠️ 「${targetCur.fileName}」保存は成功、コピー失敗: ${copyRes?.error || "不明"}`, true);
+        }
+      } catch (e) {
+        showStatus(`⚠️ 「${targetCur.fileName}」保存は成功、コピー送信エラー: ${e.message || ""}`, true);
+      }
+    }
+  })();
 }
 
 // ---------- v1.23.0: GROUP-4 絞り込み / GROUP-1-a1 ナビ ヘルパー ----------
@@ -10273,7 +10297,10 @@ function _extB1GetFilter(session) {
   return session.uiFilter;
 }
 
-/** queue の中で絞り込み条件に合致するインデックス配列を返す */
+/** queue の中で絞り込み条件に合致するインデックス配列を返す
+ *  v1.46.28 GROUP-51-b1-optimistic（Q-51-1 = d）：pending フィルタは「未保存系」
+ *  （pending / saving / save-failed）を全て表示する semantics に拡張
+ */
 function _extB1GetFilteredIndices(session) {
   if (!session) return [];
   const f = _extB1GetFilter(session);
@@ -10281,7 +10308,8 @@ function _extB1GetFilteredIndices(session) {
   session.queue.forEach((q, i) => {
     if (q.status === "done"    && f.done)    out.push(i);
     if (q.status === "skipped" && f.skipped) out.push(i);
-    if (q.status === "pending" && f.pending) out.push(i);
+    // pending フィルタは pending / saving / save-failed を全て含む（即遷移後の作業中も表示）
+    if (f.pending && (q.status === "pending" || q.status === "saving" || q.status === "save-failed")) out.push(i);
   });
   return out;
 }
@@ -10508,7 +10536,13 @@ function _extB1RefreshThumbCardStatus(card, session, qIdx, q) {
   const statBadge = card.querySelector(".ext-thumb-stat");
   if (statBadge) {
     statBadge.style.cssText = `position:absolute;bottom:2px;right:2px;background:${color};color:#fff;font-size:10px;padding:1px 5px;border-radius:2px;font-weight:600;`;
-    statBadge.textContent = q.status === "done" ? "完了" : (q.status === "skipped" ? "スキップ" : "残り");
+    // v1.46.28 GROUP-51-b1-optimistic：saving / save-failed のラベルを追加
+    let _label = "残り";
+    if (q.status === "done") _label = "完了";
+    else if (q.status === "skipped") _label = "スキップ";
+    else if (q.status === "saving") _label = "保存中";
+    else if (q.status === "save-failed") _label = "保存失敗";
+    statBadge.textContent = _label;
   }
   const nameEl = card.querySelector(".ext-thumb-name");
   if (nameEl) {
@@ -10736,14 +10770,21 @@ function _extB1RenderEmptyPreview(msg) {
 function _extB1ApplyStatusReadonly(status) {
   const saveBtn = document.getElementById("ext-b1-save-next");
   const skipBtn = document.getElementById("ext-b1-skip");
-  const readonly = (status === "done" || status === "skipped");
+  // v1.46.28 GROUP-51-b1-optimistic：
+  //  - done / skipped / saving は readonly（saving は背後処理中、user 操作不可）
+  //  - save-failed は再保存可能（editable）、pending と同等
+  const readonly = (status === "done" || status === "skipped" || status === "saving");
+  const _why = status === "done" ? "完了済み"
+             : status === "skipped" ? "スキップ済み"
+             : status === "saving" ? "保存処理中"
+             : "";
   if (saveBtn) {
     saveBtn.disabled = readonly;
-    saveBtn.title = readonly ? `${status === "done" ? "完了済み" : "スキップ済み"}のため保存できません` : "";
+    saveBtn.title = readonly ? `${_why}のため保存できません` : (status === "save-failed" ? "前回の保存が失敗しました。再保存できます" : "");
   }
   if (skipBtn) {
     skipBtn.disabled = readonly;
-    skipBtn.title = readonly ? `${status === "done" ? "完了済み" : "スキップ済み"}のため操作できません` : "";
+    skipBtn.title = readonly ? `${_why}のため操作できません` : "";
   }
 }
 
@@ -10767,8 +10808,12 @@ function _extB1AdvanceCursorInFiltered(session) {
 async function _extB1FinishSessionIfDone() {
   const session = _extActiveSession;
   if (!session) return;
-  const pending = session.queue.filter(q => q.status === "pending").length;
-  if (pending > 0) return;
+  // v1.46.28 GROUP-51-b1-optimistic：pending / saving / save-failed のいずれかが残っていれば session-end しない
+  // saving は背後処理中（待つべき）、save-failed は user の手動再保存またはスキップ待ち
+  const _unfinished = session.queue.filter(q =>
+    q.status === "pending" || q.status === "saving" || q.status === "save-failed"
+  ).length;
+  if (_unfinished > 0) return;
 
   const done    = session.queue.filter(q => q.status === "done").length;
   const skipped = session.queue.filter(q => q.status === "skipped").length;

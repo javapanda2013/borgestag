@@ -1461,7 +1461,15 @@
               style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
             <span id="ext-cutoff-hint" style="font-size:11px;color:#888;"></span>
           </div>
-          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は全ファイルを対象とします。</div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は上限なし（全ファイル対象）。</div>
+        </div>
+        <div class="export-path-row" style="margin-top:4px;">
+          <label class="export-path-label">開始日時（これ以降の更新日時のファイルを対象）</label>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="datetime-local" id="ext-from-date"
+              style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+          </div>
+          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は下限なし。基準日時と併用で範囲指定（例：特定期間に保存した画像の回収）。</div>
         </div>
       </div>
     </div>

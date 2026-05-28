@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.2
+version: 1.11.3
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -894,13 +894,15 @@ def handle_delete_chunk_file(path):
 # 外部取り込み
 # ---------------------------------------------------------------
 
-def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
+def handle_scan_external_images(path, cutoff_date_str, excludes, extensions, from_date_str=""):
     """
     BorgesTag 使用前に手動保存した画像のメタデータをスキャンして返す。
     path: フォルダまたは単一ファイルのパス
-    cutoff_date_str: ISO8601 文字列（これより古い mtime のファイルのみ対象）
+    cutoff_date_str: ISO8601 文字列（上限。これより古い mtime のファイルのみ対象）
     excludes: 除外トークン文字列のリスト（NFKC正規化・小文字化済み）
     extensions: 対象拡張子リスト（例: [".jpg", ".png"]）
+    from_date_str: ISO8601 文字列（下限。これ以降の mtime のファイルのみ対象、GROUP-107 復元用）
+        cutoff と併用で範囲 [from_date, cutoff) になる。空なら下限なし。
     """
 
     def normalize(s):
@@ -928,11 +930,19 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
                 result.append(p)  # 元の大文字小文字を保持
         return result
 
-    # 基準日時
+    # 基準日時（上限）
     cutoff = None
     if cutoff_date_str:
         try:
             cutoff = datetime.fromisoformat(cutoff_date_str)
+        except Exception:
+            pass
+
+    # 下限日時（GROUP-107 復元用、from_date 以降のファイルのみ対象）
+    from_date = None
+    if from_date_str:
+        try:
+            from_date = datetime.fromisoformat(from_date_str)
         except Exception:
             pass
 
@@ -951,9 +961,12 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions):
             return
         try:
             mtime_ts = os.path.getmtime(file_path)
-            if cutoff and datetime.fromtimestamp(mtime_ts) >= cutoff:
+            mtime_dt = datetime.fromtimestamp(mtime_ts)
+            if cutoff and mtime_dt >= cutoff:
                 return
-            saved_at = datetime.fromtimestamp(mtime_ts).strftime("%Y-%m-%dT%H:%M:%S")
+            if from_date and mtime_dt < from_date:
+                return
+            saved_at = mtime_dt.strftime("%Y-%m-%dT%H:%M:%S")
         except Exception:
             saved_at = ""
         tokens = extract_tokens(file_path)
@@ -1500,6 +1513,7 @@ def _dispatch_command(message):
             message.get("cutoffDate", ""),
             message.get("excludes", []),
             message.get("extensions", [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]),
+            message.get("fromDate", ""),
         )
 
     elif cmd == "GENERATE_THUMBS_BATCH":

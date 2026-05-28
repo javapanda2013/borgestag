@@ -6853,7 +6853,7 @@ function _extRenderChips(arr, container, onUpdate) {
 async function setupExternalImportTab() {
   // v1.45.5 Phase C-2: saveHistory は migration aware
   const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate"])) };
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate"])) };
   let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
 
   // BorgesTag 最古保存日ヒント（外部取り込みエントリを除外して算出）
@@ -6872,6 +6872,11 @@ async function setupExternalImportTab() {
   if (stored.extImportCutoffDate) {
     const cdEl = document.getElementById("ext-cutoff-date");
     if (cdEl) cdEl.value = stored.extImportCutoffDate;
+  }
+  // GROUP-107：開始日時（下限）を復元
+  if (stored.extImportFromDate) {
+    const fdEl = document.getElementById("ext-from-date");
+    if (fdEl) fdEl.value = stored.extImportFromDate;
   }
 
   // 保存済み除外ワードチップ
@@ -7155,9 +7160,15 @@ async function scanExternal(savedExcludes) {
   const excludesNorm = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
   const cutoffVal    = document.getElementById("ext-cutoff-date").value;
   const cutoffIso    = cutoffVal ? new Date(cutoffVal).toISOString() : "";
+  // GROUP-107：開始日時（下限）。cutoff と併用で範囲 [from, cutoff) になる
+  const fromVal      = document.getElementById("ext-from-date").value;
+  const fromIso      = fromVal ? new Date(fromVal).toISOString() : "";
 
   if (cutoffVal) {
     await browser.storage.local.set({ extImportCutoffDate: cutoffVal });
+  }
+  if (fromVal) {
+    await browser.storage.local.set({ extImportFromDate: fromVal });
   }
 
   let res;
@@ -7166,6 +7177,7 @@ async function scanExternal(savedExcludes) {
       type:       "SCAN_EXTERNAL_IMAGES",
       path,
       cutoffDate: cutoffIso,
+      fromDate:   fromIso,
       excludes:   excludesNorm,
     });
   } catch (e) {
@@ -8337,12 +8349,15 @@ async function _extScanMultiRootForBatch(selEntries) {
   // 除外ワードを収集
   // v1.45.5 Phase C-2: saveHistory は migration aware
   const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate"])) };
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate"])) };
   const savedExcludes  = stored.extImportExcludes || [];
   const allExcludes    = [...savedExcludes, ..._extTempExcludes];
   const excludesNorm   = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
   const cutoffIso      = stored.extImportCutoffDate
     ? new Date(stored.extImportCutoffDate).toISOString() : "";
+  // GROUP-107：開始日時（下限）。cutoff と併用で範囲 [from, cutoff)
+  const fromIso        = stored.extImportFromDate
+    ? new Date(stored.extImportFromDate).toISOString() : "";
 
   // 既存 saveHistory から重複チェック用 Set を準備
   const existingKeys = new Set(
@@ -8371,6 +8386,7 @@ async function _extScanMultiRootForBatch(selEntries) {
         type:       "SCAN_EXTERNAL_IMAGES",
         path:       scanTarget,
         cutoffDate: cutoffIso,
+        fromDate:   fromIso,
         excludes:   excludesNorm,
       });
     } catch (e) {
@@ -9100,6 +9116,7 @@ async function _extStartSessionFromFolderList(folderListItem, rootPath, subfolde
       type:       "SCAN_EXTERNAL_IMAGES",
       path:       rootPath,
       cutoffDate: "",
+      fromDate:   "",
       excludes:   excludes,
     });
   } catch (e) {

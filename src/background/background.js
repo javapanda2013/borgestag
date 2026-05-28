@@ -450,6 +450,7 @@ async function handleAsyncMessage(message, sender) {
         cmd:        "SCAN_EXTERNAL_IMAGES",
         path:       message.path       || "",
         cutoffDate: message.cutoffDate || "",
+        fromDate:   message.fromDate   || "",
         excludes:   message.excludes   || [],
         extensions: message.extensions || [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
       });

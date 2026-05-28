@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.4
+version: 1.11.5
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -931,20 +931,27 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions, fro
         return result
 
     # 基準日時（上限）
+    # GROUP-112（2026-05-29）：tz-aware（"...Z" 等）で渡ってきた場合は naive local へ正規化。
+    # mtime（os.path.getmtime 由来）は naive local のため、aware と比較すると
+    # TypeError になり filter が無効化される。naive 同士に統一する。
     cutoff = None
     if cutoff_date_str:
         try:
             cutoff = datetime.fromisoformat(cutoff_date_str)
+            if cutoff.tzinfo is not None:
+                cutoff = cutoff.astimezone().replace(tzinfo=None)
         except Exception:
-            pass
+            cutoff = None
 
     # 下限日時（GROUP-107 復元用、from_date 以降のファイルのみ対象）
     from_date = None
     if from_date_str:
         try:
             from_date = datetime.fromisoformat(from_date_str)
+            if from_date.tzinfo is not None:
+                from_date = from_date.astimezone().replace(tzinfo=None)
         except Exception:
-            pass
+            from_date = None
 
     # 除外ワードセット（渡された文字列は NFKC小文字化済みを前提とする）
     excludes_set = set(excludes)

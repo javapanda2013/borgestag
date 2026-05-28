@@ -7145,8 +7145,12 @@ async function setupExternalImportTab() {
 async function _extReadDateFilter() {
   const cutoffVal = document.getElementById("ext-cutoff-date")?.value || "";
   const fromVal   = document.getElementById("ext-from-date")?.value || "";
-  const cutoffIso = cutoffVal ? new Date(cutoffVal).toISOString() : "";
-  const fromIso   = fromVal ? new Date(fromVal).toISOString() : "";
+  // GROUP-112（2026-05-29）：datetime-local の生値（naive local、例 "2026-05-19T21:33"）を
+  // そのまま渡す。旧実装は new Date(v).toISOString() で UTC「Z」付きにしていたが、Native の
+  // datetime.fromisoformat が timezone-aware として解釈し、naive な mtime との比較で TypeError
+  // → process_file の except で握りつぶされ全ファイルが対象に混入（日付フィルタ無効化）していた。
+  const cutoffIso = cutoffVal || "";
+  const fromIso   = fromVal || "";
   const toStore = {};
   if (cutoffVal) toStore.extImportCutoffDate = cutoffVal;
   if (fromVal)   toStore.extImportFromDate = fromVal;

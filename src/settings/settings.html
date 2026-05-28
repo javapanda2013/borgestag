@@ -1344,6 +1344,26 @@
           <button id="ext-fl-add-single" class="backup-btn" style="padding:3px 10px;font-size:12px;">＋ 単体登録</button>
           <button id="ext-fl-add-subfolders" class="backup-btn" style="padding:3px 10px;font-size:12px;">📂 サブフォルダから選択</button>
         </div>
+        <!-- 取込の日付フィルタ（GROUP-109 v1.46.30：一括形式スキャン設定から移動、一括・1枚ずつ共通で適用） -->
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px;padding:8px;border:1px solid #e0e8f0;border-radius:5px;background:#fafcff;">
+          <div style="font-size:12px;color:#2c3e50;font-weight:600;width:100%;">取込の日付フィルタ（一括・1枚ずつ共通／ファイル更新日時で絞り込み）</div>
+          <div>
+            <label style="font-size:11px;color:#555;display:block;margin-bottom:2px;">基準日時（これより古いファイルを対象・上限）</label>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input type="datetime-local" id="ext-cutoff-date"
+                style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+              <span id="ext-cutoff-hint" style="font-size:11px;color:#888;"></span>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px;color:#555;display:block;margin-bottom:2px;">開始日時（これ以降のファイルを対象・下限）</label>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input type="datetime-local" id="ext-from-date"
+                style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
+            </div>
+          </div>
+          <div style="font-size:11px;color:#888;width:100%;">両方空欄で全件。併用で範囲指定（例：特定期間に保存した画像の回収）。登録フォルダを「一括取り込み」「1枚ずつ取り込み」する際に適用されます。</div>
+        </div>
         <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
           <div style="font-size:12px;color:#555;margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="ext-fl-picker-title">親フォルダ:</span>
@@ -1454,23 +1474,7 @@
           </div>
           <div style="font-size:11px;color:#888;margin-top:3px;">サブフォルダを含め再帰的にスキャンします。</div>
         </div>
-        <div class="export-path-row" style="margin-top:4px;">
-          <label class="export-path-label">基準日時（これより古い更新日時のファイルを対象）</label>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <input type="datetime-local" id="ext-cutoff-date"
-              style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
-            <span id="ext-cutoff-hint" style="font-size:11px;color:#888;"></span>
-          </div>
-          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は上限なし（全ファイル対象）。</div>
-        </div>
-        <div class="export-path-row" style="margin-top:4px;">
-          <label class="export-path-label">開始日時（これ以降の更新日時のファイルを対象）</label>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <input type="datetime-local" id="ext-from-date"
-              style="font-size:12px;padding:3px 7px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
-          </div>
-          <div style="font-size:11px;color:#888;margin-top:3px;">空欄の場合は下限なし。基準日時と併用で範囲指定（例：特定期間に保存した画像の回収）。</div>
-        </div>
+        <div style="font-size:11px;color:#888;margin-top:6px;">※ 取込の日付フィルタ（基準日時・開始日時）は上部「取り込み予定フォルダリスト」へ移動しました（一括・1枚ずつ・スキャン共通）。</div>
       </div>
     </div>
 

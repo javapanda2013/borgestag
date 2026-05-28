@@ -7140,6 +7140,22 @@ async function setupExternalImportTab() {
 }
 
 /** スキャン実行 */
+// GROUP-109：取込の日付フィルタ（ext-cutoff-date=上限 / ext-from-date=下限）を DOM から読み、
+// storage 永続化して ISO 文字列を返す。一括・1枚ずつ・スキャンの全取込経路で共通利用する。
+async function _extReadDateFilter() {
+  const cutoffVal = document.getElementById("ext-cutoff-date")?.value || "";
+  const fromVal   = document.getElementById("ext-from-date")?.value || "";
+  const cutoffIso = cutoffVal ? new Date(cutoffVal).toISOString() : "";
+  const fromIso   = fromVal ? new Date(fromVal).toISOString() : "";
+  const toStore = {};
+  if (cutoffVal) toStore.extImportCutoffDate = cutoffVal;
+  if (fromVal)   toStore.extImportFromDate = fromVal;
+  if (Object.keys(toStore).length) {
+    try { await browser.storage.local.set(toStore); } catch (_) {}
+  }
+  return { cutoffVal, fromVal, cutoffIso, fromIso };
+}
+
 async function scanExternal(savedExcludes) {
   const path     = document.getElementById("ext-scan-path").value.trim();
   const resultEl = document.getElementById("ext-scan-result");
@@ -7158,18 +7174,8 @@ async function scanExternal(savedExcludes) {
 
   const allExcludes  = [...savedExcludes, ..._extTempExcludes];
   const excludesNorm = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
-  const cutoffVal    = document.getElementById("ext-cutoff-date").value;
-  const cutoffIso    = cutoffVal ? new Date(cutoffVal).toISOString() : "";
-  // GROUP-107：開始日時（下限）。cutoff と併用で範囲 [from, cutoff) になる
-  const fromVal      = document.getElementById("ext-from-date").value;
-  const fromIso      = fromVal ? new Date(fromVal).toISOString() : "";
-
-  if (cutoffVal) {
-    await browser.storage.local.set({ extImportCutoffDate: cutoffVal });
-  }
-  if (fromVal) {
-    await browser.storage.local.set({ extImportFromDate: fromVal });
-  }
+  // GROUP-107/109：取込の日付フィルタ（上部リスト共通入力）を読み storage 永続化
+  const { cutoffIso, fromIso } = await _extReadDateFilter();
 
   let res;
   try {
@@ -8349,15 +8355,12 @@ async function _extScanMultiRootForBatch(selEntries) {
   // 除外ワードを収集
   // v1.45.5 Phase C-2: saveHistory は migration aware
   const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate"])) };
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes"])) };
   const savedExcludes  = stored.extImportExcludes || [];
   const allExcludes    = [...savedExcludes, ..._extTempExcludes];
   const excludesNorm   = allExcludes.map(s => s.normalize("NFKC").toLowerCase());
-  const cutoffIso      = stored.extImportCutoffDate
-    ? new Date(stored.extImportCutoffDate).toISOString() : "";
-  // GROUP-107：開始日時（下限）。cutoff と併用で範囲 [from, cutoff)
-  const fromIso        = stored.extImportFromDate
-    ? new Date(stored.extImportFromDate).toISOString() : "";
+  // GROUP-107/109：取込の日付フィルタ（上部リスト共通入力）を DOM から読み storage 永続化
+  const { cutoffIso, fromIso } = await _extReadDateFilter();
 
   // 既存 saveHistory から重複チェック用 Set を準備
   const existingKeys = new Set(
@@ -9110,13 +9113,15 @@ async function _extStartSessionFromFolderList(folderListItem, rootPath, subfolde
   const _hist = await _readSaveHistory();
   const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes"])) };
   const excludes = stored.extImportExcludes || [];
+  // GROUP-109：取込の日付フィルタ（上部リストの共通入力）を 1枚ずつ取込にも適用
+  const { cutoffIso: _cutoffIso, fromIso: _fromIso } = await _extReadDateFilter();
   let scanRes;
   try {
     scanRes = await browser.runtime.sendMessage({
       type:       "SCAN_EXTERNAL_IMAGES",
       path:       rootPath,
-      cutoffDate: "",
-      fromDate:   "",
+      cutoffDate: _cutoffIso,
+      fromDate:   _fromIso,
       excludes:   excludes,
     });
   } catch (e) {

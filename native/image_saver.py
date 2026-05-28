@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.3
+version: 1.11.4
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -1047,7 +1047,7 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions, fro
         if rf not in folder_tokens_map:
             folder_tokens_map[rf] = e["tokens"]
 
-    return {
+    result = {
         "ok":           True,
         "entries":      entries,
         "allTokens":    all_tokens,
@@ -1056,6 +1056,34 @@ def handle_scan_external_images(path, cutoff_date_str, excludes, extensions, fro
         "scanned":      scanned[0],
         "matched":      len(entries),
     }
+
+    # GROUP-111（2026-05-29）：大元フォルダ等で entries が多いと応答 JSON が
+    # Native Messaging の ~1MB 上限を超え port 切断する。800KB を超える場合は
+    # 結果を temp ファイル（chunk cache）へ書き出し path のみ返す。JS 側は
+    # READ_FILE_CHUNK で分割読込して復元する（GIF thumbChunkPath と同方式）。
+    try:
+        result_json = json.dumps(result, ensure_ascii=False)
+    except Exception:
+        result_json = None
+    if result_json is not None:
+        encoded_size = len(result_json.encode("utf-8"))
+        if encoded_size >= 800 * 1024:
+            try:
+                temp_dir = _get_chunk_temp_dir()
+                fd, temp_path = tempfile.mkstemp(suffix=".json", prefix="scanext_", dir=temp_dir)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(result_json)
+                return {
+                    "ok":              True,
+                    "resultChunkPath": temp_path,
+                    "totalSize":       encoded_size,
+                    "scanned":         scanned[0],
+                    "matched":         len(entries),
+                }
+            except Exception:
+                # temp 書込失敗時は inline 返却（1MB 超なら切断するが最終手段）
+                pass
+    return result
 
 
 def handle_list_subfolders(path):

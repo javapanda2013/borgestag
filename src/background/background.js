@@ -445,8 +445,8 @@ async function handleAsyncMessage(message, sender) {
     }
     case "DELETE_EXT_THUMBS_BY_ROOT":
       return deleteExtThumbsByRoot(message.rootPath);
-    case "SCAN_EXTERNAL_IMAGES":
-      return sendNative({
+    case "SCAN_EXTERNAL_IMAGES": {
+      const scanRes = await sendNative({
         cmd:        "SCAN_EXTERNAL_IMAGES",
         path:       message.path       || "",
         cutoffDate: message.cutoffDate || "",
@@ -454,6 +454,36 @@ async function handleAsyncMessage(message, sender) {
         excludes:   message.excludes   || [],
         extensions: message.extensions || [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
       });
+      // v1.46.31 GROUP-111: 応答が Native Messaging 1MB 上限を超える場合、Native は
+      // 結果 JSON を temp ファイルへ書き resultChunkPath のみ返す。chunk 読込で復元する。
+      if (scanRes?.ok && scanRes.resultChunkPath) {
+        const chunkRes = await readNativeFileChunksB64(scanRes.resultChunkPath);
+        deleteNativeChunkFile(scanRes.resultChunkPath); // 読込後に fire-and-forget で削除
+        if (!chunkRes.ok) {
+          return { ok: false, error: `スキャン結果の読込に失敗: ${chunkRes.error || ""}` };
+        }
+        try {
+          // 各 base64 chunk をバイトに戻し連結 → UTF-8 decode → JSON parse
+          // （chunk 境界で multi-byte 文字が割れるため、文字列結合でなくバイト連結）
+          let total = 0;
+          const byteArrs = (chunkRes.chunksB64 || []).map((b64) => {
+            const bin = atob(b64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            total += arr.length;
+            return arr;
+          });
+          const merged = new Uint8Array(total);
+          let pos = 0;
+          for (const a of byteArrs) { merged.set(a, pos); pos += a.length; }
+          const jsonText = new TextDecoder("utf-8").decode(merged);
+          return JSON.parse(jsonText);
+        } catch (e) {
+          return { ok: false, error: `スキャン結果の復元に失敗: ${e.message || ""}` };
+        }
+      }
+      return scanRes;
+    }
     case "GENERATE_THUMBS_BATCH": {
       // v1.22.10: Python 側は GIF について thumbChunkPaths[p]={tempPath,totalSize} を返す
       // （SAVE_IMAGE 系の 1MB 応答上限と同根の対策）。ここで分割読み取り→Base64 化し、

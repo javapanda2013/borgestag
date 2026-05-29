@@ -7202,23 +7202,38 @@ function _extParseMetaFromFilename(fileName) {
 function _extApplyFromFilenameUI() {
   const on = _extFromFilename;
 
-  // 一括：フォルダ別タグ設定セクション
-  const tagSec = document.getElementById("ext-tag-section");
-  if (tagSec) {
-    const body = tagSec.querySelector(".backup-section");
+  // 一括：ON 時に無視されるセクション（フォルダ別タグ設定・除外ワード設定）を
+  // 非活性化（グレーアウト）＋折りたたみ＋注記。除外ワードはフォルダトークン抽出にのみ
+  // 使われ、フォルダタグを無視する本モードでは機能的にも無効になるため対象に含める。
+  const _foldSections = [
+    {
+      secId:    "ext-tag-section",
+      noticeId: "ext-tag-section-fromfilename-notice",
+      msg:      "「ファイル名からタグ・権利者を取得する」が ON のため、フォルダ別タグ設定・手動タグは無視され、折りたたまれています（取込時はファイル名由来のタグ・権利者のみ付与）。",
+    },
+    {
+      secId:    "ext-exclude-section",
+      noticeId: "ext-exclude-section-fromfilename-notice",
+      msg:      "「ファイル名からタグ・権利者を取得する」が ON のため、除外ワード設定（フォルダ名からタグを抽出する際の除外語）は無視され、折りたたまれています。",
+    },
+  ];
+  for (const { secId, noticeId, msg } of _foldSections) {
+    const sec = document.getElementById(secId);
+    if (!sec) continue;
+    const body = sec.querySelector(".backup-section");
     if (body) body.style.display = on ? "none" : "";
-    tagSec.querySelectorAll("input, button").forEach(el => { el.disabled = on; });
-    let notice = document.getElementById("ext-tag-section-fromfilename-notice");
+    sec.querySelectorAll("input, button").forEach(el => { el.disabled = on; });
+    let notice = document.getElementById(noticeId);
     if (on) {
       if (!notice) {
         notice = document.createElement("div");
-        notice.id = "ext-tag-section-fromfilename-notice";
+        notice.id = noticeId;
         notice.style.cssText = "font-size:12px;color:#888;background:#fafcff;border:1px solid #e0e8f0;border-radius:5px;padding:6px 8px;margin:4px 0;";
-        const title = tagSec.querySelector(".section-title");
+        const title = sec.querySelector(".section-title");
         if (title) title.insertAdjacentElement("afterend", notice);
-        else tagSec.prepend(notice);
+        else sec.prepend(notice);
       }
-      notice.textContent = "「ファイル名からタグ・権利者を取得する」が ON のため、フォルダ別タグ設定・手動タグは無視され、折りたたまれています（取込時はファイル名由来のタグ・権利者のみ付与）。";
+      notice.textContent = msg;
       notice.style.display = "";
     } else if (notice) {
       notice.style.display = "none";

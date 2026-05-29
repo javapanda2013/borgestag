@@ -1736,6 +1736,9 @@
               保存先に画像をコピー作成（ファイル名＝タグ・権利者含む通常保存と同形式）
             </label>
 
+            <!-- GROUP-114（Q-114-1）：ファイル名取得モード ON 時に非活性化＋折りたたむタグ編集エリア -->
+            <div id="ext-b1-fromfilename-notice" style="display:none;font-size:11px;color:#888;background:#fafcff;border:1px solid #e0e8f0;border-radius:5px;padding:6px 8px;margin-bottom:8px;"></div>
+            <div id="ext-b1-tag-edit-area">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
               <span style="font-size:12px;color:#555;font-weight:600;">メインタグ</span>
               <label style="font-size:11px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;">
@@ -1773,6 +1776,7 @@
               <input type="text" id="ext-b1-author-input" placeholder="権利者を追加（Enter）" autocomplete="off"
                 style="flex:1;font-size:12px;padding:3px 8px;border:1px solid #d0d0d0;border-radius:4px;font-family:inherit;" />
               <div id="ext-b1-author-sugg" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d0d8f0;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);max-height:120px;overflow-y:auto;z-index:5;font-size:12px;"></div>
+            </div>
             </div>
           </div>
           <div style="padding:10px 14px;border-top:1px solid #e0e0e0;background:#f5f8fb;display:flex;gap:6px;flex-wrap:wrap;">

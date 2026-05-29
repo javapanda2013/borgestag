@@ -6887,8 +6887,10 @@ async function setupExternalImportTab() {
     fnModeEl.addEventListener("change", async () => {
       _extFromFilename = !!fnModeEl.checked;
       await browser.storage.local.set({ extImportFromFilename: _extFromFilename });
+      _extApplyFromFilenameUI();  // GROUP-114 Q-114-1：タグ設定 UI の非活性化/折りたたみを即反映
     });
   }
+  _extApplyFromFilenameUI();  // GROUP-114 Q-114-1：初期表示に反映
 
   // 保存済み除外ワードチップ
   const excludeChipsEl = document.getElementById("ext-exclude-chips");
@@ -7194,6 +7196,52 @@ function _extParseMetaFromFilename(fileName) {
   return { tags: [...new Set(tags)], authors: [...new Set(authors)] };
 }
 
+// GROUP-114（Q-114-1, 2026-05-29）：「ファイル名からタグ・権利者を取得する」ON 時、
+// 取込時に無視されるタグ設定 UI を非活性化（グレーアウト）＋折りたたみ、注記を表示する。
+// 対象：一括＝フォルダ別タグ設定セクション（ext-tag-section）、1枚ずつ＝タグ編集エリア（ext-b1-tag-edit-area）。
+function _extApplyFromFilenameUI() {
+  const on = _extFromFilename;
+
+  // 一括：フォルダ別タグ設定セクション
+  const tagSec = document.getElementById("ext-tag-section");
+  if (tagSec) {
+    const body = tagSec.querySelector(".backup-section");
+    if (body) body.style.display = on ? "none" : "";
+    tagSec.querySelectorAll("input, button").forEach(el => { el.disabled = on; });
+    let notice = document.getElementById("ext-tag-section-fromfilename-notice");
+    if (on) {
+      if (!notice) {
+        notice = document.createElement("div");
+        notice.id = "ext-tag-section-fromfilename-notice";
+        notice.style.cssText = "font-size:12px;color:#888;background:#fafcff;border:1px solid #e0e8f0;border-radius:5px;padding:6px 8px;margin:4px 0;";
+        const title = tagSec.querySelector(".section-title");
+        if (title) title.insertAdjacentElement("afterend", notice);
+        else tagSec.prepend(notice);
+      }
+      notice.textContent = "「ファイル名からタグ・権利者を取得する」が ON のため、フォルダ別タグ設定・手動タグは無視され、折りたたまれています（取込時はファイル名由来のタグ・権利者のみ付与）。";
+      notice.style.display = "";
+    } else if (notice) {
+      notice.style.display = "none";
+    }
+  }
+
+  // 1枚ずつ：タグ編集エリア
+  const b1Area = document.getElementById("ext-b1-tag-edit-area");
+  if (b1Area) {
+    b1Area.style.display = on ? "none" : "";
+    b1Area.querySelectorAll("input, button").forEach(el => { el.disabled = on; });
+  }
+  const b1Notice = document.getElementById("ext-b1-fromfilename-notice");
+  if (b1Notice) {
+    if (on) {
+      b1Notice.textContent = "「ファイル名からタグ・権利者を取得する」が ON のため、入力したタグ・権利者は無視され、ファイル名由来のタグ・権利者のみが保存履歴へ付与されます。";
+      b1Notice.style.display = "";
+    } else {
+      b1Notice.style.display = "none";
+    }
+  }
+}
+
 async function scanExternal(savedExcludes) {
   const path     = document.getElementById("ext-scan-path").value.trim();
   const resultEl = document.getElementById("ext-scan-result");
@@ -7279,6 +7327,7 @@ async function scanExternal(savedExcludes) {
   if (countEl) countEl.textContent = deduped.length;
   const warnEl  = document.getElementById("ext-thumb-warning");
   if (warnEl) warnEl.style.display = document.getElementById("ext-gen-thumb").checked ? "" : "none";
+  _extApplyFromFilenameUI();  // GROUP-114 Q-114-1：スキャン後に表示されるタグ設定 UI へ反映
 }
 
 /** v1.22.0: ルートパス+相対フォルダから _extFolderTagMap のキーを生成 */
@@ -7569,8 +7618,16 @@ async function executeExternalImport() {
     const fm = _extFolderTagMap[tagKey]
             || _extFolderTagMap[e.relFolder]
             || { mainTags: [], subTags: [], authTags: [] };
-    // GROUP-114：「ファイル名から情報を取得」モード ON 時のみ、埋め込みタグ・権利者を復元してマージ
+    // GROUP-114：「ファイル名から情報を取得」モード時はファイル名の埋め込みタグ・権利者を復元
     const fnMeta = _extFromFilename ? _extParseMetaFromFilename(e.fileName) : { tags: [], authors: [] };
+    // GROUP-114（Q-114-1, 2026-05-29）：モード ON 時はフォルダ別タグ・手動タグを無視し、
+    // ファイル名由来のみを付与（二重付与＝余分なタグ混入の回避）。OFF 時は従来どおり統合。
+    const entryTags = _extFromFilename
+      ? [...new Set(fnMeta.tags)]
+      : [...new Set([...fm.mainTags, ...fm.subTags, ..._extManualTags, ..._extManualSubTags])];
+    const entryAuthors = _extFromFilename
+      ? [...new Set(fnMeta.authors)]
+      : [...new Set([...fm.authTags, ..._extManualAuthors])];
     return {
       id:       crypto.randomUUID(),
       savedAt:  e.savedAt,
@@ -7578,8 +7635,8 @@ async function executeExternalImport() {
       pageUrl:  "",
       savePaths: [e.savePath],
       filename: e.fileName,
-      tags:     [...new Set([...fm.mainTags, ...fm.subTags, ..._extManualTags, ..._extManualSubTags, ...fnMeta.tags])],
-      authors:  [...new Set([...fm.authTags,  ..._extManualAuthors, ...fnMeta.authors])],
+      tags:     entryTags,
+      authors:  entryAuthors,
       thumbId:  null,
       source:   "external_import",
       // 完了履歴の集計用に保持（saveHistory には載せない方が良いが、軽量なので残す）
@@ -7661,13 +7718,17 @@ async function executeExternalImport() {
   const gAuthorSet = new Set([...(stored.globalAuthors || []), ...importedAuthors]);
 
   // tagDestinations 更新（メインタグのみ・サブタグは保存先に関連付けない）
-  for (const pe of pendingEntries) {
-    const path = Array.isArray(pe.savePaths) ? (pe.savePaths[0] || "") : (pe.savePath || "");
-    if (!path) continue;
-    for (const tag of (pe.tags || [])) {
-      if (!tagDestinations[tag]) tagDestinations[tag] = [];
-      if (!tagDestinations[tag].some(d => d.path === path)) {
-        tagDestinations[tag].push({ id: crypto.randomUUID(), path, label: "" });
+  // GROUP-114（Q-114-1）：モード ON（復旧）時は、復元タグを大元フォルダに保存先関連付けしない
+  // （大元は復旧の読取元であって保存先ではないため、tagDestinations を汚染しない）
+  if (!_extFromFilename) {
+    for (const pe of pendingEntries) {
+      const path = Array.isArray(pe.savePaths) ? (pe.savePaths[0] || "") : (pe.savePath || "");
+      if (!path) continue;
+      for (const tag of (pe.tags || [])) {
+        if (!tagDestinations[tag]) tagDestinations[tag] = [];
+        if (!tagDestinations[tag].some(d => d.path === path)) {
+          tagDestinations[tag].push({ id: crypto.randomUUID(), path, label: "" });
+        }
       }
     }
   }
@@ -9909,6 +9970,7 @@ async function _extOpenB1(session) {
   document.getElementById("ext-b1-overlay").style.display = "flex";
   document.getElementById("ext-b1-session-name").textContent = session.name || session.rootPath;
   await _extB1LoadCurrent();
+  _extApplyFromFilenameUI();  // GROUP-114 Q-114-1：1枚ずつのタグ編集エリアの非活性化/折りたたみを反映
 }
 
 // v1.24.0 GROUP-10-a: メイン画像プレビューの世代カウンタ
@@ -10182,11 +10244,17 @@ async function _extB1SaveAndNext() {
   const tags    = [..._extB1MainTags];
   const subTags = [..._extB1SubTags];
   const authors = [..._extB1Authors];
-  // GROUP-114：「ファイル名から情報を取得」モード ON 時のみ、元ファイル名（cur.fileName）の
-  // 埋め込みタグ・権利者を復元してマージ
+  // GROUP-114：「ファイル名から情報を取得」モード ON 時、元ファイル名（cur.fileName）の埋め込み
+  // タグ・権利者を復元。Q-114-1（2026-05-29）：ON 時は入力タグ（tags/subTags/authors）を無視し
+  // ファイル名由来のみを保存履歴へ付与（二重付与回避）。OFF 時は従来どおり入力タグを統合。
+  // 注：tags/subTags/authors は carry-over・effectiveFilename（OFF 時）用に元のまま保持する。
   const _fnMeta = _extFromFilename ? _extParseMetaFromFilename(cur.fileName) : { tags: [], authors: [] };
-  const allTags = [...new Set([...tags, ...subTags, ..._fnMeta.tags])];
-  const allAuthors = [...new Set([...authors, ..._fnMeta.authors])];
+  const allTags = _extFromFilename
+    ? [...new Set(_fnMeta.tags)]
+    : [...new Set([...tags, ...subTags])];
+  const allAuthors = _extFromFilename
+    ? [...new Set(_fnMeta.authors)]
+    : [...new Set([...authors])];
 
   // v1.23.0: GROUP-1-a2 引き継ぎ値を更新
   _extB1LastCarryValues.tags     = [...tags];
@@ -10291,14 +10359,21 @@ async function _extB1SaveAndNext() {
       const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
       const gAuthorSet = new Set([...(stored.globalAuthors || []), ...allAuthors]);
 
-      const recentTags    = [...tags,    ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
-      const recentSubTags = [...subTags, ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
-      const recentAuthors = [...authors, ...(stored.recentAuthors || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+      // GROUP-114（Q-114-1）：ON 時は入力タグを無視するため、recent も実際に付与した値（ファイル名由来）で更新
+      const _recentMain = _extFromFilename ? allTags    : tags;
+      const _recentSub  = _extFromFilename ? []         : subTags;
+      const _recentAuth = _extFromFilename ? allAuthors : authors;
+      const recentTags    = [..._recentMain, ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
+      const recentSubTags = [..._recentSub,  ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
+      const recentAuthors = [..._recentAuth, ...(stored.recentAuthors || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);
 
-      for (const t of tags) {
-        if (!tagDestinations[t]) tagDestinations[t] = [];
-        if (!tagDestinations[t].some(d => d.path === savePath)) {
-          tagDestinations[t].push({ id: crypto.randomUUID(), path: savePath, label: "" });
+      // GROUP-114（Q-114-1）：モード ON（復旧）時は、復元タグを大元フォルダに保存先関連付けしない
+      if (!_extFromFilename) {
+        for (const t of tags) {
+          if (!tagDestinations[t]) tagDestinations[t] = [];
+          if (!tagDestinations[t].some(d => d.path === savePath)) {
+            tagDestinations[t].push({ id: crypto.randomUUID(), path: savePath, label: "" });
+          }
         }
       }
 

@@ -1364,6 +1364,14 @@
           </div>
           <div style="font-size:11px;color:#888;width:100%;">両方空欄で全件。併用で範囲指定（例：特定期間に保存した画像の回収）。登録フォルダを「一括取り込み」「1枚ずつ取り込み」する際に適用されます。</div>
         </div>
+        <!-- ファイル名から情報を取得するモード（GROUP-114 v1.46.34：一括・1枚ずつ共通） -->
+        <div style="margin-bottom:8px;padding:8px;border:1px solid #e0e8f0;border-radius:5px;background:#fafcff;">
+          <label style="font-size:12px;color:#2c3e50;display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="ext-from-filename" />
+            <span style="font-weight:600;">ファイル名からタグ・権利者を取得する</span>
+          </label>
+          <div style="font-size:11px;color:#888;margin-top:4px;">ON にすると、ファイル名に埋め込まれたタグ・権利者（保存時に付与した <code>-タグ-権利者</code> 形式）を登録タグ／権利者一覧と照合して保存履歴へ復元します。<strong>このモードでは取込時にファイル名へのメタ付与を行いません</strong>（二重付与を防止）。一致しないパートや <code>-</code> を含むタグは取りこぼす場合があります（保存履歴の復旧用）。</div>
+        </div>
         <div id="ext-fl-subfolder-picker" style="display:none;border:1px solid #d0dae5;border-radius:5px;padding:8px;margin-bottom:8px;background:#fafcff;">
           <div style="font-size:12px;color:#555;margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="ext-fl-picker-title">親フォルダ:</span>

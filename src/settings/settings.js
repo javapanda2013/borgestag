@@ -339,6 +339,7 @@ let _extDragData         = null;   // チップD&D中の移動元情報 { folder
 
 // ---- v1.20.0: 1枚ずつ形式の状態 ----
 let _extMode           = "batch";   // "batch" | "per_item"
+let _extFromFilename   = false;     // extImportFromFilename（GROUP-114：ファイル名から情報取得モード）
 let _extFolderList     = [];        // extImportFolderList
 let _extSessions       = [];        // extImportSessions
 let _extCompletedRoots = [];        // extImportCompletedRoots
@@ -6853,7 +6854,7 @@ function _extRenderChips(arr, container, onUpdate) {
 async function setupExternalImportTab() {
   // v1.45.5 Phase C-2: saveHistory は migration aware
   const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate"])) };
+  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate", "extImportFromFilename"])) };
   let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
 
   // BorgesTag 最古保存日ヒント（外部取り込みエントリを除外して算出）
@@ -6877,6 +6878,16 @@ async function setupExternalImportTab() {
   if (stored.extImportFromDate) {
     const fdEl = document.getElementById("ext-from-date");
     if (fdEl) fdEl.value = stored.extImportFromDate;
+  }
+  // GROUP-114：ファイル名から情報を取得モードの復元 + onchange 永続化
+  _extFromFilename = !!stored.extImportFromFilename;
+  const fnModeEl = document.getElementById("ext-from-filename");
+  if (fnModeEl) {
+    fnModeEl.checked = _extFromFilename;
+    fnModeEl.addEventListener("change", async () => {
+      _extFromFilename = !!fnModeEl.checked;
+      await browser.storage.local.set({ extImportFromFilename: _extFromFilename });
+    });
   }
 
   // 保存済み除外ワードチップ
@@ -7158,6 +7169,29 @@ async function _extReadDateFilter() {
     try { await browser.storage.local.set(toStore); } catch (_) {}
   }
   return { cutoffVal, fromVal, cutoffIso, fromIso };
+}
+
+// GROUP-114（2026-05-29）：保存ファイル名に埋め込まれたタグ・権利者を逆解析する。
+// 保存時 buildFilenameWithMeta は `{stem}-{tags}-{subtags}-{authors}{ext}` 形式で連結するため、
+// stem を "-" 分割し各パートを globalTags / globalAuthors と照合してタグ・権利者を復元する。
+// 保存履歴は tags をメイン+サブ統合で持つためメイン/サブ区別は不要。"-" を含むタグは
+// 分割で取りこぼす（heuristic）。外部取込で folder 設定タグに加えて適用する。
+function _extParseMetaFromFilename(fileName) {
+  const tags = [], authors = [];
+  if (!fileName || typeof fileName !== "string") return { tags, authors };
+  const dot  = fileName.lastIndexOf(".");
+  const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+  const parts = stem.split("-").map(p => p.trim()).filter(Boolean);
+  if (parts.length < 2) return { tags, authors };  // 区切りなし＝タグ埋め込みなし
+  const norm    = s => s.normalize("NFKC").toLowerCase();
+  const tagMap  = new Map((globalTags    || []).map(t => [norm(t), t]));
+  const authMap = new Map((globalAuthors || []).map(a => [norm(a), a]));
+  for (const p of parts) {
+    const np = norm(p);
+    if (authMap.has(np))     authors.push(authMap.get(np));
+    else if (tagMap.has(np)) tags.push(tagMap.get(np));
+  }
+  return { tags: [...new Set(tags)], authors: [...new Set(authors)] };
 }
 
 async function scanExternal(savedExcludes) {
@@ -7535,6 +7569,8 @@ async function executeExternalImport() {
     const fm = _extFolderTagMap[tagKey]
             || _extFolderTagMap[e.relFolder]
             || { mainTags: [], subTags: [], authTags: [] };
+    // GROUP-114：「ファイル名から情報を取得」モード ON 時のみ、埋め込みタグ・権利者を復元してマージ
+    const fnMeta = _extFromFilename ? _extParseMetaFromFilename(e.fileName) : { tags: [], authors: [] };
     return {
       id:       crypto.randomUUID(),
       savedAt:  e.savedAt,
@@ -7542,8 +7578,8 @@ async function executeExternalImport() {
       pageUrl:  "",
       savePaths: [e.savePath],
       filename: e.fileName,
-      tags:     [...new Set([...fm.mainTags, ...fm.subTags, ..._extManualTags, ..._extManualSubTags])],
-      authors:  [...fm.authTags,  ..._extManualAuthors],
+      tags:     [...new Set([...fm.mainTags, ...fm.subTags, ..._extManualTags, ..._extManualSubTags, ...fnMeta.tags])],
+      authors:  [...new Set([...fm.authTags,  ..._extManualAuthors, ...fnMeta.authors])],
       thumbId:  null,
       source:   "external_import",
       // 完了履歴の集計用に保持（saveHistory には載せない方が良いが、軽量なので残す）
@@ -10146,7 +10182,11 @@ async function _extB1SaveAndNext() {
   const tags    = [..._extB1MainTags];
   const subTags = [..._extB1SubTags];
   const authors = [..._extB1Authors];
-  const allTags = [...new Set([...tags, ...subTags])];
+  // GROUP-114：「ファイル名から情報を取得」モード ON 時のみ、元ファイル名（cur.fileName）の
+  // 埋め込みタグ・権利者を復元してマージ
+  const _fnMeta = _extFromFilename ? _extParseMetaFromFilename(cur.fileName) : { tags: [], authors: [] };
+  const allTags = [...new Set([...tags, ...subTags, ..._fnMeta.tags])];
+  const allAuthors = [...new Set([...authors, ..._fnMeta.authors])];
 
   // v1.23.0: GROUP-1-a2 引き継ぎ値を更新
   _extB1LastCarryValues.tags     = [...tags];
@@ -10155,12 +10195,16 @@ async function _extB1SaveAndNext() {
   _extB1LastCarryValues.savepath = savePath;
 
   // v1.24.0 GROUP-5-A: メタ付与名を一本化（saveHistory と物理操作の両方で同じ値を使う）
+  // GROUP-114：「ファイル名から情報を取得」モード ON 時は、元ファイル名に既にメタが
+  // 埋め込まれている前提のため通常のメタ付与をスキップ（二重付与の回避）。元名のまま使う。
   const fnameSettings = await browser.storage.local.get(["filenameIncludeTag", "filenameIncludeSubtag", "filenameIncludeAuthor"]);
-  const effectiveFilename = _extB1BuildFilenameWithMeta(cur.fileName, tags, subTags, authors, {
-    filenameIncludeTag:    !!fnameSettings.filenameIncludeTag,
-    filenameIncludeSubtag: !!fnameSettings.filenameIncludeSubtag,
-    filenameIncludeAuthor: !!fnameSettings.filenameIncludeAuthor,
-  });
+  const effectiveFilename = _extFromFilename
+    ? cur.fileName
+    : _extB1BuildFilenameWithMeta(cur.fileName, tags, subTags, authors, {
+        filenameIncludeTag:    !!fnameSettings.filenameIncludeTag,
+        filenameIncludeSubtag: !!fnameSettings.filenameIncludeSubtag,
+        filenameIncludeAuthor: !!fnameSettings.filenameIncludeAuthor,
+      });
   const metaChanged = (effectiveFilename !== cur.fileName);
 
   // v1.24.0 GROUP-5-A: 物理的同一フォルダ判定
@@ -10234,7 +10278,7 @@ async function _extB1SaveAndNext() {
       savePaths:  [savePath],
       filename:   effectiveFilename,
       tags:       allTags,
-      authors:    authors,
+      authors:    allAuthors,
       thumbId:    thumbId,
       source:     "external_import",
     };
@@ -10245,7 +10289,7 @@ async function _extB1SaveAndNext() {
       const merged = [...(stored.saveHistory || []), entry]
         .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
       const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
-      const gAuthorSet = new Set([...(stored.globalAuthors || []), ...authors]);
+      const gAuthorSet = new Set([...(stored.globalAuthors || []), ...allAuthors]);
 
       const recentTags    = [...tags,    ...(stored.recentTags    || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 100);
       const recentSubTags = [...subTags, ...(stored.recentSubTags || [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, 20);

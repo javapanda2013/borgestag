@@ -7846,8 +7846,35 @@ function _applyExtModeUI() {
 
 // ---------- c1/c2: 取り込み予定フォルダリスト ----------
 
+// GROUP-113（2026-05-29）：取り込み予定フォルダ行が消えた際、その行に紐づく 1枚ずつ
+// セッション（folderListRef）が _extSessions に残り続ける不具合の構造的予防。
+// 親フォルダ（folderListId）が _extFolderList に存在しない、または subfolders モードで
+// 該当 subfolderPath が消えたセッションを orphan として除去する。_extFlSave 経由で
+// 全削除箇所（一括削除・行個別削除）を 1 関数でカバーする。
+function _extCleanupOrphanSessions() {
+  const before = _extSessions.length;
+  _extSessions = _extSessions.filter(s => {
+    const ref = s && s.folderListRef;
+    if (!ref || !ref.folderListId) return true;  // folderListRef なし（手動 path 等）は保持
+    const fl = _extFolderList.find(f => f.id === ref.folderListId);
+    if (!fl) return false;                        // 親フォルダ行が消滅 → orphan
+    if (ref.subfolderPath && fl.mode === "subfolders") {
+      const subs = fl.subfolders || [];
+      if (!subs.some(sf => sf.path === ref.subfolderPath)) return false;  // 該当 sub 消滅 → orphan
+    }
+    return true;
+  });
+  return before - _extSessions.length;
+}
+
 async function _extFlSave() {
   await browser.storage.local.set({ extImportFolderList: _extFolderList });
+  // GROUP-113：フォルダ行削除に伴い orphan 化したセッションも除去（残留防止）
+  const purged = _extCleanupOrphanSessions();
+  if (purged > 0) {
+    await browser.storage.local.set({ extImportSessions: _extSessions });
+    if (typeof _extRenderSessionsList === "function") _extRenderSessionsList();
+  }
 }
 
 /**
@@ -8278,7 +8305,7 @@ function _extFlSelectInvert() {
 async function _extFlBulkDelete() {
   const sel = _extFlGetSelectedEntries();
   if (sel.length === 0) { showStatus("⚠️ 選択行がありません", true); return; }
-  if (!confirm(`選択した ${sel.length} 件を取り込み予定リストから削除しますか？`)) return;
+  if (!confirm(`選択した ${sel.length} 件を取り込み予定リストから削除しますか？\n（紐づく取り込みセッションがあれば併せて削除されます。保存済みの履歴は削除されません）`)) return;
   // single 行: そのまま除外。subfolders 行: 該当 sub を抜き、空になったらグループも削除
   const removeKeys = _extFlSelectedKeys;
   _extFolderList = _extFolderList
@@ -8657,7 +8684,7 @@ function _extBuildRowActions(item, targetPath, subfolderPath, statusInfo) {
   btnDel.textContent = "🗑";
   btnDel.addEventListener("click", async () => {
     const label = subfolderPath || item.rootPath;
-    if (!confirm(`「${label}」をリストから削除しますか？`)) return;
+    if (!confirm(`「${label}」をリストから削除しますか？\n（紐づく取り込みセッションがあれば併せて削除されます。保存済みの履歴は削除されません）`)) return;
     if (item.mode === "single") {
       _extFolderList = _extFolderList.filter(f => f.id !== item.id);
       _extFlSelectedKeys.delete(_extFlRowKey(item.id, null));

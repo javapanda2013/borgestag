@@ -50,22 +50,36 @@ async function _phaseC1OpenDB() {
   });
 }
 
-async function _mirrorSaveHistoryToIDB(history) {
+async function _mirrorSaveHistoryToIDB(history, options = {}) {
   if (!Array.isArray(history)) return;
   const db = await _phaseC1OpenDB();
   await new Promise((resolve, reject) => {
     const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readwrite");
     const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
-    store.clear();
-    for (const entry of history) {
-      if (entry && entry.id) store.put(entry);
-    }
+    // v1.46.37 GROUP-107 候補2 sanity guard：在庫が存在するのに空配列を書こうとした場合、
+    // allowEmpty 明示が無ければ tx を abort して中断（保存履歴全消失の再発防止、07 §10 と同型）。
+    // count → clear → put を同一 tx 内で同期発行（IDB tx 寿命ルール遵守、await 不挿入）。
+    const countReq = store.count();
+    countReq.onsuccess = (e) => {
+      const currentCount = e.target.result || 0;
+      if (history.length === 0 && currentCount > 0 && !options.allowEmpty) {
+        try { tx.abort(); } catch (_) {}
+        reject(new Error(`[mirror sanity guard] 在庫 ${currentCount} 件に対し空配列の書込を検出、allowEmpty 未指定のため中断`));
+        return;
+      }
+      store.clear();
+      for (const entry of history) {
+        if (entry && entry.id) store.put(entry);
+      }
+    };
+    countReq.onerror = (e) => reject(e.target.error);
     tx.oncomplete = () => resolve();
     tx.onerror    = (e) => reject(e.target.error);
+    tx.onabort    = () => { /* reject は guard 側で実行済 */ };
   });
 }
 
-async function _setStorageWithHistoryMirror(setObj) {
+async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
   // v1.46.14 Phase C-3：差分通知用に書込前 saveHistory snapshot を保持
   let _phaseC3PrevHistory = null;
@@ -74,6 +88,7 @@ async function _setStorageWithHistoryMirror(setObj) {
     catch (_) { _phaseC3PrevHistory = []; }
   }
   // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
+  // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -82,14 +97,14 @@ async function _setStorageWithHistoryMirror(setObj) {
       await browser.storage.local.set(rest);
     }
     if (Array.isArray(saveHistory)) {
-      try { await _mirrorSaveHistoryToIDB(saveHistory); }
-      catch (err) { console.warn("[Phase C-2] saveHistory IDB write 失敗", err); }
+      try { await _mirrorSaveHistoryToIDB(saveHistory, { allowEmpty: options.allowEmpty }); }
+      catch (err) { console.error("[Phase C-2] saveHistory IDB write 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   } else {
     await browser.storage.local.set(setObj);
     if (Array.isArray(setObj.saveHistory)) {
-      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory); }
-      catch (err) { console.warn("[Phase C-1] saveHistory IDB mirror 失敗", err); }
+      try { await _mirrorSaveHistoryToIDB(setObj.saveHistory, { allowEmpty: options.allowEmpty }); }
+      catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
   // v1.46.14 Phase C-3：書込後に diff を計算して emit
@@ -182,9 +197,12 @@ async function _readSaveHistory() {
       });
       return entries;
     } catch (err) {
-      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local fallback", err);
+      console.warn("[Phase C-2] saveHistory IDB read 失敗、storage.local 代替読込を試行", err);
       const stored = await browser.storage.local.get("saveHistory");
-      return stored.saveHistory || [];
+      if (Array.isArray(stored.saveHistory)) return stored.saveHistory;
+      // v1.46.37 GROUP-107 候補1：migrated 状態で IDB read 失敗かつ storage.local 代替も不在。
+      // ここで [] を返すと read-modify-write 経路が空配列を書戻し全消失するため、throw して中断する。
+      throw new Error("[_readSaveHistory] IDB read 失敗かつ storage.local 代替不在。空配列 write-back による全消失を防ぐため中断");
     }
   }
   const stored = await browser.storage.local.get("saveHistory");
@@ -2882,7 +2900,9 @@ function setupHistoryTab() {
     try {
       const allHist = await _readSaveHistory();
       const history = allHist.filter(e => !_histSelected.has(e.id));
-      await _setStorageWithHistoryMirror({ saveHistory: history });
+      // v1.46.37 GROUP-107：全選択削除は正当な空配列となり得るため allowEmpty:true。
+      // 直前の _readSaveHistory が IDB read 失敗時は throw（候補1）するため、空配列は実データ由来に限られる。
+      await _setStorageWithHistoryMirror({ saveHistory: history }, { allowEmpty: true });
       _histSelected.clear();
       await renderHistoryTab();
       completeBusyModal(`${n} 件削除しました`);
@@ -3757,7 +3777,16 @@ function setupHistoryTab() {
 // @spec 設計書類/画面別/01_設定画面_保存履歴タブ_詳細.md
 async function renderHistoryTab() {
   // v1.45.5 Phase C-2: saveHistory は migration aware
-  const _hist = await _readSaveHistory();
+  // v1.46.37 GROUP-107 候補1 対応：read 失敗（IDB read 失敗かつ代替不在で throw）時は
+  // 空表示せず明示エラーを出して中断する（誤った「全消失」表示でユーザーを動揺させない）。
+  let _hist;
+  try {
+    _hist = await _readSaveHistory();
+  } catch (err) {
+    console.error("[GROUP-107] renderHistoryTab: saveHistory 読込失敗、空表示を回避して中断", err);
+    try { showStatus("保存履歴の読込に失敗しました。ページを再読込してください（データは保持されています）", true); } catch (_) {}
+    return;
+  }
   const stored = { saveHistory: _hist, ...(await browser.storage.local.get([
     "settingsHistoryPageSize",
     // v1.46.8 GROUP-67：保存履歴フィルター 4 要素の永続値も同時取得

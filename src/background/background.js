@@ -1479,7 +1479,7 @@ async function updateHistoryEntryTags(id, newTags) {
     const idx     = history.findIndex(e => e.id === id);
     if (idx === -1) return { ok: false };
     history[idx]  = { ...history[idx], tags: newTags };
-    await _setStorageWithHistoryMirror({ saveHistory: history });
+    await _setStorageWithHistoryMirror({ saveHistory: history }, { changedIds: [id] }); // v1.46.38 GROUP-118
     return { ok: true };
   });
 }
@@ -1502,7 +1502,7 @@ async function updateHistoryEntry(id, newTags, newAuthors, newSavePaths) {
       saveHistory:   history,
       globalTags:    [...gTagSet],
       globalAuthors: [...gAuthorSet],
-    });
+    }, { changedIds: [id] }); // v1.46.38 GROUP-118
     return { ok: true };
   });
 }
@@ -1850,14 +1850,9 @@ async function _mirrorSaveHistoryToIDB(history, options = {}) {
 // @spec 設計書類/共通/D_IndexedDB_スキーマ.md
 async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
-  // v1.46.14 Phase C-3：差分通知用に書込前 saveHistory snapshot を保持
-  // re-read してから書込み、書込後に id ベース diff を計算して HISTORY_ENTRY_ADDED/UPDATED/DELETED を emit
-  let _phaseC3PrevHistory = null;
-  if (Array.isArray(setObj.saveHistory)) {
-    try { _phaseC3PrevHistory = await _readSaveHistory(); }
-    catch (_) { _phaseC3PrevHistory = []; }
-  }
   // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
+  // v1.46.38 GROUP-118：差分用 snapshot 再読込（旧 _readSaveHistory）を撤去し getAll 二重を解消。
+  //   変更通知は呼出側供給の options.{changedIds,addedIds,removedIds} で行う（_emitSaveHistoryChange）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -1876,49 +1871,40 @@ async function _setStorageWithHistoryMirror(setObj, options = {}) {
       catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
-  // v1.46.14 Phase C-3：書込後に diff を計算して emit
-  if (_phaseC3PrevHistory !== null && Array.isArray(setObj.saveHistory)) {
-    _emitSaveHistoryDiff(_phaseC3PrevHistory, setObj.saveHistory);
+  // v1.46.38 GROUP-118：書込後に変更通知（全件 stringify diff を廃止）
+  if (Array.isArray(setObj.saveHistory)) {
+    _emitSaveHistoryChange(options);
   }
 }
 
-// v1.46.14 GROUP-35-perf-A Phase C-3：
-// 書込前 prevHistory と書込後 newHistory を id 一致で diff 計算し、
-// HISTORY_ENTRY_ADDED / HISTORY_ENTRY_UPDATED / HISTORY_ENTRY_DELETED を runtime.sendMessage で emit。
-// payload は {type, id, senderId} のみ（数十 byte）、受信側は通知 id を元に IDB から該当 entry を再取得して DOM 更新。
-// UPDATED 検出は JSON 内容比較（reference 比較は cross-context で常に異なるため不可）。
-// senderId は自 context の emit を listener で skip するため。
+// v1.46.14 Phase C-3 / v1.46.38 GROUP-118：
+// 旧実装は書込前後の全件を JSON.stringify で diff 計算していたが、履歴件数 N に比例した
+// O(N) の stringify churn（Firefox Profiler 実測 3.2GB、WebExtensions プロセス）の主因だったため廃止。
+// 呼出側が変更内容を渡し、その id だけ通知する。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
+//   options.changedIds : 内容更新された id（UPDATED）
+//   options.addedIds   : 追加された id（ADDED）
+//   options.removedIds : 削除された id（DELETED）
+//   いずれも未指定 → full=true 信号（受信側で全件 rebuild、stale 防止の安全 fallback）
+// payload は {type, id, senderId(, full)} のみ（数十 byte）、senderId は自 context emit の skip 用。
 const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `bg-${Date.now()}-${Math.random()}`;
-function _emitSaveHistoryDiff(prevHistory, newHistory) {
+function _emitSaveHistoryChange(options = {}) {
   try {
-    const prevMap = new Map();
-    for (const e of prevHistory) if (e && e.id) prevMap.set(e.id, e);
-    const newMap = new Map();
-    for (const e of newHistory) if (e && e.id) newMap.set(e.id, e);
-    // ADDED
-    for (const id of newMap.keys()) {
-      if (!prevMap.has(id)) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_ADDED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
+    const _send = (type, id, extra) => {
+      try { browser.runtime.sendMessage(Object.assign({ type, id, senderId: _phaseC3SenderId }, extra || {})).catch(() => {}); } catch (_) {}
+    };
+    const added   = options.addedIds   ? Array.from(options.addedIds).filter(Boolean)   : [];
+    const changed = options.changedIds ? Array.from(options.changedIds).filter(Boolean) : [];
+    const removed = options.removedIds ? Array.from(options.removedIds).filter(Boolean) : [];
+    if (added.length === 0 && changed.length === 0 && removed.length === 0) {
+      // 変更 id 不明：全件 rebuild を促す安全 fallback（stale 防止優先）
+      _send("HISTORY_ENTRY_UPDATED", null, { full: true });
+      return;
     }
-    // UPDATED（JSON 比較で内容差分を検出）
-    for (const [id, newEntry] of newMap) {
-      const prevEntry = prevMap.get(id);
-      if (!prevEntry) continue;
-      let changed = false;
-      try { changed = JSON.stringify(prevEntry) !== JSON.stringify(newEntry); } catch (_) { changed = true; }
-      if (changed) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_UPDATED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
-    }
-    // DELETED
-    for (const id of prevMap.keys()) {
-      if (!newMap.has(id)) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_DELETED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
-    }
+    for (const id of added)   _send("HISTORY_ENTRY_ADDED",   id);
+    for (const id of changed) _send("HISTORY_ENTRY_UPDATED", id);
+    for (const id of removed) _send("HISTORY_ENTRY_DELETED", id);
   } catch (err) {
-    console.warn("[Phase C-3] _emitSaveHistoryDiff 失敗", err);
+    console.warn("[Phase C-3] _emitSaveHistoryChange 失敗", err);
   }
 }
 
@@ -2798,17 +2784,31 @@ function _roughJsonSize(v) {
   return 0;
 }
 
-/** storage.local と IndexedDB の使用容量を返す */
+/** 保存履歴の件数と IndexedDB サムネイルの使用容量を返す */
 async function getStorageSize() {
-  // storage.local
+  // 保存履歴
+  // v1.46.38 GROUP-118：旧実装は storage.local.get(null) で legacy バックアップ含む storage 全体を
+  //   毎 render でメモリ展開＋再帰走査していた。移送後の実 saveHistory は IDB 在のため、IDB saveHistory
+  //   ストアの件数を count() で測る（blob 非読込・軽量）。get(null) は廃止。legacy バックアップは保持。
+  //   未移送時のみ storage.local の saveHistory 件数。GROUP-116-A の誤指標（storage.local 総量）是正。
   let storageSizeStr = "不明";
   try {
-    const all   = await browser.storage.local.get(null);
-    // v1.31.9：巨大 storage を 1 回で JSON 化せず、key 別再帰推定で近似
-    const bytes = _roughJsonSize(all);
-    storageSizeStr = bytes < 1024 * 1024
-      ? `${(bytes / 1024).toFixed(1)} KB`
-      : `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+    if (status.saveHistoryMigrationStatus === "migrated") {
+      const db = await openThumbDB();
+      const n  = await new Promise((resolve, reject) => {
+        const tx  = db.transaction(IDB_HISTORY_STORE, "readonly");
+        const req = tx.objectStore(IDB_HISTORY_STORE).count();
+        req.onsuccess = (e) => resolve(e.target.result || 0);
+        req.onerror   = (e) => reject(e.target.error);
+      });
+      storageSizeStr = `${n} 件（IndexedDB）`;
+    } else {
+      // 未移送：migration aware helper 経由で件数取得（直接 storage.local 読みは migration leak になるため避ける）
+      const arr = await _readSaveHistory();
+      const n = Array.isArray(arr) ? arr.length : 0;
+      storageSizeStr = `${n} 件`;
+    }
   } catch {}
 
   // IndexedDB（全サムネイル blob の合計）

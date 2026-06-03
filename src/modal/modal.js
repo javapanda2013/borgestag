@@ -67,14 +67,10 @@ async function _mirrorSaveHistoryToIDB(history, options = {}) {
 
 async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
-  // v1.46.14 Phase C-3：差分通知用に書込前 saveHistory snapshot を保持
-  let _phaseC3PrevHistory = null;
-  if (Array.isArray(setObj.saveHistory)) {
-    try { _phaseC3PrevHistory = await _readSaveHistory(); }
-    catch (_) { _phaseC3PrevHistory = []; }
-  }
   // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
   // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
+  // v1.46.38 GROUP-118：差分用 snapshot 再読込（旧 _readSaveHistory）を撤去し getAll 二重を解消。
+  //   変更通知は呼出側供給の options.{changedIds,addedIds,removedIds} で行う（_emitSaveHistoryChange）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -93,43 +89,39 @@ async function _setStorageWithHistoryMirror(setObj, options = {}) {
       catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
-  // v1.46.14 Phase C-3：書込後に diff を計算して emit
-  if (_phaseC3PrevHistory !== null && Array.isArray(setObj.saveHistory)) {
-    _emitSaveHistoryDiff(_phaseC3PrevHistory, setObj.saveHistory);
+  // v1.46.38 GROUP-118：書込後に変更通知（全件 stringify diff を廃止）
+  if (Array.isArray(setObj.saveHistory)) {
+    _emitSaveHistoryChange(options);
   }
 }
 
-// v1.46.14 GROUP-35-perf-A Phase C-3：
-// 書込前 prevHistory と書込後 newHistory を id 一致で diff 計算し、
-// HISTORY_ENTRY_ADDED / HISTORY_ENTRY_UPDATED / HISTORY_ENTRY_DELETED を runtime.sendMessage で emit。
+// v1.46.14 Phase C-3 / v1.46.38 GROUP-118：
+// 旧実装は書込前後の全件を JSON.stringify で diff 計算していたが、履歴件数 N に比例した
+// O(N) の stringify churn（Firefox Profiler 実測 3.2GB）の主因だったため廃止。
+// 呼出側が変更内容を渡し、その id だけ通知する。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
+//   options.changedIds : 内容更新された id（UPDATED）
+//   options.addedIds   : 追加された id（ADDED）
+//   options.removedIds : 削除された id（DELETED）
+//   いずれも未指定 → full=true 信号（受信側で全件 rebuild、stale 防止の安全 fallback）
 const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `modal-${Date.now()}-${Math.random()}`;
-function _emitSaveHistoryDiff(prevHistory, newHistory) {
+function _emitSaveHistoryChange(options = {}) {
   try {
-    const prevMap = new Map();
-    for (const e of prevHistory) if (e && e.id) prevMap.set(e.id, e);
-    const newMap = new Map();
-    for (const e of newHistory) if (e && e.id) newMap.set(e.id, e);
-    for (const id of newMap.keys()) {
-      if (!prevMap.has(id)) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_ADDED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
+    const _send = (type, id, extra) => {
+      try { browser.runtime.sendMessage(Object.assign({ type, id, senderId: _phaseC3SenderId }, extra || {})).catch(() => {}); } catch (_) {}
+    };
+    const added   = options.addedIds   ? Array.from(options.addedIds).filter(Boolean)   : [];
+    const changed = options.changedIds ? Array.from(options.changedIds).filter(Boolean) : [];
+    const removed = options.removedIds ? Array.from(options.removedIds).filter(Boolean) : [];
+    if (added.length === 0 && changed.length === 0 && removed.length === 0) {
+      // 変更 id 不明：全件 rebuild を促す安全 fallback（stale 防止優先）
+      _send("HISTORY_ENTRY_UPDATED", null, { full: true });
+      return;
     }
-    for (const [id, newEntry] of newMap) {
-      const prevEntry = prevMap.get(id);
-      if (!prevEntry) continue;
-      let changed = false;
-      try { changed = JSON.stringify(prevEntry) !== JSON.stringify(newEntry); } catch (_) { changed = true; }
-      if (changed) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_UPDATED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
-    }
-    for (const id of prevMap.keys()) {
-      if (!newMap.has(id)) {
-        try { browser.runtime.sendMessage({ type: "HISTORY_ENTRY_DELETED", id, senderId: _phaseC3SenderId }).catch(() => {}); } catch (_) {}
-      }
-    }
+    for (const id of added)   _send("HISTORY_ENTRY_ADDED",   id);
+    for (const id of changed) _send("HISTORY_ENTRY_UPDATED", id);
+    for (const id of removed) _send("HISTORY_ENTRY_DELETED", id);
   } catch (err) {
-    console.warn("[Phase C-3] _emitSaveHistoryDiff 失敗", err);
+    console.warn("[Phase C-3] _emitSaveHistoryChange 失敗", err);
   }
 }
 
@@ -139,11 +131,15 @@ function _emitSaveHistoryDiff(prevHistory, newHistory) {
 // 発火時に renderHistory に渡して smart reuse を強制 rebuild させる。
 let _phaseC3HistoryRefreshTimer = null;
 let _phaseC3PendingIds = new Set();
-function _phaseC3ScheduleHistoryRefresh(targetId) {
+let _phaseC3PendingFull = false; // v1.46.38 GROUP-118：変更 id 不明（full 信号）時は全件 rebuild
+function _phaseC3ScheduleHistoryRefresh(targetId, isFull) {
+  if (isFull) _phaseC3PendingFull = true;
   if (targetId) _phaseC3PendingIds.add(targetId);
   if (_phaseC3HistoryRefreshTimer) return;
   _phaseC3HistoryRefreshTimer = setTimeout(async () => {
     _phaseC3HistoryRefreshTimer = null;
+    const full = _phaseC3PendingFull;
+    _phaseC3PendingFull = false;
     const ids = new Set(_phaseC3PendingIds);
     _phaseC3PendingIds.clear();
     try {
@@ -156,8 +152,8 @@ function _phaseC3ScheduleHistoryRefresh(targetId) {
           // 更新＋再描画する。
           if (typeof window.__modalSetSaveHistory === "function" && typeof window.__modalRenderHistory === "function") {
             window.__modalSetSaveHistory(r.saveHistory);
-            // targetIds を window 経由で renderHistory へ伝達（smart reuse 用 force rebuild Set）
-            window.__phaseC3OptForceRebuildIds = ids;
+            // v1.46.38 GROUP-118：full 信号時は null（全件 clear+rebuild）、それ以外は変更 id Set（smart reuse）
+            window.__phaseC3OptForceRebuildIds = full ? null : ids;
             window.__modalRenderHistory();
             window.__phaseC3OptForceRebuildIds = null;
           }
@@ -172,7 +168,7 @@ browser.runtime.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
   if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
-    _phaseC3ScheduleHistoryRefresh(msg.id);
+    _phaseC3ScheduleHistoryRefresh(msg.id, msg.full === true);
   }
 });
 

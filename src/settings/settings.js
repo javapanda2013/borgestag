@@ -5336,6 +5336,44 @@ function _setupNonGifThumbInPlaceholder(card, entry, onThumbClick) {
 let _gifWorker = null;
 let _gifSessionSeq = 0;
 const _gifSessions = new Map();
+
+// v1.46.42 GROUP-118：GIF タイルの viewport gate。画面外のタイルは再生を止め、
+// 表示中のタイルだけ再生して継続 churn（RefreshDriver/Paint/decode）を削減する。
+// pool の dormant(canvas=null)/rebind/eviction には干渉せず、再生スケジュールのみを gate。
+function _gifResumeIfNeeded(sess) {
+  if (!sess || !sess.paused || !sess.ready || !sess.canvas) return;
+  if ((typeof document !== "undefined" && document.hidden) || sess.visible === false) return;
+  sess.paused = false;
+  if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: sess.currentIndex || 0 });
+}
+let _gifVisibilityObserver = null;
+function _getGifVisibilityObserver() {
+  if (_gifVisibilityObserver || typeof IntersectionObserver === "undefined") return _gifVisibilityObserver;
+  _gifVisibilityObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const sid = e.target && e.target.dataset ? e.target.dataset.gifSessionId : null;
+      if (!sid) continue;
+      const sess = _gifSessions.get(Number(sid));
+      if (!sess) continue;
+      sess.visible = !!e.isIntersecting;
+      if (sess.visible) _gifResumeIfNeeded(sess);
+    }
+  }, { root: null, rootMargin: "150px" });
+  return _gifVisibilityObserver;
+}
+function _observeGifCanvas(canvas) {
+  const io = _getGifVisibilityObserver();
+  if (io && canvas) { try { io.observe(canvas); } catch (_) {} }
+}
+function _unobserveGifCanvas(canvas) {
+  if (_gifVisibilityObserver && canvas) { try { _gifVisibilityObserver.unobserve(canvas); } catch (_) {} }
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    for (const sess of _gifSessions.values()) _gifResumeIfNeeded(sess);
+  });
+}
 // session = { id, canvas, ctx, ready, frameCount, dims, currentIndex, timerId, entryId, thumbId }
 // v1.41.3 GROUP-43 Phase 2-pool：thumbId → session の secondary index（LRU 順）
 // DOM 除去時に Worker session を destroy せず dormant 保持し、同 thumbId 再表示時に
@@ -5429,11 +5467,19 @@ function _onGifWorkerMessage(e) {
     const nextIndex = (msg.index + 1) % (sess.frameCount || 1);
     sess.currentIndex = nextIndex;
     if (sess.canvas) {
-      sess.timerId = setTimeout(() => {
-        if (!_gifSessions.has(sess.id)) return;
-        if (sess.canvas == null) return; // dormant 化されたら停止
-        if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: nextIndex });
-      }, msg.delay || 100);
+      // v1.46.42 GROUP-118：画面外（IntersectionObserver で visible=false）/ タブ非表示は
+      // 次フレームを要求せず一時停止（paused）。継続的な decode/drawImage/repaint churn を削減。
+      if (sess.visible === false || (typeof document !== "undefined" && document.hidden)) {
+        sess.paused = true;
+      } else {
+        sess.paused = false;
+        sess.timerId = setTimeout(() => {
+          if (!_gifSessions.has(sess.id)) return;
+          if (sess.canvas == null) return; // dormant 化されたら停止
+          if (sess.visible === false || (typeof document !== "undefined" && document.hidden)) { sess.paused = true; return; }
+          if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: nextIndex });
+        }, msg.delay || 100);
+      }
     }
   } else if (msg.type === "ERROR") {
     console.warn("[gif-worker] session error", msg.id, msg.message);
@@ -5455,6 +5501,9 @@ async function _initGifTile(canvas, entry) {
     cached.ctx = canvas.getContext("2d");
     cached.entryId = entry.id; // entry id は変わる可能性あり（同じ thumbId を別 entry が参照）
     canvas.dataset.gifSessionId = String(cached.id);
+    // v1.46.42 GROUP-118：再表示時は再生可能状態に戻し、新 canvas を viewport 監視へ登録
+    cached.visible = true; cached.paused = false;
+    _observeGifCanvas(canvas);
     if (cached.dims) {
       canvas.width  = cached.dims.width;
       canvas.height = cached.dims.height;
@@ -5474,10 +5523,14 @@ async function _initGifTile(canvas, entry) {
     currentIndex: 0, timerId: null,
     entryId: entry.id,
     thumbId: entry.thumbId, // v1.41.3：pool eviction で同 sess を _gifSessionsByThumbId からも消すため
+    // v1.46.42 GROUP-118：viewport/visibility gate。画面外・タブ非表示では次フレーム要求を止め
+    // （paused=true）、再表示時に resume。pool の dormant(canvas=null)/rebind には非干渉。
+    visible: true, paused: false,
   };
   _gifSessions.set(id, sess);
   _gifThumbCachePut(entry.thumbId, sess);
   canvas.dataset.gifSessionId = String(id);
+  _observeGifCanvas(canvas); // v1.46.42 GROUP-118：viewport 監視へ登録
   let binResp;
   try {
     binResp = await browser.runtime.sendMessage({
@@ -5517,6 +5570,7 @@ function _destroyGifSession(id) {
     try { clearTimeout(sess.timerId); } catch (_) {}
     sess.timerId = null;
   }
+  if (sess.canvas) _unobserveGifCanvas(sess.canvas); // v1.46.42 GROUP-118：viewport 監視解除
   _gifSessions.delete(id);
   // v1.41.3：thumbId secondary index からも削除
   if (sess.thumbId && _gifSessionsByThumbId.get(sess.thumbId) === sess) {
@@ -5561,8 +5615,10 @@ function _destroyGifSessionsInTree(rootEl) {
       try { clearTimeout(sess.timerId); } catch (_) {}
       sess.timerId = null;
     }
+    _unobserveGifCanvas(cv); // v1.46.42 GROUP-118：dormant 化する旧 canvas を viewport 監視から外す
     sess.canvas = null;
     sess.ctx = null;
+    sess.paused = true; // dormant 中は再生停止扱い（rebind 時に visible/paused をリセット）
     try { delete cv.dataset.gifSessionId; } catch (_) {}
   }
 }

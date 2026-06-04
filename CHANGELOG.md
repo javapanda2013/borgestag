@@ -5,6 +5,20 @@
 
 ---
 
+## [1.46.42] - 2026-06-04
+
+### Performance — 設定画面の保存履歴で、画面外の GIF サムネ再生を停止しメモリ・描画負荷を軽減
+
+保存履歴の件数が多い環境で、設定画面の保存履歴タブを開いている間ずっとメモリ・CPU 負荷が高い問題に対処しました。Firefox プロファイラでの計測で、保存履歴のグリッドに並ぶ GIF サムネイルが、画面に映っていないものも含めて全件ずっと再生され続け、継続的な再描画・デコードが発生していたことが要因の一つと判明しました。
+
+- GIF サムネイルの再生を「画面内に表示されているサムネイルだけ」に限定しました（画面外にスクロールしたサムネイルは再生を一時停止し、再表示で自動再開）。
+- タブが非表示（他タブ表示中・最小化等）の間は、すべての GIF サムネ再生を一時停止します。
+- 内部のサムネ再利用（dormant 保持・再バインド）の仕組みには手を加えず、再生スケジュールのみを制御しています。
+
+[design-doc-skip: 設定画面 保存履歴の GIF サムネ canvas 再生に viewport/visibility gate を追加したのみ（IntersectionObserver + visibilitychange）。新規 storage key・manifest 権限・IDB schema の変更なし。GIF session pool の rebind/cleanup/eviction には非干渉。プロファイラ実測の RefreshDriver/Paint/Animation churn 対策。残：全件 getAll（Q-118-5）と Reflow(sync)（task #20）は別途]
+
+---
+
 ## [1.46.41] - 2026-06-04
 
 ### Performance — 別ウィンドウ自動同期の再描画を差分化し、操作反映後のメモリ増大を解消

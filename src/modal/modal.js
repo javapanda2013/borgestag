@@ -131,15 +131,11 @@ function _emitSaveHistoryChange(options = {}) {
 // 発火時に renderHistory に渡して smart reuse を強制 rebuild させる。
 let _phaseC3HistoryRefreshTimer = null;
 let _phaseC3PendingIds = new Set();
-let _phaseC3PendingFull = false; // v1.46.38 GROUP-118：変更 id 不明（full 信号）時は全件 rebuild
-function _phaseC3ScheduleHistoryRefresh(targetId, isFull) {
-  if (isFull) _phaseC3PendingFull = true;
+function _phaseC3ScheduleHistoryRefresh(targetId) {
   if (targetId) _phaseC3PendingIds.add(targetId);
   if (_phaseC3HistoryRefreshTimer) return;
   _phaseC3HistoryRefreshTimer = setTimeout(async () => {
     _phaseC3HistoryRefreshTimer = null;
-    const full = _phaseC3PendingFull;
-    _phaseC3PendingFull = false;
     const ids = new Set(_phaseC3PendingIds);
     _phaseC3PendingIds.clear();
     try {
@@ -152,8 +148,13 @@ function _phaseC3ScheduleHistoryRefresh(targetId, isFull) {
           // 更新＋再描画する。
           if (typeof window.__modalSetSaveHistory === "function" && typeof window.__modalRenderHistory === "function") {
             window.__modalSetSaveHistory(r.saveHistory);
-            // v1.46.38 GROUP-118：full 信号時は null（全件 clear+rebuild）、それ以外は変更 id Set（smart reuse）
-            window.__phaseC3OptForceRebuildIds = full ? null : ids;
+            // v1.46.39 GROUP-118：cross-context refresh は常に smart reuse（Set を渡す）。
+            //   蓄積した変更 id があればそのタイルを rebuild、無ければ空 Set。
+            //   空 Set でも smart reuse が 追加/削除/サムネ変更 を処理する（内容のみ変更は呼出側
+            //   changedIds 供給で反映、未供給時のみ稀に次 refresh まで待ち）。
+            //   旧 v1.46.38 は full 信号で null（全タイル rebuild）を渡し、5531 件規模で
+            //   5.5 秒の LongTask/フリーズを招いた。常に Set 化してこれを廃止（回帰 hotfix）。
+            window.__phaseC3OptForceRebuildIds = ids;
             window.__modalRenderHistory();
             window.__phaseC3OptForceRebuildIds = null;
           }
@@ -168,7 +169,7 @@ browser.runtime.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
   if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
-    _phaseC3ScheduleHistoryRefresh(msg.id, msg.full === true);
+    _phaseC3ScheduleHistoryRefresh(msg.id); // full 信号は id=null → 空 Set に帰着（smart reuse）
   }
 });
 

@@ -2980,8 +2980,9 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
 
   // 上限なし（storage.local の容量制限のみ）
 
+  const _newEntryId = crypto.randomUUID(); // v1.46.39 GROUP-118：追加 id を変更通知へ供給（保存ごとの全 rebuild=フリーズ回避）
   history.unshift({
-    id:           crypto.randomUUID(),
+    id:           _newEntryId,
     imageUrl,
     pageUrl:      pageUrl       || null,
     thumbId,
@@ -3016,7 +3017,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     saveHistory:   history,
     globalAuthors: mergedGlobalAuthors,
     recentAuthors: mergedRecentAuthors,
-  });
+  }, { addedIds: [_newEntryId] }); // v1.46.39 GROUP-118：保存は追加 1 件のみ通知（全 rebuild 回避）
   // v1.41.6:保存毎の `storage.local.get(null) + JSON.stringify` 使用量ログ削除済。
 }
 

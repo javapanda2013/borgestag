@@ -399,6 +399,10 @@ async function handleAsyncMessage(message, sender) {
     // ---- 保存履歴 ----
     case "GET_SAVE_HISTORY":
       return getSaveHistory();
+    case "GET_HISTORY_ENTRY":
+      // v1.46.41 GROUP-118：cross-context refresh の差分化。単一 entry を migration aware に返す
+      // （全件配列のプロセス間転送＝StructuredCloneHolder 主因を回避）。
+      return _getHistoryEntryById(message.id).then(entry => ({ entry: entry || null }));
     case "UPDATE_HISTORY_ENTRY_TAGS":
       return updateHistoryEntryTags(message.id, message.tags);
     case "UPDATE_HISTORY_ENTRY":

@@ -171,18 +171,49 @@ function _emitSaveHistoryChange(options = {}) {
 // 真の entry レベル DOM 部分更新は Phase C-3-opt で対応予定）。
 // _historyData / renderHistoryGrid は本ファイル後段で定義されており、listener 発火時には参照可能。
 let _phaseC3HistoryRefreshTimer = null;
-function _phaseC3ScheduleHistoryRefresh() {
+let _phaseC3PendingUpsertIds = new Set();
+let _phaseC3PendingRemoveIds = new Set();
+let _phaseC3FullRefreshNeeded = false;
+// v1.46.41 GROUP-118：cross-context refresh の差分化。旧実装は変更通知のたびに
+// _readSaveHistory()（IDB 全件 getAll）+ renderHistoryGrid 全件再描画していた。
+// 移送済では変更/追加 id のみ単一 entry を取得して _historyData を in-place patch
+// （savedAt 降順ソートで全件 read と同一順序を保証）、削除 id は配列から除去する。
+// full 信号（import/移送 bulk）と未移送は従来どおり全件 read にフォールバックする。
+function _phaseC3ScheduleHistoryRefresh(targetId, kind) {
+  if (kind === "full") {
+    _phaseC3FullRefreshNeeded = true;
+  } else if (kind === "delete") {
+    if (targetId) _phaseC3PendingRemoveIds.add(targetId);
+  } else {
+    if (targetId) _phaseC3PendingUpsertIds.add(targetId);
+  }
   if (_phaseC3HistoryRefreshTimer) return;
   _phaseC3HistoryRefreshTimer = setTimeout(async () => {
     _phaseC3HistoryRefreshTimer = null;
+    const upsertIds = Array.from(_phaseC3PendingUpsertIds);
+    const removeIds = Array.from(_phaseC3PendingRemoveIds);
+    const fullNeeded = _phaseC3FullRefreshNeeded;
+    _phaseC3PendingUpsertIds.clear();
+    _phaseC3PendingRemoveIds.clear();
+    _phaseC3FullRefreshNeeded = false;
     try {
-      const fresh = await _readSaveHistory();
-      if (Array.isArray(fresh)) {
-        // _historyData は本ファイル top-level let 変数、setter 関数経由で書換
-        if (typeof _phaseC3SetHistoryData === "function") {
+      const status   = await browser.storage.local.get("saveHistoryMigrationStatus");
+      const migrated = status.saveHistoryMigrationStatus === "migrated";
+      // full 信号 or 未移送：全件 read（従来挙動）
+      if (fullNeeded || !migrated) {
+        const fresh = await _readSaveHistory();
+        if (Array.isArray(fresh) && typeof _phaseC3SetHistoryData === "function") {
           _phaseC3SetHistoryData(fresh);
         }
+        return;
       }
+      // 移送済の差分 refresh：変更/追加 id は単一 entry 取得、削除 id は配列から除去
+      const upsertEntries = [];
+      for (const id of upsertIds) {
+        const entry = await _getHistoryEntryById(id);
+        if (entry) upsertEntries.push(entry);
+      }
+      _phaseC3PatchHistoryData(upsertEntries, removeIds);
     } catch (err) {
       console.warn("[Phase C-3] settings history refresh failed", err);
     }
@@ -191,8 +222,11 @@ function _phaseC3ScheduleHistoryRefresh() {
 browser.runtime.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
-  if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
-    _phaseC3ScheduleHistoryRefresh();
+  if (msg.type === "HISTORY_ENTRY_DELETED") {
+    _phaseC3ScheduleHistoryRefresh(msg.id, "delete");
+  } else if (msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_ADDED") {
+    if (msg.full || !msg.id) _phaseC3ScheduleHistoryRefresh(null, "full");
+    else _phaseC3ScheduleHistoryRefresh(msg.id, "upsert");
   }
 });
 
@@ -226,6 +260,24 @@ async function _readSaveHistory() {
   }
   const stored = await browser.storage.local.get("saveHistory");
   return stored.saveHistory || [];
+}
+
+// v1.46.41 GROUP-118：単一 entry を migration aware に取得（cross-context 差分 refresh 用、
+// 全件 getAll を避ける）。migrated は IDB の該当 record、未移送は storage.local から find。
+async function _getHistoryEntryById(id) {
+  if (!id) return null;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    const db = await _phaseC1OpenDB();
+    return await new Promise((resolve, reject) => {
+      const tx  = db.transaction(_PHASE_C1_HISTORY_STORE, "readonly");
+      const req = tx.objectStore(_PHASE_C1_HISTORY_STORE).get(id);
+      req.onsuccess = (e) => resolve(e.target.result || null);
+      req.onerror   = (e) => reject(e.target.error);
+    });
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return (Array.isArray(stored.saveHistory) ? stored.saveHistory : []).find(e => e && e.id === id) || null;
 }
 
 // v1.45.5 Phase C-2: migration ボタンの実行ロジック
@@ -2273,6 +2325,25 @@ let _historyData = [];
 function _phaseC3SetHistoryData(fresh) {
   _historyData = fresh;
   _currentFilteredHistory = null; // 絞り込み再適用は renderHistoryGrid 側で
+  if (typeof renderHistoryGrid === "function") {
+    try { renderHistoryGrid(); } catch (err) { console.warn("[Phase C-3] renderHistoryGrid 失敗", err); }
+  }
+}
+// v1.46.41 GROUP-118：cross-context 差分 refresh。upsertEntries を Map upsert、removeIds を除去し、
+// savedAt 降順ソート（_readSaveHistory 移送済と同順）で全件 read と同一順序の _historyData に再構成。
+// これにより renderHistoryGrid 挙動は全件 read と不変。
+function _phaseC3PatchHistoryData(upsertEntries, removeIds) {
+  const byId = new Map((_historyData || []).filter(e => e && e.id).map(e => [e.id, e]));
+  for (const e of (upsertEntries || [])) if (e && e.id) byId.set(e.id, e);
+  for (const id of (removeIds || [])) byId.delete(id);
+  const arr = Array.from(byId.values());
+  arr.sort((a, b) => {
+    const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+    const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+    return tb - ta;
+  });
+  _historyData = arr;
+  _currentFilteredHistory = null;
   if (typeof renderHistoryGrid === "function") {
     try { renderHistoryGrid(); } catch (err) { console.warn("[Phase C-3] renderHistoryGrid 失敗", err); }
   }

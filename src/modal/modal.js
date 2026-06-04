@@ -148,30 +148,62 @@ function _emitSaveHistoryChange(options = {}) {
 // v1.46.15 GROUP-72 Phase C-3-opt：targetIds を debounce window で coalesce、
 // 発火時に renderHistory に渡して smart reuse を強制 rebuild させる。
 let _phaseC3HistoryRefreshTimer = null;
-let _phaseC3PendingIds = new Set();
-function _phaseC3ScheduleHistoryRefresh(targetId) {
-  if (targetId) _phaseC3PendingIds.add(targetId);
+let _phaseC3PendingUpsertIds = new Set();
+let _phaseC3PendingRemoveIds = new Set();
+let _phaseC3FullRefreshNeeded = false;
+// v1.46.41 GROUP-118：cross-context refresh の差分化。
+// 旧実装は変更通知のたびに GET_SAVE_HISTORY で saveHistory 全件配列をプロセス間転送していた
+// （StructuredCloneHolder.deserialize が約 320MB／プロファイラ実測、反映後メモリ最大 8GB の主因）。
+// 移送済では変更/追加 id のみ単一 entry を取得して local 配列を in-place patch し（savedAt 降順
+// ソートで全件 GET と同一順序を保証 → renderHistory 挙動は不変）、削除 id は配列から除去する。
+// full 信号（import/移送 bulk）と未移送（storage.local 順は無ソートで再現が脆い）は従来どおり
+// 全件 GET にフォールバックする。
+function _phaseC3ScheduleHistoryRefresh(targetId, kind) {
+  if (kind === "full") {
+    _phaseC3FullRefreshNeeded = true;
+  } else if (kind === "delete") {
+    if (targetId) _phaseC3PendingRemoveIds.add(targetId);
+  } else {
+    if (targetId) _phaseC3PendingUpsertIds.add(targetId);
+  }
   if (_phaseC3HistoryRefreshTimer) return;
   _phaseC3HistoryRefreshTimer = setTimeout(async () => {
     _phaseC3HistoryRefreshTimer = null;
-    const ids = new Set(_phaseC3PendingIds);
-    _phaseC3PendingIds.clear();
+    const upsertIds = Array.from(_phaseC3PendingUpsertIds);
+    const removeIds = Array.from(_phaseC3PendingRemoveIds);
+    const fullNeeded = _phaseC3FullRefreshNeeded;
+    _phaseC3PendingUpsertIds.clear();
+    _phaseC3PendingRemoveIds.clear();
+    _phaseC3FullRefreshNeeded = false;
     try {
-      if (typeof browser !== "undefined" && browser.runtime) {
+      if (typeof browser === "undefined" || !browser.runtime) return;
+      // v1.46.16 GROUP-73 Phase C-3-fix：saveHistory / renderHistory は setupModalEvents の
+      // closure のため、expose された window アクセサ経由で更新＋再描画する。
+      if (typeof window.__modalSetSaveHistory !== "function" || typeof window.__modalRenderHistory !== "function") return;
+      const status   = await browser.storage.local.get("saveHistoryMigrationStatus");
+      const migrated = status.saveHistoryMigrationStatus === "migrated";
+      // full 信号 or 未移送：全件 GET（従来挙動）
+      if (fullNeeded || !migrated) {
         const r = await browser.runtime.sendMessage({ type: "GET_SAVE_HISTORY" });
         if (r && Array.isArray(r.saveHistory)) {
-          // v1.46.16 GROUP-73 Phase C-3-fix：saveHistory は setupModalEvents の関数
-          // パラメータ（closure）、renderHistory は同関数内ローカル定義のため、
-          // ここから直接アクセス不可。setupModalEvents が expose した window アクセサ経由で
-          // 更新＋再描画する。
-          if (typeof window.__modalSetSaveHistory === "function" && typeof window.__modalRenderHistory === "function") {
-            window.__modalSetSaveHistory(r.saveHistory);
-            // targetIds を window 経由で renderHistory へ伝達（smart reuse 用 force rebuild Set）
-            window.__phaseC3OptForceRebuildIds = ids;
-            window.__modalRenderHistory();
-            window.__phaseC3OptForceRebuildIds = null;
-          }
+          window.__modalSetSaveHistory(r.saveHistory);
+          window.__phaseC3OptForceRebuildIds = new Set([...upsertIds, ...removeIds]);
+          window.__modalRenderHistory();
+          window.__phaseC3OptForceRebuildIds = null;
         }
+        return;
+      }
+      // 移送済の差分 refresh：変更/追加 id は単一 entry 取得（全件配列の転送を回避）
+      const upsertEntries = [];
+      for (const id of upsertIds) {
+        const r = await browser.runtime.sendMessage({ type: "GET_HISTORY_ENTRY", id });
+        if (r && r.entry) upsertEntries.push(r.entry);
+      }
+      if (typeof window.__modalPatchSaveHistory === "function") {
+        window.__modalPatchSaveHistory(upsertEntries, removeIds);
+        window.__phaseC3OptForceRebuildIds = new Set([...upsertIds, ...removeIds]);
+        window.__modalRenderHistory();
+        window.__phaseC3OptForceRebuildIds = null;
       }
     } catch (err) {
       console.warn("[Phase C-3] modal history refresh failed", err);
@@ -181,8 +213,11 @@ function _phaseC3ScheduleHistoryRefresh(targetId) {
 browser.runtime.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
-  if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
-    _phaseC3ScheduleHistoryRefresh(msg.id);
+  if (msg.type === "HISTORY_ENTRY_DELETED") {
+    _phaseC3ScheduleHistoryRefresh(msg.id, "delete");
+  } else if (msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_ADDED") {
+    if (msg.full || !msg.id) _phaseC3ScheduleHistoryRefresh(null, "full");
+    else _phaseC3ScheduleHistoryRefresh(msg.id, "upsert");
   }
 });
 
@@ -3064,6 +3099,21 @@ function setupModalEvents(
   // listener は window アクセサ経由で更新と再描画を行う。
   // setupModalEvents が再呼出された場合（多重起動）は上書きで OK。
   window.__modalSetSaveHistory = (newData) => { saveHistory = newData; };
+  // v1.46.41 GROUP-118：cross-context refresh の差分 patch。upsertEntries を Map upsert、
+  // removeIds を除去し、savedAt 降順ソート（_readSaveHistory 移送済 L202-206 と同順）で
+  // 全件 GET と同一順序の配列に再構成する。これにより renderHistory 挙動は全件 GET と不変。
+  window.__modalPatchSaveHistory = (upsertEntries, removeIds) => {
+    const byId = new Map((saveHistory || []).filter(e => e && e.id).map(e => [e.id, e]));
+    for (const e of (upsertEntries || [])) if (e && e.id) byId.set(e.id, e);
+    for (const id of (removeIds || [])) byId.delete(id);
+    const arr = Array.from(byId.values());
+    arr.sort((a, b) => {
+      const ta = a && a.savedAt ? new Date(a.savedAt).getTime() : 0;
+      const tb = b && b.savedAt ? new Date(b.savedAt).getTime() : 0;
+      return tb - ta;
+    });
+    saveHistory = arr;
+  };
   window.__modalRenderHistory  = () => renderHistory();
 
   function renderHistoryPager(total) {

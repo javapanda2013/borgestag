@@ -79,12 +79,12 @@ async function _mirrorSaveHistoryToIDB(history, options = {}) {
   });
 }
 
+// 全置換書込（移送 / インポート 等、全件を入れ替える経路専用）。候補2 sanity guard 付き。
+// 単一/少数 entry の更新・削除は _patchSaveHistory（差分更新）を使うこと（全件 read/clear+put を避ける）。
 async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
   // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
   // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
-  // v1.46.38 GROUP-118：差分用 snapshot 再読込（旧 _readSaveHistory）を撤去し getAll 二重を解消。
-  //   変更通知は呼出側供給の options.{changedIds,addedIds,removedIds} で行う（_emitSaveHistoryChange）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -103,35 +103,62 @@ async function _setStorageWithHistoryMirror(setObj, options = {}) {
       catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
-  // v1.46.38 GROUP-118：書込後に変更通知（全件 stringify diff を廃止）
-  if (Array.isArray(setObj.saveHistory)) {
-    _emitSaveHistoryChange(options);
-  }
+  // v1.46.40 GROUP-118：全置換後は全件変化扱いで full 信号（受信側 smart reuse で追従）
+  if (Array.isArray(setObj.saveHistory)) _emitSaveHistoryChange({});
 }
 
-// v1.46.14 Phase C-3 / v1.46.38 GROUP-118：
-// 旧実装は書込前後の全件を JSON.stringify で diff 計算していたが、履歴件数 N に比例した
-// O(N) の stringify churn（Firefox Profiler 実測 3.2GB）の主因だったため廃止。
-// 呼出側が変更内容を渡し、その id だけ通知する。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
-//   options.changedIds : 内容更新された id（UPDATED）
-//   options.addedIds   : 追加された id（ADDED）
+// v1.46.40 GROUP-118：差分更新 helper。単一/少数 entry の更新・削除を、
+// 全件 read（getAll）も clear+put 全件もせず、該当 record だけ put/delete する。
+// clear しないため空上書きの危険がなく、二段防御（37 guard）を維持したまま全操作を軽量化できる。
+// migration aware（migrated は IDB の該当 record、未移送は storage.local の patch）。
+//   patch.put    : 追加/更新する entry オブジェクト配列
+//   patch.delete : 削除する id 配列
+async function _patchSaveHistory(patch = {}) {
+  const putEntries = Array.isArray(patch.put) ? patch.put.filter(e => e && e.id) : [];
+  const removeIds  = Array.isArray(patch.delete) ? patch.delete.filter(Boolean) : [];
+  if (putEntries.length === 0 && removeIds.length === 0) return;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const db = await _phaseC1OpenDB();
+    await new Promise((resolve, reject) => {
+      const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readwrite");
+      const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+      for (const e of putEntries) store.put(e);
+      for (const id of removeIds) store.delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = (ev) => reject(ev.target.error);
+    });
+  } else {
+    // 未移送（legacy 経路、稀）：storage.local の saveHistory に patch を適用
+    const stored = await browser.storage.local.get("saveHistory");
+    const arr = Array.isArray(stored.saveHistory) ? stored.saveHistory : [];
+    const byId = new Map(arr.filter(e => e && e.id).map(e => [e.id, e]));
+    for (const e of putEntries) byId.set(e.id, e);
+    for (const id of removeIds) byId.delete(id);
+    await browser.storage.local.set({ saveHistory: Array.from(byId.values()) });
+  }
+  _emitSaveHistoryChange({ changedIds: putEntries.map(e => e.id), removedIds: removeIds });
+}
+
+// v1.46.40 GROUP-118（旧 _emitSaveHistoryDiff を置換）：
+// 全件 stringify による差分計算（履歴件数 N に比例した churn、Profiler 実測 3.2GB）を廃止。
+// 呼出側が変更内容を渡し、その id だけ通知。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
+//   options.changedIds : 内容更新/追加された id（UPDATED）
 //   options.removedIds : 削除された id（DELETED）
-//   いずれも未指定 → full=true 信号（受信側で全件 rebuild、stale 防止の安全 fallback）
+//   いずれも未指定 → full=true 信号（受信側で smart reuse による追従、stale 防止）
 const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `settings-${Date.now()}-${Math.random()}`;
 function _emitSaveHistoryChange(options = {}) {
   try {
     const _send = (type, id, extra) => {
       try { browser.runtime.sendMessage(Object.assign({ type, id, senderId: _phaseC3SenderId }, extra || {})).catch(() => {}); } catch (_) {}
     };
-    const added   = options.addedIds   ? Array.from(options.addedIds).filter(Boolean)   : [];
     const changed = options.changedIds ? Array.from(options.changedIds).filter(Boolean) : [];
     const removed = options.removedIds ? Array.from(options.removedIds).filter(Boolean) : [];
-    if (added.length === 0 && changed.length === 0 && removed.length === 0) {
-      // 変更 id 不明：全件 rebuild を促す安全 fallback（stale 防止優先）
+    if (changed.length === 0 && removed.length === 0) {
       _send("HISTORY_ENTRY_UPDATED", null, { full: true });
       return;
     }
-    for (const id of added)   _send("HISTORY_ENTRY_ADDED",   id);
     for (const id of changed) _send("HISTORY_ENTRY_UPDATED", id);
     for (const id of removed) _send("HISTORY_ENTRY_DELETED", id);
   } catch (err) {
@@ -714,15 +741,15 @@ function buildTagRow(tag) {
 
     // saveHistoryのtags内のタグ名を変更
     try {
-      const history = await _readSaveHistory();
-      let changed = 0;
-      history.forEach(entry => {
-        if (Array.isArray(entry.tags) && entry.tags.includes(tag)) {
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、タグを含む entry のみ更新して差分 put。
+      const changedEntries = [];
+      for (const entry of (_historyData || [])) {
+        if (entry && Array.isArray(entry.tags) && entry.tags.includes(tag)) {
           entry.tags = entry.tags.map(t => t === tag ? trimmed : t);
-          changed++;
+          changedEntries.push(entry);
         }
-      });
-      if (changed > 0) await _setStorageWithHistoryMirror({ saveHistory: history });
+      }
+      if (changedEntries.length > 0) await _patchSaveHistory({ put: changedEntries });
     } catch {}
 
     openTags.delete(tag);
@@ -2890,12 +2917,10 @@ function setupHistoryTab() {
     if (!confirm(`選択した ${n} 件を削除しますか？`)) return;
     showBusyModal("削除中…", `${n} 件`);
     try {
-      const allHist = await _readSaveHistory();
-      const removedIds = Array.from(_histSelected); // v1.46.38 GROUP-118：削除 id を変更通知へ供給
-      const history = allHist.filter(e => !_histSelected.has(e.id));
-      // v1.46.37 GROUP-107：全選択削除は正当な空配列となり得るため allowEmpty:true。
-      // 直前の _readSaveHistory が IDB read 失敗時は throw（候補1）するため、空配列は実データ由来に限られる。
-      await _setStorageWithHistoryMirror({ saveHistory: history }, { allowEmpty: true, removedIds });
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、選択 id のみ差分削除（store.delete）。
+      const removedIds = [..._histSelected];
+      await _patchSaveHistory({ delete: removedIds });
+      if (Array.isArray(_historyData)) _historyData = _historyData.filter(e => !_histSelected.has(e.id));
       _histSelected.clear();
       await renderHistoryTab();
       completeBusyModal(`${n} 件削除しました`);
@@ -2916,9 +2941,8 @@ function setupHistoryTab() {
     // v1.37.0 GROUP-38：処理中モーダル＋先行で選択を視覚クリア
     showBusyModal("グループ解除中…", `${ids.length} 件`);
     try {
-      const history = await _readSaveHistory();
-      // 選択エントリのみを個別解除（他のメンバーはグループのまま残る）
-      const targets = history.filter(e => ids.includes(e.id) && e.sessionId);
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の対象 entry を更新して差分 put。
+      const targets = (_historyData || []).filter(e => ids.includes(e.id) && e.sessionId);
       if (targets.length === 0) { showStatus("グループに属する履歴が選択されていません", true); return; }
 
       // v1.36.0 GROUP-35-perf-B-2：差分更新で参照する旧 sessionId を取得（更新前に確保）
@@ -2930,9 +2954,7 @@ function setupHistoryTab() {
         entry.sessionIndex = null;
       });
 
-      // v1.46.38 GROUP-118：解除対象 id を変更通知へ供給
-      await _setStorageWithHistoryMirror({ saveHistory: history }, { changedIds: targetIds });
-      _historyData = history;
+      await _patchSaveHistory({ put: targets });
       _histSelected.clear();
       // v1.35.0 GROUP-35-perf-B：通常表示モードはカード描画に影響しないので軽量更新
       // v1.36.0 GROUP-35-perf-B-2：グループ表示モードでも差分更新で再構築範囲を限定
@@ -2958,10 +2980,10 @@ function setupHistoryTab() {
     // v1.37.0 GROUP-38：処理中モーダル
     showBusyModal("グループ化中…", `${ids.length} 件`);
     try {
-      const history = await _readSaveHistory();
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の対象 entry を更新して差分 put。
       const newSessionId = crypto.randomUUID();
 
-      const targets = history
+      const targets = (_historyData || [])
         .filter(e => ids.includes(e.id))
         .sort((a, b) => new Date(a.savedAt) - new Date(b.savedAt));
 
@@ -2974,9 +2996,7 @@ function setupHistoryTab() {
         entry.sessionIndex = i + 1;
       });
 
-      // v1.46.38 GROUP-118：グループ化対象 id を変更通知へ供給
-      await _setStorageWithHistoryMirror({ saveHistory: history }, { changedIds: targetIds });
-      _historyData = history;
+      await _patchSaveHistory({ put: targets });
       _histSelected.clear();
       // v1.35.0 GROUP-35-perf-B：通常表示モードはカード描画に影響しないので軽量更新
       // v1.36.0 GROUP-35-perf-B-2：グループ表示モードでも差分更新で再構築範囲を限定
@@ -3130,24 +3150,25 @@ function setupHistoryTab() {
       // v1.37.0 GROUP-38：処理中モーダル
       showBusyModal("タグ追加中…", `${targetIds.length} 件`);
       try {
-        const history = await _readSaveHistory();
-        let changed = false;
-        for (const entry of history) {
-          if (!targetIds.includes(entry.id)) continue;
+        // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の対象 entry を更新して差分 put。
+        const idSet = new Set(targetIds);
+        const changedEntries = [];
+        for (const entry of (_historyData || [])) {
+          if (!entry || !idSet.has(entry.id)) continue;
           const current = new Set(entry.tags || []);
+          let entryChanged = false;
           for (const t of pendingTags) {
-            if (!current.has(t)) { current.add(t); changed = true; }
+            if (!current.has(t)) { current.add(t); entryChanged = true; }
           }
-          entry.tags = [...current];
+          if (entryChanged) { entry.tags = [...current]; changedEntries.push(entry); }
         }
-        if (changed) {
-          await _setStorageWithHistoryMirror({ saveHistory: history });
+        if (changedEntries.length > 0) {
           // globalTagsにも追加
           const { globalTags } = await browser.storage.local.get("globalTags");
           const gSet = new Set(globalTags || []);
           for (const t of pendingTags) gSet.add(t);
           await browser.storage.local.set({ globalTags: [...gSet] });
-          _historyData = history;
+          await _patchSaveHistory({ put: changedEntries });
           for (const id of targetIds) _refreshHistCardByEntryId(id);
           _updateHistCount();
           showStatus(`タグを ${pendingTags.size} 件追加しました`);
@@ -3272,25 +3293,25 @@ function setupHistoryTab() {
       // v1.37.0 GROUP-38：処理中モーダル
       showBusyModal("権利者追加中…", `${targetIds.length} 件`);
       try {
-        const history = await _readSaveHistory();
-        let changed = false;
-        for (const entry of history) {
-          if (!targetIds.includes(entry.id)) continue;
+        // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の対象 entry を更新して差分 put。
+        const idSet = new Set(targetIds);
+        const changedEntries = [];
+        for (const entry of (_historyData || [])) {
+          if (!entry || !idSet.has(entry.id)) continue;
           const current = new Set(getEntryAuthors(entry));
+          let entryChanged = false;
           for (const a of pendingAuthors) {
-            if (!current.has(a)) { current.add(a); changed = true; }
+            if (!current.has(a)) { current.add(a); entryChanged = true; }
           }
-          entry.authors = [...current];
-          delete entry.author; // 旧形式フィールドを削除
+          if (entryChanged) { entry.authors = [...current]; delete entry.author; changedEntries.push(entry); }
         }
-        if (changed) {
-          await _setStorageWithHistoryMirror({ saveHistory: history });
+        if (changedEntries.length > 0) {
           // globalAuthorsにも追加
           const { globalAuthors } = await browser.storage.local.get("globalAuthors");
           const gSet = new Set(globalAuthors || []);
           for (const a of pendingAuthors) gSet.add(a);
           await browser.storage.local.set({ globalAuthors: [...gSet] });
-          _historyData = history;
+          await _patchSaveHistory({ put: changedEntries });
           for (const id of targetIds) _refreshHistCardByEntryId(id);
           _updateHistCount();
           showStatus(`権利者を ${pendingAuthors.size} 件追加しました`);
@@ -3415,10 +3436,10 @@ function setupHistoryTab() {
       const verbLabel = isReplace ? "置換" : "除去";
       showBusyModal(`${verbLabel}中…`, `${targetIds.length} 件`);
       try {
-        const history = await _readSaveHistory();
-        let processed = 0;
-        for (const entry of history) {
-          if (!targetSet.has(entry.id)) continue;
+        // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の対象 entry を更新して差分 put。
+        const changedEntries = [];
+        for (const entry of (_historyData || [])) {
+          if (!entry || !targetSet.has(entry.id)) continue;
           if (kind === "tag") {
             const tags = entry.tags || [];
             if (!tags.includes(oldVal)) continue;
@@ -3428,7 +3449,7 @@ function setupHistoryTab() {
             } else {
               entry.tags = tags.filter(t => t !== oldVal);
             }
-            processed++;
+            changedEntries.push(entry);
           } else {
             const authors = getEntryAuthors(entry);
             if (!authors.includes(oldVal)) continue;
@@ -3439,12 +3460,13 @@ function setupHistoryTab() {
               entry.authors = authors.filter(a => a !== oldVal);
             }
             delete entry.author;
-            processed++;
+            changedEntries.push(entry);
           }
         }
 
+        const processed = changedEntries.length;
         if (processed > 0) {
-          await _setStorageWithHistoryMirror({ saveHistory: history });
+          await _patchSaveHistory({ put: changedEntries });
           // グローバルカタログにも反映（置換時のみ、新値を追加）
           if (isReplace) {
             const key = kind === "tag" ? "globalTags" : "globalAuthors";
@@ -3669,7 +3691,8 @@ function setupHistoryTab() {
         const targetIds = new Set(targets.map(e => e.id));
         _historyData = _historyData.filter(e => !targetIds.has(e.id));
         _histSelected.clear();
-        await _setStorageWithHistoryMirror({ saveHistory: _historyData });
+        // v1.46.40 GROUP-118：全件 clear+put をやめ、対象 id のみ差分削除。
+        await _patchSaveHistory({ delete: [...targetIds] });
         overlay.remove();
         renderHistoryGrid();
         completeBusyModal(`${targets.length} 件の履歴を削除しました`);
@@ -4662,12 +4685,11 @@ function _updateHistCardFields(card, entry) {
         e.stopPropagation();
         const tag = btn.dataset.tag;
         if (!confirm(`「${tag}」をこの履歴から削除しますか？`)) return;
-        const history = await _readSaveHistory();
-        const target = history.find(h => h.id === entry.id);
+        // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory の該当 entry を更新して差分 put。
+        const target = (_historyData || []).find(h => h.id === entry.id);
         if (target) {
           target.tags = (target.tags || []).filter(t => t !== tag);
-          await _setStorageWithHistoryMirror({ saveHistory: history });
-          _historyData = history;
+          await _patchSaveHistory({ put: [target] });
           _refreshHistCardByEntryId(entry.id);
           _updateHistCount();
         }
@@ -5082,16 +5104,10 @@ async function _toggleEntryFavorite(entryId) {
 
   // ② 裏で永続化、失敗時はロールバック
   try {
-    // v1.45.5 Phase C-2: saveHistory は migration aware
-    const history = await _readSaveHistory();
-    const entry = history.find(e => e.id === entryId);
-    if (!entry) {
-      // ストレージ側にエントリが見つからない（削除済み等）→ ロールバックして警告
-      throw new Error("saveHistory にエントリが見つかりません");
-    }
-    entry.favorite = next;
-    await _setStorageWithHistoryMirror({ saveHistory: history });
-    _historyData = history;
+    // v1.46.40 GROUP-118：全件 read（getAll）＋全件 clear+put をやめ、該当 entry のみ差分更新。
+    // memEntry は _historyData 上の表示中エントリで、favorite は ① で next 済。これを put するだけ。
+    if (!memEntry) throw new Error("saveHistory にエントリが見つかりません");
+    await _patchSaveHistory({ put: [memEntry] });
   } catch (err) {
     // ロールバック：DOM／メモリを元に戻す
     if (memEntry) memEntry.favorite = prev;
@@ -5110,19 +5126,18 @@ async function _toggleEntryFavorite(entryId) {
 // v1.39.1 GROUP-42-b：fav-filter ON で外れた場合、全体再描画ではなく該当タイルのみ除去
 async function _setBulkFavorite(targetIds, value) {
   if (!targetIds || targetIds.length === 0) return 0;
-  // v1.45.5 Phase C-2: saveHistory は migration aware
-  const history = await _readSaveHistory();
+  // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory _historyData の該当 entry を更新して差分 put。
   const idSet = new Set(targetIds);
-  let changed = 0;
-  for (const e of history) {
-    if (idSet.has(e.id) && !!e.favorite !== !!value) {
+  const changedEntries = [];
+  for (const e of (_historyData || [])) {
+    if (e && idSet.has(e.id) && !!e.favorite !== !!value) {
       e.favorite = !!value;
-      changed++;
+      changedEntries.push(e);
     }
   }
+  const changed = changedEntries.length;
   if (changed > 0) {
-    await _setStorageWithHistoryMirror({ saveHistory: history });
-    _historyData = history;
+    await _patchSaveHistory({ put: changedEntries });
     for (const id of targetIds) _updateFavButtonsForEntry(id, value);
   }
   // フィルタ ON で解除した場合、該当タイルのみ DOM 除去（GIF 再デコード回避）
@@ -6006,9 +6021,9 @@ function _buildHistCardInner(card, entry, onThumbClick) {
   // ---- リアルタイム保存 ----
   async function saveEntryNow() {
     // v1.45.5 Phase C-2: saveHistory は migration aware
-    const history = await _readSaveHistory();
     const stored = await browser.storage.local.get(["globalTags", "globalAuthors"]);
-    const target  = history.find(h => h.id === entry.id);
+    // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory の該当 entry を更新して差分 put。globalTags/Authors は storage.local。
+    const target  = (_historyData || []).find(h => h.id === entry.id);
     if (!target) return;
     target.tags    = [...pendingTags];
     target.authors = [...pendingAuthors];
@@ -6017,12 +6032,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     if (newPath) target.savePaths = [newPath];
     const gTagSet    = new Set([...(stored.globalTags    || []), ...pendingTags]);
     const gAuthorSet = new Set([...(stored.globalAuthors || []), ...pendingAuthors]);
-    await _setStorageWithHistoryMirror({
-      saveHistory:   history,
-      globalTags:    [...gTagSet],
-      globalAuthors: [...gAuthorSet],
-    });
-    _historyData  = history;
+    await browser.storage.local.set({ globalTags: [...gTagSet], globalAuthors: [...gAuthorSet] });
+    await _patchSaveHistory({ put: [target] });
     globalTags    = [...gTagSet];
     globalAuthors = [...gAuthorSet];
     showStatus("自動保存しました ✔");
@@ -6270,12 +6281,11 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       e.stopPropagation();
       const tag = btn.dataset.tag;
       if (!confirm(`「${tag}」をこの履歴から削除しますか？`)) return;
-      const history = await _readSaveHistory();
-      const target = history.find(h => h.id === entry.id);
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory の該当 entry を更新して差分 put。
+      const target = (_historyData || []).find(h => h.id === entry.id);
       if (target) {
         target.tags = (target.tags || []).filter(t => t !== tag);
-        await _setStorageWithHistoryMirror({ saveHistory: history });
-        _historyData = history;
+        await _patchSaveHistory({ put: [target] });
         _refreshHistCardByEntryId(entry.id);
         _updateHistCount();
       }
@@ -6310,7 +6320,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       await browser.runtime.sendMessage({ type: "DELETE_THUMB", thumbId: entry.thumbId });
     }
     _historyData = _historyData.filter(h => h.id !== entry.id);
-    await _setStorageWithHistoryMirror({ saveHistory: _historyData });
+    // v1.46.40 GROUP-118：全件 clear+put をやめ、当該 id のみ差分削除。
+    await _patchSaveHistory({ delete: [entry.id] });
     _histSelected.delete(entry.id);
     _refreshHistCardByEntryId(entry.id);
     _updateHistToolbarButtons();
@@ -7841,12 +7852,10 @@ async function executeExternalImport() {
     }
 
     // saveHistory から取り消し対象を除去
+    // v1.46.40 GROUP-118：全件 read/clear+put をやめ、取消対象 id のみ差分削除。
     const idSet = new Set(_lastImportIds);
-    // v1.45.5 Phase C-2: migration aware
-    const sh = await _readSaveHistory();
-    const filtered = (sh || []).filter(e => !idSet.has(e.id));
-    await _setStorageWithHistoryMirror({ saveHistory: filtered });
-    _historyData   = filtered;
+    await _patchSaveHistory({ delete: _lastImportIds });
+    _historyData   = (_historyData || []).filter(e => !idSet.has(e.id));
     _lastImportIds = null;
 
     actionsEl.innerHTML  = "";

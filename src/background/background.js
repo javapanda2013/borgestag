@@ -1469,17 +1469,34 @@ async function getSaveHistory() {
   return { saveHistory: history };
 }
 
+// v1.46.40 GROUP-118：単一 entry を migration aware に取得（全件 getAll を避ける）。
+// migrated は IDB の該当 record、未移送は storage.local の saveHistory から find。
+async function _getHistoryEntryById(id) {
+  if (!id) return null;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    const db = await openThumbDB();
+    return await new Promise((resolve, reject) => {
+      const tx  = db.transaction(IDB_HISTORY_STORE, "readonly");
+      const req = tx.objectStore(IDB_HISTORY_STORE).get(id);
+      req.onsuccess = (e) => resolve(e.target.result || null);
+      req.onerror   = (e) => reject(e.target.error);
+    });
+  }
+  const stored = await browser.storage.local.get("saveHistory");
+  return (Array.isArray(stored.saveHistory) ? stored.saveHistory : []).find(e => e && e.id === id) || null;
+}
+
 // @spec 設計書類/共通/D_IndexedDB_スキーマ.md
 async function updateHistoryEntryTags(id, newTags) {
   if (!id || !Array.isArray(newTags)) return { ok: false };
   // v1.46.11 GROUP-69：saveHistory R-M-W を save 側と同 mutex で直列化
   return _withSaveStorageMutex(async () => {
-    // v1.45.5 Phase C-2: migration aware read
-    const history = await _readSaveHistory();
-    const idx     = history.findIndex(e => e.id === id);
-    if (idx === -1) return { ok: false };
-    history[idx]  = { ...history[idx], tags: newTags };
-    await _setStorageWithHistoryMirror({ saveHistory: history }, { changedIds: [id] }); // v1.46.38 GROUP-118
+    // v1.46.40 GROUP-118：全件 read/clear+put をやめ、該当 entry のみ取得 → 差分 put
+    const entry = await _getHistoryEntryById(id);
+    if (!entry) return { ok: false };
+    entry.tags = newTags;
+    await _patchSaveHistory({ put: [entry] });
     return { ok: true };
   });
 }
@@ -1488,21 +1505,17 @@ async function updateHistoryEntry(id, newTags, newAuthors, newSavePaths) {
   if (!id) return { ok: false };
   // v1.46.11 GROUP-69：saveHistory + globalTags + globalAuthors の R-M-W を同 mutex で直列化
   return _withSaveStorageMutex(async () => {
-    // v1.45.5 Phase C-2: saveHistory は migration aware、他 key は storage.local
-    const history = await _readSaveHistory();
+    // v1.46.40 GROUP-118：全件 read/clear+put をやめ、該当 entry のみ取得 → 差分 put。globalTags/Authors は storage.local
+    const entry = await _getHistoryEntryById(id);
+    if (!entry) return { ok: false };
     const stored  = await browser.storage.local.get(["globalTags", "globalAuthors"]);
-    const idx     = history.findIndex(e => e.id === id);
-    if (idx === -1) return { ok: false };
-    if (Array.isArray(newTags))      history[idx].tags      = newTags;
-    if (Array.isArray(newAuthors))   { history[idx].authors = newAuthors; delete history[idx].author; }
-    if (Array.isArray(newSavePaths)) history[idx].savePaths  = newSavePaths;
+    if (Array.isArray(newTags))      entry.tags      = newTags;
+    if (Array.isArray(newAuthors))   { entry.authors = newAuthors; delete entry.author; }
+    if (Array.isArray(newSavePaths)) entry.savePaths  = newSavePaths;
     const gTagSet    = new Set([...(stored.globalTags    || []), ...(newTags    || [])]);
     const gAuthorSet = new Set([...(stored.globalAuthors || []), ...(newAuthors || [])]);
-    await _setStorageWithHistoryMirror({
-      saveHistory:   history,
-      globalTags:    [...gTagSet],
-      globalAuthors: [...gAuthorSet],
-    }, { changedIds: [id] }); // v1.46.38 GROUP-118
+    await browser.storage.local.set({ globalTags: [...gTagSet], globalAuthors: [...gAuthorSet] });
+    await _patchSaveHistory({ put: [entry] });
     return { ok: true };
   });
 }
@@ -1848,11 +1861,11 @@ async function _mirrorSaveHistoryToIDB(history, options = {}) {
 // migration 前（saveHistoryMigrationStatus !== "migrated"）：dual write（storage.local + IDB shadow）
 // migration 後（"migrated"）：saveHistory は IDB のみ、他 key は storage.local（broadcast 消失）
 // @spec 設計書類/共通/D_IndexedDB_スキーマ.md
+// 全置換書込（移送 / インポート 等の全件入替専用）。候補2 sanity guard 付き。
+// 単一/少数 entry は _patchSaveHistory（差分更新）を使うこと。
 async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
   // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
-  // v1.46.38 GROUP-118：差分用 snapshot 再読込（旧 _readSaveHistory）を撤去し getAll 二重を解消。
-  //   変更通知は呼出側供給の options.{changedIds,addedIds,removedIds} で行う（_emitSaveHistoryChange）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -1871,36 +1884,53 @@ async function _setStorageWithHistoryMirror(setObj, options = {}) {
       catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
-  // v1.46.38 GROUP-118：書込後に変更通知（全件 stringify diff を廃止）
-  if (Array.isArray(setObj.saveHistory)) {
-    _emitSaveHistoryChange(options);
-  }
+  // v1.46.40 GROUP-118：全置換後は full 信号（受信側 smart reuse で追従）
+  if (Array.isArray(setObj.saveHistory)) _emitSaveHistoryChange({});
 }
 
-// v1.46.14 Phase C-3 / v1.46.38 GROUP-118：
-// 旧実装は書込前後の全件を JSON.stringify で diff 計算していたが、履歴件数 N に比例した
-// O(N) の stringify churn（Firefox Profiler 実測 3.2GB、WebExtensions プロセス）の主因だったため廃止。
-// 呼出側が変更内容を渡し、その id だけ通知する。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
-//   options.changedIds : 内容更新された id（UPDATED）
-//   options.addedIds   : 追加された id（ADDED）
-//   options.removedIds : 削除された id（DELETED）
-//   いずれも未指定 → full=true 信号（受信側で全件 rebuild、stale 防止の安全 fallback）
-// payload は {type, id, senderId(, full)} のみ（数十 byte）、senderId は自 context emit の skip 用。
+// v1.46.40 GROUP-118：差分更新 helper（settings/modal と同仕様）。該当 record だけ put/delete（clear/read-all なし）。
+//   patch.put : 追加/更新 entry 配列 ／ patch.delete : 削除 id 配列
+async function _patchSaveHistory(patch = {}) {
+  const putEntries = Array.isArray(patch.put) ? patch.put.filter(e => e && e.id) : [];
+  const removeIds  = Array.isArray(patch.delete) ? patch.delete.filter(Boolean) : [];
+  if (putEntries.length === 0 && removeIds.length === 0) return;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const db = await openThumbDB();
+    await new Promise((resolve, reject) => {
+      const tx    = db.transaction(IDB_HISTORY_STORE, "readwrite");
+      const store = tx.objectStore(IDB_HISTORY_STORE);
+      for (const e of putEntries) store.put(e);
+      for (const id of removeIds) store.delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = (ev) => reject(ev.target.error);
+    });
+  } else {
+    const stored = await browser.storage.local.get("saveHistory");
+    const arr = Array.isArray(stored.saveHistory) ? stored.saveHistory : [];
+    const byId = new Map(arr.filter(e => e && e.id).map(e => [e.id, e]));
+    for (const e of putEntries) byId.set(e.id, e);
+    for (const id of removeIds) byId.delete(id);
+    await browser.storage.local.set({ saveHistory: Array.from(byId.values()) });
+  }
+  _emitSaveHistoryChange({ changedIds: putEntries.map(e => e.id), removedIds: removeIds });
+}
+
+// v1.46.40 GROUP-118（旧 _emitSaveHistoryDiff を置換）：全件 stringify diff（N 比例 churn、3.2GB）を廃止。
+// 呼出側供給の changedIds/removedIds のみ通知。未指定は full 信号（受信側 smart reuse で追従）。
 const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `bg-${Date.now()}-${Math.random()}`;
 function _emitSaveHistoryChange(options = {}) {
   try {
     const _send = (type, id, extra) => {
       try { browser.runtime.sendMessage(Object.assign({ type, id, senderId: _phaseC3SenderId }, extra || {})).catch(() => {}); } catch (_) {}
     };
-    const added   = options.addedIds   ? Array.from(options.addedIds).filter(Boolean)   : [];
     const changed = options.changedIds ? Array.from(options.changedIds).filter(Boolean) : [];
     const removed = options.removedIds ? Array.from(options.removedIds).filter(Boolean) : [];
-    if (added.length === 0 && changed.length === 0 && removed.length === 0) {
-      // 変更 id 不明：全件 rebuild を促す安全 fallback（stale 防止優先）
+    if (changed.length === 0 && removed.length === 0) {
       _send("HISTORY_ENTRY_UPDATED", null, { full: true });
       return;
     }
-    for (const id of added)   _send("HISTORY_ENTRY_ADDED",   id);
     for (const id of changed) _send("HISTORY_ENTRY_UPDATED", id);
     for (const id of removed) _send("HISTORY_ENTRY_DELETED", id);
   } catch (err) {
@@ -2579,12 +2609,13 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
       }
     }
     await _withSaveStorageMutex(async () => {
-      const fresh = await _readSaveHistory();
-      for (let i = 0; i < fresh.length; i++) {
-        const u = updates.get(fresh[i].id);
-        if (u) fresh[i] = { ...fresh[i], ...u };
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、更新対象 entry のみ取得→thumb 反映→差分 put
+      const putEntries = [];
+      for (const [id, u] of updates) {
+        const entry = await _getHistoryEntryById(id);
+        if (entry) putEntries.push({ ...entry, ...u });
       }
-      await _setStorageWithHistoryMirror({ saveHistory: fresh });
+      if (putEntries.length > 0) await _patchSaveHistory({ put: putEntries });
     });
   }
 
@@ -2787,10 +2818,9 @@ function _roughJsonSize(v) {
 /** 保存履歴の件数と IndexedDB サムネイルの使用容量を返す */
 async function getStorageSize() {
   // 保存履歴
-  // v1.46.38 GROUP-118：旧実装は storage.local.get(null) で legacy バックアップ含む storage 全体を
-  //   毎 render でメモリ展開＋再帰走査していた。移送後の実 saveHistory は IDB 在のため、IDB saveHistory
-  //   ストアの件数を count() で測る（blob 非読込・軽量）。get(null) は廃止。legacy バックアップは保持。
-  //   未移送時のみ storage.local の saveHistory 件数。GROUP-116-A の誤指標（storage.local 総量）是正。
+  // v1.46.40 GROUP-118：旧実装は storage.local.get(null) で legacy バックアップ含む storage 全体を
+  //   毎 render でメモリ展開＋再帰走査していた。移送後の実 saveHistory は IDB 在のため、件数を count()
+  //   で測る（blob 非読込・軽量）。get(null) は廃止。legacy バックアップは保持。GROUP-116-A 是正。
   let storageSizeStr = "不明";
   try {
     const status = await browser.storage.local.get("saveHistoryMigrationStatus");
@@ -2804,10 +2834,8 @@ async function getStorageSize() {
       });
       storageSizeStr = `${n} 件（IndexedDB）`;
     } else {
-      // 未移送：migration aware helper 経由で件数取得（直接 storage.local 読みは migration leak になるため避ける）
       const arr = await _readSaveHistory();
-      const n = Array.isArray(arr) ? arr.length : 0;
-      storageSizeStr = `${n} 件`;
+      storageSizeStr = `${Array.isArray(arr) ? arr.length : 0} 件`;
     }
   } catch {}
 
@@ -2902,7 +2930,7 @@ async function addSaveHistory({ imageUrl, filename, savePath, tags, authors, pag
 async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, authors, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, sessionId, sessionIndex, audioFilename, audioMimeType, audioDurationSec, _extraStorage }) {
   // v1.41.7:authors 系も含めて 1 回の set に集約
   // v1.45.5 Phase C-2: saveHistory は migration aware、他 key は storage.local
-  const history = await _readSaveHistory();
+  // v1.46.40 GROUP-118：全件 read（getAll）をやめ、新規 entry を差分 put（後述）。
   const stored  = await browser.storage.local.get(["globalAuthors", "recentAuthors"]);
 
   // サムネイル：modal 由来 thumbBlob > thumbDataUrl > Native fallback (XHR)
@@ -2980,9 +3008,8 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
 
   // 上限なし（storage.local の容量制限のみ）
 
-  const _newEntryId = crypto.randomUUID(); // v1.46.39 GROUP-118：追加 id を変更通知へ供給（保存ごとの全 rebuild=フリーズ回避）
-  history.unshift({
-    id:           _newEntryId,
+  const _newEntry = {
+    id:           crypto.randomUUID(),
     imageUrl,
     pageUrl:      pageUrl       || null,
     thumbId,
@@ -2999,7 +3026,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     audioFilename:    audioFilename    || null,
     audioMimeType:    audioMimeType    || null,
     audioDurationSec: audioDurationSec || null,
-  });
+  };
 
   // v1.41.7:authors ループ内の updateGlobalAuthor / updateRecentAuthors の N 回 set を
   // 値計算（純関数）に置換し、最終 set に集約。N 回 → 0 回（saveHistory set と一緒に 1 回）。
@@ -3007,17 +3034,14 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
   const mergedGlobalAuthors = _mergeGlobalAuthors(stored.globalAuthors, newAuthors);
   const mergedRecentAuthors = _mergeRecentAuthors(stored.recentAuthors, newAuthors, 10);
 
-  // v1.41.7:呼出元（handleSave / handleSaveMulti / handleInstantSave）が
-  // 渡す _extraStorage（lastSaveDir / globalTags / recentTags / recentSubTags / tagDestinations 等）と
-  // saveHistory / globalAuthors / recentAuthors を 1 回の set にマージ。
-  // 旧：保存毎 5+ 回の broadcast → 新：1 回（StructuredCloneHolder.deserialize 552MB × N → × 1）。
-  // v1.45.2 GROUP-35-perf-A Phase C-1：集約 helper 経由で IDB shadow にもミラー
-  await _setStorageWithHistoryMirror({
+  // v1.46.40 GROUP-118：saveHistory は新規 1 件のみ差分 put（全件 clear+put を回避）。
+  // 他 key（_extraStorage / globalAuthors / recentAuthors）は storage.local へまとめて set。
+  await browser.storage.local.set({
     ...(_extraStorage || {}),
-    saveHistory:   history,
     globalAuthors: mergedGlobalAuthors,
     recentAuthors: mergedRecentAuthors,
-  }, { addedIds: [_newEntryId] }); // v1.46.39 GROUP-118：保存は追加 1 件のみ通知（全 rebuild 回避）
+  });
+  await _patchSaveHistory({ put: [_newEntry] });
   // v1.41.6:保存毎の `storage.local.get(null) + JSON.stringify` 使用量ログ削除済。
 }
 

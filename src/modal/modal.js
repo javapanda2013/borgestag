@@ -65,12 +65,12 @@ async function _mirrorSaveHistoryToIDB(history, options = {}) {
   });
 }
 
+// 全置換書込（インポート等の全件入替専用）。候補2 sanity guard 付き。
+// 単一/少数 entry は _patchSaveHistory（差分更新）を使うこと。
 async function _setStorageWithHistoryMirror(setObj, options = {}) {
   if (!setObj || typeof setObj !== "object") return;
   // v1.45.5 Phase C-2: migration 状態に応じて write 経路を分岐
   // v1.46.37 GROUP-107：options.allowEmpty を mirror へ伝播（正当な空配列＝全件削除のみ true）
-  // v1.46.38 GROUP-118：差分用 snapshot 再読込（旧 _readSaveHistory）を撤去し getAll 二重を解消。
-  //   変更通知は呼出側供給の options.{changedIds,addedIds,removedIds} で行う（_emitSaveHistoryChange）
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -89,35 +89,53 @@ async function _setStorageWithHistoryMirror(setObj, options = {}) {
       catch (err) { console.error("[Phase C-1] saveHistory IDB mirror 失敗（mirror guard 含む、IDB は無変更）", err); }
     }
   }
-  // v1.46.38 GROUP-118：書込後に変更通知（全件 stringify diff を廃止）
-  if (Array.isArray(setObj.saveHistory)) {
-    _emitSaveHistoryChange(options);
-  }
+  // v1.46.40 GROUP-118：全置換後は full 信号（受信側 smart reuse で追従）
+  if (Array.isArray(setObj.saveHistory)) _emitSaveHistoryChange({});
 }
 
-// v1.46.14 Phase C-3 / v1.46.38 GROUP-118：
-// 旧実装は書込前後の全件を JSON.stringify で diff 計算していたが、履歴件数 N に比例した
-// O(N) の stringify churn（Firefox Profiler 実測 3.2GB）の主因だったため廃止。
-// 呼出側が変更内容を渡し、その id だけ通知する。型(ADDED/UPDATED/DELETED)は将来の増分描画用に温存。
-//   options.changedIds : 内容更新された id（UPDATED）
-//   options.addedIds   : 追加された id（ADDED）
-//   options.removedIds : 削除された id（DELETED）
-//   いずれも未指定 → full=true 信号（受信側で全件 rebuild、stale 防止の安全 fallback）
+// v1.46.40 GROUP-118：差分更新 helper（settings.js と同仕様）。該当 record だけ put/delete（clear/read-all なし）。
+//   patch.put : 追加/更新 entry 配列 ／ patch.delete : 削除 id 配列
+async function _patchSaveHistory(patch = {}) {
+  const putEntries = Array.isArray(patch.put) ? patch.put.filter(e => e && e.id) : [];
+  const removeIds  = Array.isArray(patch.delete) ? patch.delete.filter(Boolean) : [];
+  if (putEntries.length === 0 && removeIds.length === 0) return;
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  const migrated = status.saveHistoryMigrationStatus === "migrated";
+  if (migrated) {
+    const db = await _phaseC1OpenDB();
+    await new Promise((resolve, reject) => {
+      const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readwrite");
+      const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+      for (const e of putEntries) store.put(e);
+      for (const id of removeIds) store.delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = (ev) => reject(ev.target.error);
+    });
+  } else {
+    const stored = await browser.storage.local.get("saveHistory");
+    const arr = Array.isArray(stored.saveHistory) ? stored.saveHistory : [];
+    const byId = new Map(arr.filter(e => e && e.id).map(e => [e.id, e]));
+    for (const e of putEntries) byId.set(e.id, e);
+    for (const id of removeIds) byId.delete(id);
+    await browser.storage.local.set({ saveHistory: Array.from(byId.values()) });
+  }
+  _emitSaveHistoryChange({ changedIds: putEntries.map(e => e.id), removedIds: removeIds });
+}
+
+// v1.46.40 GROUP-118（旧 _emitSaveHistoryDiff を置換）：全件 stringify diff（N 比例 churn、3.2GB）を廃止。
+// 呼出側供給の changedIds/removedIds のみ通知。未指定は full 信号（受信側 smart reuse で追従）。
 const _phaseC3SenderId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `modal-${Date.now()}-${Math.random()}`;
 function _emitSaveHistoryChange(options = {}) {
   try {
     const _send = (type, id, extra) => {
       try { browser.runtime.sendMessage(Object.assign({ type, id, senderId: _phaseC3SenderId }, extra || {})).catch(() => {}); } catch (_) {}
     };
-    const added   = options.addedIds   ? Array.from(options.addedIds).filter(Boolean)   : [];
     const changed = options.changedIds ? Array.from(options.changedIds).filter(Boolean) : [];
     const removed = options.removedIds ? Array.from(options.removedIds).filter(Boolean) : [];
-    if (added.length === 0 && changed.length === 0 && removed.length === 0) {
-      // 変更 id 不明：全件 rebuild を促す安全 fallback（stale 防止優先）
+    if (changed.length === 0 && removed.length === 0) {
       _send("HISTORY_ENTRY_UPDATED", null, { full: true });
       return;
     }
-    for (const id of added)   _send("HISTORY_ENTRY_ADDED",   id);
     for (const id of changed) _send("HISTORY_ENTRY_UPDATED", id);
     for (const id of removed) _send("HISTORY_ENTRY_DELETED", id);
   } catch (err) {
@@ -148,12 +166,7 @@ function _phaseC3ScheduleHistoryRefresh(targetId) {
           // 更新＋再描画する。
           if (typeof window.__modalSetSaveHistory === "function" && typeof window.__modalRenderHistory === "function") {
             window.__modalSetSaveHistory(r.saveHistory);
-            // v1.46.39 GROUP-118：cross-context refresh は常に smart reuse（Set を渡す）。
-            //   蓄積した変更 id があればそのタイルを rebuild、無ければ空 Set。
-            //   空 Set でも smart reuse が 追加/削除/サムネ変更 を処理する（内容のみ変更は呼出側
-            //   changedIds 供給で反映、未供給時のみ稀に次 refresh まで待ち）。
-            //   旧 v1.46.38 は full 信号で null（全タイル rebuild）を渡し、5531 件規模で
-            //   5.5 秒の LongTask/フリーズを招いた。常に Set 化してこれを廃止（回帰 hotfix）。
+            // targetIds を window 経由で renderHistory へ伝達（smart reuse 用 force rebuild Set）
             window.__phaseC3OptForceRebuildIds = ids;
             window.__modalRenderHistory();
             window.__phaseC3OptForceRebuildIds = null;
@@ -169,7 +182,7 @@ browser.runtime.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.senderId === _phaseC3SenderId) return; // 自 context emit は skip
   if (msg.type === "HISTORY_ENTRY_ADDED" || msg.type === "HISTORY_ENTRY_UPDATED" || msg.type === "HISTORY_ENTRY_DELETED") {
-    _phaseC3ScheduleHistoryRefresh(msg.id); // full 信号は id=null → 空 Set に帰着（smart reuse）
+    _phaseC3ScheduleHistoryRefresh(msg.id);
   }
 });
 
@@ -2379,11 +2392,9 @@ function setupModalEvents(
 
     // ② 裏で永続化、失敗時はロールバック
     try {
-      const history = await _readSaveHistory();
-      const e = history.find(h => h.id === entryId);
-      if (!e) throw new Error("saveHistory にエントリが見つかりません");
-      e.favorite = next;
-      await _setStorageWithHistoryMirror({ saveHistory: history });
+      // v1.46.40 GROUP-118：全件 read/clear+put をやめ、該当 entry のみ差分 put（memEntry は ① で favorite=next 済）
+      if (!memEntry) throw new Error("saveHistory にエントリが見つかりません");
+      await _patchSaveHistory({ put: [memEntry] });
     } catch (err) {
       if (memEntry) memEntry.favorite = prev;
       _modalUpdateFavButtonsForEntry(entryId, prev);
@@ -2399,22 +2410,18 @@ function setupModalEvents(
   // v1.37.0 GROUP-36-fav-bulk：保存ウィンドウ側、選択した履歴の favorite を一括代入
   async function _modalSetBulkFavorite(targetIds, value, allEntries) {
     if (!targetIds || targetIds.length === 0) return 0;
-    const history = await _readSaveHistory();
+    // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory allEntries の該当 entry を更新して差分 put。
     const idSet = new Set(targetIds);
-    let changed = 0;
-    for (const h of history) {
-      if (idSet.has(h.id) && !!h.favorite !== !!value) {
+    const changedEntries = [];
+    for (const h of (Array.isArray(allEntries) ? allEntries : [])) {
+      if (h && idSet.has(h.id) && !!h.favorite !== !!value) {
         h.favorite = !!value;
-        changed++;
+        changedEntries.push(h);
       }
     }
+    const changed = changedEntries.length;
     if (changed > 0) {
-      await _setStorageWithHistoryMirror({ saveHistory: history });
-      if (Array.isArray(allEntries)) {
-        for (const h of allEntries) {
-          if (idSet.has(h.id)) h.favorite = !!value;
-        }
-      }
+      await _patchSaveHistory({ put: changedEntries });
       for (const id of targetIds) _modalUpdateFavButtonsForEntry(id, value);
     }
     // v1.39.1 GROUP-42-b：fav-filter ON で外れる場合、該当タイルだけ DOM 除去（GIF 再デコード回避）
@@ -3647,9 +3654,10 @@ function setupModalEvents(
       // v1.46.4 GROUP-63 (a)：settings.js の saveEntryNow と同じく
       // saveHistory + globalTags + globalAuthors を一括書込（migration aware）
       async function _modalSaveEntryNow() {
-        const history = await _readSaveHistory();
         const stored  = await browser.storage.local.get(["globalTags", "globalAuthors"]);
-        const target  = history.find(h => h.id === entry.id);
+        // v1.46.40 GROUP-118：全件 read/clear+put をやめ、in-memory saveHistory の該当 entry を更新して差分 put。
+        const idx = saveHistory.findIndex(h => h.id === entry.id);
+        const target = idx !== -1 ? saveHistory[idx] : null;
         if (!target) return;
         target.tags    = [...pendingTags];
         target.authors = [...pendingAuthors];
@@ -3658,19 +3666,9 @@ function setupModalEvents(
         if (newPath) target.savePaths = [newPath];
         const gTagSet    = new Set([...(stored.globalTags    || []), ...pendingTags]);
         const gAuthorSet = new Set([...(stored.globalAuthors || []), ...pendingAuthors]);
-        await _setStorageWithHistoryMirror({
-          saveHistory:   history,
-          globalTags:    [...gTagSet],
-          globalAuthors: [...gAuthorSet],
-        });
-        // ローカル saveHistory 配列も同期
-        const idx = saveHistory.findIndex(h => h.id === entry.id);
-        if (idx !== -1) {
-          saveHistory[idx].tags    = target.tags;
-          saveHistory[idx].authors = target.authors;
-          delete saveHistory[idx].author;
-          if (newPath) saveHistory[idx].savePaths = target.savePaths;
-        }
+        // globalTags/globalAuthors は storage.local（saveHistory 以外）へ、saveHistory は該当 entry のみ差分 put
+        await browser.storage.local.set({ globalTags: [...gTagSet], globalAuthors: [...gAuthorSet] });
+        await _patchSaveHistory({ put: [target] });
         // entry も同期（保存ボタン押下時に reflect する元データ）
         entry.tags = target.tags; entry.authors = target.authors;
         delete entry.author;

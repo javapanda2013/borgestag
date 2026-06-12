@@ -573,7 +573,11 @@
       padding: 8px; pointer-events: none;
     }
     .hist-card:hover .hist-card-overlay { opacity: 1; }
-    .hist-card:hover .hist-card-overlay * { pointer-events: auto; }
+    /* v1.46.43 GROUP-118 C1：hover 連動だった pointer-events 切替を静的化。
+       :hover 条件付き `*` はホバーのたびに overlay 全子孫の restyle を発生させていた（hover restyle storm）。
+       overlay コンテナ自体は pointer-events:none のままなので、サムネ click（拡大 lightbox）の透過は不変。
+       非ホバー時は overlay 領域にポインタが乗れない（＝カード hover 中のみ到達可能）ため挙動は等価。 */
+    .hist-card-overlay * { pointer-events: auto; }
     .hist-card-body {
       display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px;
     }
@@ -1207,6 +1211,8 @@
       <div class="history-toolbar-info">
         <span id="hist-count">0 件</span>
         <span id="hist-storage">保存履歴情報: 計算中</span>
+        <!-- v1.46.43 GROUP-118：imageUrl に dataURL を持つ entry の整理ボタン（該当 0 件時は非表示） -->
+        <button id="hist-cleanup-dataurl" class="hist-btn" style="display:none; flex:0 0 auto;" title="imageUrl に巨大な dataURL を含む履歴を一覧し、imageUrl のみ空にして容量を削減します（履歴・サムネイル・保存済みファイルは残ります）">⚠ 巨大データ整理</button>
         <span id="hist-idb">保存サムネイル: 計算中</span>
         <label style="font-size:11px;color:#888;display:flex;align-items:center;gap:4px;">
           表示件数:

@@ -3567,6 +3567,11 @@ function setupHistoryTab() {
     showPeriodDeleteDialog();
   });
 
+  // v1.46.43 GROUP-118：巨大データ整理（imageUrl の dataURL 除去）
+  document.getElementById("hist-cleanup-dataurl").addEventListener("click", () => {
+    showDataUrlCleanupDialog();
+  });
+
   document.getElementById("hist-gen-thumbs").addEventListener("click", async () => {
     const selectedEntries = _historyData.filter(e => _histSelected.has(e.id));
     if (selectedEntries.length === 0) {
@@ -3863,6 +3868,85 @@ function setupHistoryTab() {
   });
 }
 
+// ----------------------------------------------------------------
+// v1.46.43 GROUP-118：巨大データ整理（imageUrl の dataURL 除去）
+// 動画→GIF 変換経由の保存で imageUrl に dataURL（数十 MB 級）が入った既存 entry を一覧し、
+// ユーザー操作で imageUrl のみ空文字化する。entry 本体・サムネ（thumbId）・ディスク上の
+// 保存ファイル（savePaths）は変更しない。対象は「imageUrl が data: で始まる entry」を
+// 動的列挙（旧 export の import で再流入しても同じボタンで再除去できる）。
+// 書込は _patchSaveHistory（差分 put、clear なし）経由のみ。
+// ----------------------------------------------------------------
+function _histDataUrlTargets() {
+  return (_historyData || []).filter(h => typeof h.imageUrl === "string" && h.imageUrl.startsWith("data:"));
+}
+
+function _updateHistCleanupDataUrlBtn() {
+  const btn = document.getElementById("hist-cleanup-dataurl");
+  if (!btn) return;
+  const targets = _histDataUrlTargets();
+  if (targets.length === 0) { btn.style.display = "none"; return; }
+  const totalMB = (targets.reduce((s, h) => s + h.imageUrl.length, 0) / 1048576).toFixed(1);
+  btn.style.display = "";
+  btn.textContent = `⚠ 巨大データ整理（${targets.length} 件・約 ${totalMB}MB）`;
+}
+
+function showDataUrlCleanupDialog() {
+  const existing = document.querySelector(".period-dialog-overlay");
+  if (existing) existing.remove();
+  const targets = _histDataUrlTargets();
+  if (targets.length === 0) {
+    showStatus("対象の履歴はありません（imageUrl が dataURL の entry は 0 件）");
+    _updateHistCleanupDataUrlBtn();
+    return;
+  }
+  const totalMB = (targets.reduce((s, h) => s + h.imageUrl.length, 0) / 1048576).toFixed(1);
+  const rows = targets.map(h => {
+    const date = h.savedAt ? new Date(h.savedAt).toLocaleString("ja-JP") : "（日時なし）";
+    const mb = (h.imageUrl.length / 1048576).toFixed(1);
+    return `<div class="pd-row" style="justify-content:space-between;gap:12px">`
+      + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(h.filename || "")}">${escHtml(h.filename || "（ファイル名なし）")}</span>`
+      + `<span style="flex-shrink:0;color:#888">${escHtml(date)}・${mb}MB</span></div>`;
+  }).join("");
+  const overlay = document.createElement("div");
+  overlay.className = "period-dialog-overlay";
+  overlay.innerHTML = `
+    <div class="period-dialog" style="width:440px">
+      <h3>⚠ 巨大データ整理（imageUrl の dataURL 除去）</h3>
+      <div style="font-size:12px;color:#555;margin-bottom:10px">
+        以下 ${targets.length} 件の履歴の imageUrl に巨大な dataURL（計 約 ${totalMB}MB）が含まれています。<br>
+        imageUrl のみ空にします。<b>履歴・サムネイル・保存済みファイルはそのまま残ります</b>（取り消しは事前エクスポートからの復元のみ）。
+      </div>
+      <div style="max-height:220px;overflow-y:auto;border:1px solid #eee;border-radius:6px;padding:6px 10px;margin-bottom:12px">${rows}</div>
+      <div class="pd-footer">
+        <button class="pd-cancel">キャンセル</button>
+        <button class="pd-ok" style="background:#e67e22">imageUrl を空にする（${targets.length} 件）</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector(".pd-cancel").addEventListener("click", () => overlay.remove());
+  overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector(".pd-ok").addEventListener("click", async () => {
+    const okBtn = overlay.querySelector(".pd-ok");
+    okBtn.disabled = true;
+    // 書込失敗時に in-memory を巻き戻すため旧値を退避
+    const prev = new Map(targets.map(h => [h.id, h.imageUrl]));
+    try {
+      targets.forEach(h => { h.imageUrl = ""; });
+      await _patchSaveHistory({ put: targets });
+      overlay.remove();
+      _updateHistCleanupDataUrlBtn();
+      browser.runtime.sendMessage({ type: "GET_STORAGE_SIZE" }).then(r => {
+        if (r) document.getElementById("hist-storage").textContent = `保存履歴情報: ${r.storageSizeStr}`;
+      }).catch(() => {});
+      showStatus(`✅ ${targets.length} 件の imageUrl を空にしました（約 ${totalMB}MB 削減）`);
+    } catch (err) {
+      targets.forEach(h => { const p = prev.get(h.id); if (typeof p === "string") h.imageUrl = p; });
+      okBtn.disabled = false;
+      showStatus(`❌ 整理に失敗しました: ${err?.message || err}`, true);
+    }
+  });
+}
+
 // @spec 設計書類/画面別/01_設定画面_保存履歴タブ_詳細.md
 async function renderHistoryTab() {
   // v1.45.5 Phase C-2: saveHistory は migration aware
@@ -3929,6 +4013,9 @@ async function renderHistoryTab() {
       document.getElementById("hist-idb").textContent     = `保存サムネイル: ${r.idbSizeStr}`;
     }
   }).catch(() => {});
+
+  // v1.46.43 GROUP-118：巨大データ整理ボタンの表示更新（imageUrl が dataURL の entry の有無で切替）
+  _updateHistCleanupDataUrlBtn();
 
   // v1.46.19 GROUP-75-grid-resizable：保存履歴 grid の横リサイズと幅の永続化を初期化
   // 永続値を取得済（stored.settingsHistGridWidth）→ 初期 width に設定 → ResizeObserver で変更検知して保存

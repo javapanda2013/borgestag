@@ -3014,7 +3014,11 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
 
   const _newEntry = {
     id:           crypto.randomUUID(),
-    imageUrl,
+    // v1.46.43 GROUP-118：dataURL（動画→GIF 変換結果など、数十 MB 級）を履歴 entry に保持しない。
+    // 履歴の表示・lightbox・サムネ再生成は thumbId / savePaths 経由で imageUrl の dataURL を参照しない
+    // （外部取込 entry は従来から imageUrl 空文字）。保存処理・サムネ生成は本関数引数の imageUrl を
+    // そのまま使うため、entry への格納だけを空にしても保存フローへの影響はない。
+    imageUrl:     (typeof imageUrl === "string" && imageUrl.startsWith("data:")) ? "" : imageUrl,
     pageUrl:      pageUrl       || null,
     thumbId,
     thumbWidth,

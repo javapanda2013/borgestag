@@ -91,6 +91,33 @@ browser.storage.onChanged.addListener((changes) => {
   if ("hoverButtonsTempHidden" in changes) refreshHoverHiddenBadge();
 });
 
+// v1.46.45 GROUP-116-B: 新規（空）環境の自動移送。
+// 移送 UI（設定画面の手動ボタン）撤去に伴い、未移送かつデータが一切ない環境のみ
+// 起動時に移送済み状態へ自動設定する（移すデータが無いため flag 設定のみで完結）。
+// 既存データを持つ未移送環境（旧版からの更新等）は対象外＝従来の legacy 経路のまま動作する。
+async function _autoMigrateEmptySaveHistory() {
+  try {
+    const stored = await browser.storage.local.get(
+      ["saveHistoryMigrationStatus", "saveHistory", "_legacySaveHistory_v1"]);
+    if (stored.saveHistoryMigrationStatus === "migrated") return;
+    if ((stored.saveHistory || []).length > 0) return;
+    if ((stored._legacySaveHistory_v1 || []).length > 0) return;
+    const db = await openThumbDB();
+    const n  = await new Promise((resolve, reject) => {
+      const tx  = db.transaction(IDB_HISTORY_STORE, "readonly");
+      const req = tx.objectStore(IDB_HISTORY_STORE).count();
+      req.onsuccess = (e) => resolve(e.target.result || 0);
+      req.onerror   = (e) => reject(e.target.error);
+    });
+    if (n > 0) return; // 未移送なのに IDB に履歴がある不整合状態は触らない（安全側）
+    await browser.storage.local.set({ saveHistoryMigrationStatus: "migrated" });
+    console.log("[GROUP-116-B] 空環境を検出、saveHistory を IDB 管理（移送済み）として初期化しました");
+  } catch (e) {
+    console.warn("[GROUP-116-B] 自動移送チェックをスキップ:", e);
+  }
+}
+_autoMigrateEmptySaveHistory();
+
 // アイコンクリックで設定タブを開く（popup を使わない）
 browser.browserAction.onClicked.addListener(() => {
   browser.runtime.openOptionsPage();

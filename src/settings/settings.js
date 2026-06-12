@@ -280,112 +280,10 @@ async function _getHistoryEntryById(id) {
   return (Array.isArray(stored.saveHistory) ? stored.saveHistory : []).find(e => e && e.id === id) || null;
 }
 
-// v1.45.5 Phase C-2: migration ボタンの実行ロジック
-async function _runSaveHistoryMigration(buttonEl, statusEl) {
-  // 多重押下防止
-  if (buttonEl && buttonEl.disabled) return;
-  if (buttonEl) buttonEl.disabled = true;
-
-  // 1. 確認ダイアログ
-  const stored = await browser.storage.local.get(["saveHistory", "saveHistoryMigrationStatus"]);
-  if (stored.saveHistoryMigrationStatus === "migrated") {
-    alert("既に移送済みです。");
-    return;
-  }
-  const history = stored.saveHistory || [];
-  const n = history.length;
-  const ok = confirm(
-    `保存履歴 ${n} 件を IndexedDB へ移送します。\n\n` +
-    `移送中はタブを閉じないでください（途中閉鎖時は自動ロールバック）。\n` +
-    `移送後は storage.local の broadcast コストが消失し、メモリ消費が大幅に減少します。\n\n` +
-    `実行しますか？`
-  );
-  if (!ok) {
-    if (buttonEl) buttonEl.disabled = false;
-    return;
-  }
-
-  // 2. beforeunload 警告（移送中はタブクローズで警告）
-  const beforeUnloadHandler = (e) => {
-    e.preventDefault();
-    e.returnValue = "saveHistory IDB 移送中です。閉じるとデータ整合性が壊れます。";
-    return e.returnValue;
-  };
-  window.addEventListener("beforeunload", beforeUnloadHandler);
-
-  // 3. busy modal 表示（既存の処理中モーダル準拠）
-  if (typeof showBusyModal === "function") {
-    showBusyModal(`saveHistory を IDB へ移送中…`, `0 / ${n} 件`);
-  }
-
-  try {
-    // 4. IDB に clear → bulk put
-    if (typeof updateBusyMessage === "function") {
-      updateBusyMessage(`saveHistory を IDB へ移送中…`, `${n} / ${n} 件 書込中`);
-    }
-    await _mirrorSaveHistoryToIDB(history);
-
-    // 5. legacy にコピー保全 ＋ 元キー削除
-    await browser.storage.local.set({
-      _legacySaveHistory_v1: history,
-      saveHistoryMigrationStatus: "migrated",
-    });
-    await browser.storage.local.remove("saveHistory");
-
-    // 6. 完了表示
-    if (typeof completeBusyModal === "function") {
-      completeBusyModal(`✅ ${n} 件を IndexedDB へ移送しました。以降の保存は IDB のみで動作します。`);
-    } else {
-      alert(`✅ ${n} 件を IndexedDB へ移送しました。`);
-    }
-    if (statusEl) {
-      statusEl.textContent = `現在：IDB 専用（移送済 ${n} 件）`;
-      statusEl.classList.add("migrated");
-    }
-  } catch (err) {
-    // 7. エラー時は自動 rollback（Q-35-perfC2-4=a）
-    console.error("[Phase C-2] saveHistory 移送失敗、rollback します", err);
-    try {
-      // status をクリア（migration 前の状態に戻す）
-      await browser.storage.local.remove(["saveHistoryMigrationStatus"]);
-      // saveHistory を legacy から復元（または元データ維持）
-      const legacy = await browser.storage.local.get("_legacySaveHistory_v1");
-      if (legacy._legacySaveHistory_v1) {
-        await browser.storage.local.set({ saveHistory: legacy._legacySaveHistory_v1 });
-        await browser.storage.local.remove("_legacySaveHistory_v1");
-      }
-    } catch (rollbackErr) {
-      console.error("[Phase C-2] rollback 自体も失敗", rollbackErr);
-    }
-    alert(`❌ 移送失敗：${err.message || err}\n自動ロールバックを試みました。コンソールログを確認してください。`);
-    if (buttonEl) buttonEl.disabled = false;
-  } finally {
-    window.removeEventListener("beforeunload", beforeUnloadHandler);
-    if (typeof hideBusyModal === "function") setTimeout(hideBusyModal, 1500);
-  }
-}
-
-// v1.45.5 Phase C-2: 移送 UI の状態表示更新
-async function _updateMigrationStatusUI() {
-  const btn = document.getElementById("btn-migrate-savehistory");
-  const statusEl = document.getElementById("migrate-status");
-  if (!btn || !statusEl) return;
-  const stored = await browser.storage.local.get(["saveHistoryMigrationStatus", "saveHistory", "_legacySaveHistory_v1"]);
-  if (stored.saveHistoryMigrationStatus === "migrated") {
-    btn.disabled = true;
-    btn.textContent = "✅ 移送済";
-    btn.title = "saveHistory は IndexedDB のみで管理されています";
-    const legacy = stored._legacySaveHistory_v1 || [];
-    statusEl.textContent = `現在：IDB 専用（移送済、legacy 保全 ${legacy.length} 件）`;
-    statusEl.classList.add("migrated");
-  } else {
-    btn.disabled = false;
-    btn.textContent = "📦 saveHistory を IDB へ移送";
-    const cur = (stored.saveHistory || []).length;
-    statusEl.textContent = `現在：storage.local + IDB shadow（${cur} 件）`;
-    statusEl.classList.remove("migrated");
-  }
-}
+// v1.46.45 GROUP-116-B: 移送 UI（ボタン・状態表示・手動移送ロジック _runSaveHistoryMigration /
+// _updateMigrationStatusUI）を撤去。移送は完了済みで、新規（空）環境は background 起動時の
+// _autoMigrateEmptySaveHistory が移送済み状態へ自動設定する。migration-aware の読み書き分岐と
+// _legacySaveHistory_v1（保全データ）はそのまま維持。
 
 // ----------------------------------------------------------------
 // 状態
@@ -570,17 +468,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (verEl) verEl.textContent = `v${manifest.version}`;
   } catch {}
 
-  // v1.45.5 GROUP-35-perf-A Phase C-2: saveHistory 移送ボタン
-  const migBtn = document.getElementById("btn-migrate-savehistory");
-  const migStatus = document.getElementById("migrate-status");
-  if (migBtn) {
-    migBtn.addEventListener("click", async () => {
-      await _runSaveHistoryMigration(migBtn, migStatus);
-      await _updateMigrationStatusUI();
-    });
-    // 起動時に状態を反映（Q-35-perfC2-6=c：ステータス文字 + ボタン disable 両方）
-    _updateMigrationStatusUI().catch(() => {});
-  }
+  // v1.46.45 GROUP-116-B: 移送ボタンの配線を撤去（UI 自体を settings.html から削除済み）
 
   // ---- タグ並び順セレクター ----
   const tagSortSelect = document.getElementById("tag-sort-select");

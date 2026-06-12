@@ -319,12 +319,16 @@ function isValidCanvas(el) {
 // （broadcast 地雷、GROUP-35 教訓）＝ background のメモリ経由で受け渡す。
 // ----------------------------------------------------------------
 const CAPTURE_MAX_SEC = 20; // Phase 1 固定パラメータと同じ上限
-const CAPTURE_MIMES = ['video/webm;codecs="vp8"', "video/webm"];
 let _captureActive = false;
 
 function _flashVideoBtn(btn, text) {
   btn.textContent = text;
   setTimeout(() => { btn.textContent = "🎬 動画→GIF"; }, 2500);
+}
+
+function _releaseStream(stream) {
+  // captureStream の track 停止は元の動画再生には影響しない（capture 側のみ解放）
+  try { stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
 }
 
 async function captureAndSend(el, btn) {
@@ -340,11 +344,19 @@ async function captureAndSend(el, btn) {
     _flashVideoBtn(btn, "🚫 取得不可（保護コンテンツ）");
     return;
   }
-  const mime = CAPTURE_MIMES.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  // v1.46.48 GROUP-15 hotfix：audio track の有無で録画形式を選択。
+  // YouTube 等の audio 入り stream を映像コーデックのみの指定で start すると
+  // 「An audio track cannot be recorded」DOMException（実機ログで確定した真因）
+  const hasAudio = stream.getAudioTracks().length > 0;
+  const mimeCands = hasAudio
+    ? ['video/webm;codecs="vp8,opus"', "video/webm"]
+    : ['video/webm;codecs="vp8"', "video/webm"];
+  const mime = mimeCands.find((m) => MediaRecorder.isTypeSupported(m)) || "";
   let recorder = null;
   try {
     recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
   } catch (_err) {
+    _releaseStream(stream);
     _flashVideoBtn(btn, "🚫 録画不可（環境非対応）");
     return;
   }
@@ -353,21 +365,42 @@ async function captureAndSend(el, btn) {
   recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
   const secLimit = isVideo && Number.isFinite(el.duration) && el.duration > 0
     ? Math.min(el.duration, CAPTURE_MAX_SEC) : CAPTURE_MAX_SEC;
-  const done = new Promise((resolve) => { recorder.onstop = resolve; });
-  const onEnded = () => { if (recorder.state !== "inactive") recorder.stop(); };
-  if (isVideo) el.addEventListener("ended", onEnded, { once: true });
+  // v1.46.48 hotfix：終了待ちを onstop 1 本に依存させない三重ガード。
+  // onstop／onerror／watchdog（上限+5 秒）のどれでも必ず解け、finally で
+  // カウンタ・timer・track を確実に解放する（「録画中」無限進行の構造的防止）
+  let settle = null;
+  const done = new Promise((resolve) => { settle = resolve; });
+  recorder.onstop = () => settle("stop");
+  recorder.onerror = (ev) => {
+    console.warn("[BorgesTag] capture onerror:", ev.error ? ev.error.name : ev);
+    settle("error");
+  };
+  const watchdog = setTimeout(() => settle("watchdog"), (secLimit + 5) * 1000);
+  const requestStop = () => { try { if (recorder.state !== "inactive") recorder.stop(); } catch (_) {} };
+  if (isVideo) el.addEventListener("ended", requestStop, { once: true });
   let elapsed = 0;
   const tick = setInterval(() => {
     elapsed++;
     btn.textContent = `⏺ 録画中 ${elapsed}/${Math.round(secLimit)}s`;
   }, 1000);
-  recorder.start(1000);
-  btn.textContent = `⏺ 録画中 0/${Math.round(secLimit)}s`;
-  setTimeout(() => { if (recorder.state !== "inactive") recorder.stop(); }, secLimit * 1000);
-  await done;
-  clearInterval(tick);
-  if (isVideo) el.removeEventListener("ended", onEnded);
-  _captureActive = false;
+  let stopTimer = null;
+  try {
+    recorder.start(1000);
+    btn.textContent = `⏺ 録画中 0/${Math.round(secLimit)}s`;
+    stopTimer = setTimeout(requestStop, secLimit * 1000);
+    await done;
+  } catch (err) {
+    console.warn("[BorgesTag] capture start failed:", err && err.name, err && err.message);
+  } finally {
+    clearInterval(tick);
+    clearTimeout(watchdog);
+    if (stopTimer) clearTimeout(stopTimer);
+    if (isVideo) el.removeEventListener("ended", requestStop);
+    requestStop();
+    _releaseStream(stream);
+    _captureActive = false;
+    btn.textContent = "🎬 動画→GIF";
+  }
   let blob = new Blob(chunks, { type: mime || "video/webm" });
   chunks.length = 0;
   if (!blob.size) {

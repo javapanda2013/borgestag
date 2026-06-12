@@ -346,8 +346,14 @@ async function handleAsyncMessage(message, sender) {
       return;
     case "OPEN_VIDEO_CONVERT_CAPTURED": {
       // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob:/MSE 動画・Canvas）の webm を
-      // メモリ保管し、変換ウィンドウを開く（録画データは storage.local に載せない）
-      _pendingVideoCapture = { buffer: message.buffer, mime: message.mime };
+      // メモリ保管し、変換ウィンドウを開く（録画データは storage.local に載せない）。
+      // scope2 (v1.46.49)：blob 原データ（blob-file）／うごイラ ZIP（ugoira、frames メタ付き）も同経路
+      _pendingVideoCapture = {
+        buffer: message.buffer,
+        mime: message.mime,
+        frames: message.frames || null,
+        frameMime: message.frameMime || null,
+      };
       message.buffer = null; // 巨大 payload null 代入（受領直後、GROUP-82 規約）
       openVideoConvertWindow({
         videoUrl: "",

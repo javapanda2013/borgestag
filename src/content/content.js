@@ -155,42 +155,125 @@ function getWrap() {
     hideNow();
   });
 
-  // GROUP-15-impl-A-phase1：動画 → GIF 変換ボタン（video 要素ホバー時のみ表示）
-  const videoBtn = document.createElement("button");
-  videoBtn.id = "__image-saver-video-btn__";
-  videoBtn.textContent = "🎬 動画→GIF";
-  videoBtn.title = "動画/Canvas を GIF に変換して保存（blob・MSE 動画と Canvas はページ内録画→変換）";
-  videoBtn.style.cssText = btnStyle("rgba(120,60,160,.9)");
-  videoBtn.style.display = "none"; // 初期非表示、video ホバー時のみ show
-  videoBtn.addEventListener("mouseenter", () => clearTimeout(hideTimer));
-  videoBtn.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
-  videoBtn.addEventListener("click", async (e) => {
+  // GROUP-15 scope2 (v1.46.49)：動画/Canvas 用は「⏱ 時間指定録画」「✂ 切り抜き開始」の 2 ボタン。
+  // 取得経路の組合せ（机上検証済み）：
+  //   時間指定録画 → 尺取得 → パネルで「全取得／範囲指定」を選択
+  //     全取得：video×http=従来経路 ／ video×blob=原データ fetch（不能時は先頭から自動録画へ退避）
+  //             ／ canvas×pixiv=うごイラ解析 ／ canvas×他=非表示
+  //     範囲指定：video=開始秒へシークして自動録画 ／ canvas=「これから N 秒」
+  //   切り抜き開始 → その場で録画開始（録画中は「⏹ ここまで確定」＋「✕ 中止」）
+  const timedBtn = document.createElement("button");
+  timedBtn.id = "__image-saver-timed-btn__";
+  timedBtn.textContent = TIMED_LABEL;
+  timedBtn.title = "動画の尺を確認して「全取得」か「範囲指定」で GIF 変換";
+  timedBtn.style.cssText = btnStyle("rgba(120,60,160,.9)");
+  timedBtn.style.display = "none";
+  timedBtn.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+  timedBtn.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
+  timedBtn.addEventListener("click", (e) => {
     e.preventDefault(); e.stopPropagation();
     const el = currentImg;
+    if (!el || _captureActive) return;
+    if (el.tagName !== "VIDEO" && el.tagName !== "CANVAS") return;
+    _openRangePanel(el);
+  });
+
+  const clipBtn = document.createElement("button");
+  clipBtn.id = "__image-saver-video-btn__"; // 旧 🎬 ボタンの id を継承（録画系の本体）
+  clipBtn.textContent = CLIP_LABEL;
+  clipBtn.title = "いま再生中の位置からページ内録画（録画中にもう一度押すと、そこまでで確定）";
+  clipBtn.style.cssText = btnStyle("rgba(160,90,30,.9)");
+  clipBtn.style.display = "none";
+  clipBtn.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+  clipBtn.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
+  clipBtn.addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (_recCtl) { _recCtl.stop(); return; } // 録画中＝ここまでで確定
+    const el = currentImg;
     if (!el || (el.tagName !== "VIDEO" && el.tagName !== "CANVAS")) return;
-    // 組合せ 3 通り（机上検証済み）：
-    //   ① VIDEO × http(s) URL → 従来経路（変換ウィンドウが URL を直接ロード、不変）
-    //   ② VIDEO × blob:/MSE 等の非 http URL → ページ内録画経路（v1.46.46 新設）
-    //   ③ CANVAS（URL なし） → ページ内録画経路（同上）
-    const directUrl = el.tagName === "VIDEO" ? (el.currentSrc || el.src) : "";
-    if (/^https?:/i.test(directUrl)) {
-      browser.runtime.sendMessage({
-        type:        "OPEN_VIDEO_CONVERT",
-        videoUrl:    directUrl,
-        pageUrl:     location.href,
-        videoWidth:  el.videoWidth || 0,
-        videoHeight: el.videoHeight || 0,
-        duration:    Number.isFinite(el.duration) ? el.duration : 0,
-      });
-      hideNow();
-      return;
+    _closeRangePanel();
+    await captureAndSend(el, clipBtn);
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.id = "__image-saver-cancel-btn__";
+  cancelBtn.textContent = "✕ 中止";
+  cancelBtn.title = "録画を中止して破棄";
+  cancelBtn.style.cssText = btnStyle("rgba(170,40,40,.9)");
+  cancelBtn.style.display = "none"; // 録画中のみ表示
+  cancelBtn.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+  cancelBtn.addEventListener("click", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (_recCtl) _recCtl.cancel();
+  });
+
+  // ⏱ 時間指定録画の選択パネル（ボタン列の直下に表示）
+  const panel = document.createElement("div");
+  panel.id = "__image-saver-range-panel__";
+  panel.style.cssText = `
+    position: absolute; top: calc(100% + 4px); left: 0;
+    display: none; flex-direction: column; gap: 6px;
+    background: rgba(25,25,25,.95); color: #fff;
+    border: 1px solid rgba(255,255,255,.3); border-radius: 8px;
+    padding: 8px 10px; font-size: 12px; font-family: sans-serif;
+    box-shadow: 0 2px 10px rgba(0,0,0,.5); white-space: nowrap; z-index: 2147483647;
+  `;
+  panel.innerHTML = `
+    <div id="__is-range-dur__">尺: -</div>
+    <button id="__is-range-full__" type="button" style="${btnStyle("rgba(120,60,160,.9)")}">🎬 全取得</button>
+    <div style="display:flex; gap:4px; align-items:center;">
+      <input id="__is-range-start__" type="number" min="0" step="0.1" value="0"
+             style="width:56px; padding:2px 4px; border-radius:4px; border:1px solid #888; background:#222; color:#fff;">
+      <span>〜</span>
+      <input id="__is-range-end__" type="number" min="0" step="0.1" value="10"
+             style="width:56px; padding:2px 4px; border-radius:4px; border:1px solid #888; background:#222; color:#fff;">
+      <span>秒</span>
+      <button id="__is-range-go__" type="button" style="${btnStyle("rgba(160,90,30,.9)")}">範囲で取得</button>
+    </div>
+    <button id="__is-range-close__" type="button" style="${btnStyle("rgba(80,80,80,.9)")}">閉じる</button>
+  `;
+  panel.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+  panel.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
+  panel.querySelector("#__is-range-close__").addEventListener("click", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    _closeRangePanel();
+  });
+  panel.querySelector("#__is-range-full__").addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const el = _panelOpenFor;
+    _closeRangePanel();
+    if (el) await executeFullCapture(el, timedBtn);
+  });
+  panel.querySelector("#__is-range-go__").addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const el = _panelOpenFor;
+    if (!el) return;
+    const durEl = panel.querySelector("#__is-range-dur__");
+    const isUgoira = el.tagName === "CANVAS" && _ugoiraReady();
+    const startEnabled = !panel.querySelector("#__is-range-start__").disabled;
+    const s = startEnabled ? (parseFloat(panel.querySelector("#__is-range-start__").value) || 0) : 0;
+    let en = parseFloat(panel.querySelector("#__is-range-end__").value) || 0;
+    if (en <= s) { durEl.textContent = "⚠ 終了は開始より後にしてください"; return; }
+    // うごイラ解析はコマの切り出し（録画でない）ため録画上限を適用しない
+    if (!isUgoira && en - s > CAPTURE_MAX_SEC) {
+      en = s + CAPTURE_MAX_SEC;
+      panel.querySelector("#__is-range-end__").value = String(en);
+      durEl.textContent = `⚠ 上限 ${CAPTURE_MAX_SEC} 秒で打ち切ります`;
     }
-    await captureAndSend(el, videoBtn);
+    _closeRangePanel();
+    if (isUgoira) {
+      await fetchUgoiraAndSend(timedBtn, { start: s, end: en });
+    } else {
+      await autoRecordRange(el, clipBtn, s, en);
+    }
   });
 
   wrap.appendChild(instantBtn);
   wrap.appendChild(saveBtn);
-  wrap.appendChild(videoBtn);
+  wrap.appendChild(timedBtn);
+  wrap.appendChild(clipBtn);
+  wrap.appendChild(cancelBtn);
+  wrap.appendChild(panel);
   document.body.appendChild(wrap);
   hoverWrap = wrap;
   return wrap;
@@ -199,20 +282,26 @@ function getWrap() {
 // GROUP-15-impl-A-phase1：video / img に応じてボタン表示を切替
 function updateButtonVisibility() {
   if (!hoverWrap) return;
-  // GROUP-15 範囲拡大 (v1.46.46)：canvas も 🎬 のみ表示の組（video と同じ扱い）。
-  // 組合せ：img=⚡💾 ／ video=🎬 ／ canvas=🎬 の 3 通り（机上検証済み、img 系経路は不変）
-  const isVideo = currentImg && (currentImg.tagName === "VIDEO" || currentImg.tagName === "CANVAS");
+  if (_captureActive) return; // 録画中は録画処理側が表示を管理（確定/中止を消さない）
+  // GROUP-15 scope2 (v1.46.49)：組合せ＝img=⚡💾 ／ video・canvas=⏱＋✂（机上検証済み、img 系経路は不変）
+  const isMedia = currentImg && (currentImg.tagName === "VIDEO" || currentImg.tagName === "CANVAS");
   const instantBtn = hoverWrap.querySelector("#__image-saver-instant-btn__");
   const saveBtn = hoverWrap.querySelector("#__image-saver-hover-btn__");
-  const videoBtn = hoverWrap.querySelector("#__image-saver-video-btn__");
-  if (isVideo) {
+  const timedBtn = hoverWrap.querySelector("#__image-saver-timed-btn__");
+  const clipBtn = hoverWrap.querySelector("#__image-saver-video-btn__");
+  const cancelBtn = hoverWrap.querySelector("#__image-saver-cancel-btn__");
+  if (cancelBtn) cancelBtn.style.display = "none";
+  if (isMedia) {
     if (instantBtn) instantBtn.style.display = "none";
     if (saveBtn) saveBtn.style.display = "none";
-    if (videoBtn) videoBtn.style.display = "";
+    if (timedBtn) timedBtn.style.display = "";
+    if (clipBtn) clipBtn.style.display = "";
   } else {
     if (instantBtn) instantBtn.style.display = instantSaveEnabled ? "" : "none";
     if (saveBtn) saveBtn.style.display = "";
-    if (videoBtn) videoBtn.style.display = "none";
+    if (timedBtn) timedBtn.style.display = "none";
+    if (clipBtn) clipBtn.style.display = "none";
+    _closeRangePanel();
   }
 }
 
@@ -273,13 +362,17 @@ function stopWatch() {
 }
 
 function scheduleHide() {
+  // GROUP-15 scope2 (v1.46.49)：録画中・範囲パネル表示中はボタン群を消さない
+  if (_captureActive || _panelOpenFor) return;
   clearTimeout(hideTimer);
   hideTimer = setTimeout(hideNow, DELAY_HIDE);
 }
 
 function hideNow() {
+  if (_captureActive) return; // 録画中は「⏹ 確定」「✕ 中止」を残す
   clearTimeout(showTimer); clearTimeout(hideTimer); stopWatch();
   if (hoverWrap) hoverWrap.style.opacity = "0";
+  _closeRangePanel();
   currentImg = null;
 }
 
@@ -319,11 +412,228 @@ function isValidCanvas(el) {
 // （broadcast 地雷、GROUP-35 教訓）＝ background のメモリ経由で受け渡す。
 // ----------------------------------------------------------------
 const CAPTURE_MAX_SEC = 20; // Phase 1 固定パラメータと同じ上限
+const TIMED_LABEL = "⏱ 時間指定録画";
+const CLIP_LABEL  = "✂ 切り抜き開始";
 let _captureActive = false;
+let _recCtl = null;       // 録画中の操作（stop=確定 / cancel=破棄）
+let _panelOpenFor = null; // 範囲パネルの対象要素
+
+function _flashBtn(btn, text, resetLabel) {
+  btn.textContent = text;
+  setTimeout(() => { btn.textContent = resetLabel; }, 2500);
+}
 
 function _flashVideoBtn(btn, text) {
-  btn.textContent = text;
-  setTimeout(() => { btn.textContent = "🎬 動画→GIF"; }, 2500);
+  _flashBtn(btn, text, CLIP_LABEL);
+}
+
+// ---- 範囲パネル（⏱ 時間指定録画） ----
+function _openRangePanel(el) {
+  const panel = hoverWrap && hoverWrap.querySelector("#__image-saver-range-panel__");
+  if (!panel) return;
+  const isVideo = el.tagName === "VIDEO";
+  const dur = isVideo && Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+  const startIn = panel.querySelector("#__is-range-start__");
+  const endIn = panel.querySelector("#__is-range-end__");
+  if (isVideo) {
+    panel.querySelector("#__is-range-dur__").textContent =
+      dur ? `動画の尺: ${dur.toFixed(1)} 秒` : "動画の尺: 不明（配信形式）";
+    startIn.disabled = false;
+  } else if (_pixivIllustId()) {
+    // pixiv canvas＝うごイラ：解析メタから正確な尺・コマ数を表示（user 指摘反映）
+    panel.querySelector("#__is-range-dur__").textContent = "うごイラの尺を取得中…";
+    startIn.disabled = false;
+    _loadUgoiraMetaForPanel(panel);
+  } else {
+    panel.querySelector("#__is-range-dur__").textContent =
+      "canvas：尺の取得手段なし。「これから N 秒」で指定";
+    startIn.disabled = true;
+  }
+  startIn.value = "0";
+  endIn.value = String(Math.min(dur || 10, CAPTURE_MAX_SEC));
+  const fullB = panel.querySelector("#__is-range-full__");
+  const fullable = isVideo ? !!(el.currentSrc || el.src) : !!_pixivIllustId();
+  fullB.style.display = fullable ? "" : "none";
+  panel.style.display = "flex";
+  _panelOpenFor = el;
+}
+
+function _closeRangePanel() {
+  const panel = hoverWrap && hoverWrap.querySelector("#__image-saver-range-panel__");
+  if (panel) panel.style.display = "none";
+  _panelOpenFor = null;
+}
+
+// ---- 全取得（素材別に最適経路へ振り分け） ----
+async function executeFullCapture(el, btn) {
+  if (el.tagName === "VIDEO") {
+    const url = el.currentSrc || el.src;
+    if (/^https?:/i.test(url)) {
+      // 直 URL：従来経路（変換ウィンドウが URL を直接ロード、不変）
+      browser.runtime.sendMessage({
+        type: "OPEN_VIDEO_CONVERT", videoUrl: url, pageUrl: location.href,
+        videoWidth: el.videoWidth || 0, videoHeight: el.videoHeight || 0,
+        duration: Number.isFinite(el.duration) ? el.duration : 0,
+      });
+      hideNow();
+      return;
+    }
+    // blob:：原データ fetch を試行、取得不能（MSE 等）なら先頭から自動録画へ退避（仕様）
+    const ok = await fetchBlobAndSend(el, btn);
+    if (!ok) {
+      const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : CAPTURE_MAX_SEC;
+      await autoRecordRange(el, btn, 0, Math.min(dur, CAPTURE_MAX_SEC));
+    }
+    return;
+  }
+  if (el.tagName === "CANVAS") {
+    if (_pixivIllustId()) {
+      await fetchUgoiraAndSend(btn);
+    } else {
+      _flashBtn(btn, "🚫 この canvas は全取得非対応", TIMED_LABEL);
+    }
+  }
+}
+
+// ---- 範囲指定：開始秒へシークして自動録画（canvas は「これから N 秒」） ----
+async function autoRecordRange(el, btn, startSec, endSec) {
+  if (_captureActive) return;
+  if (el.tagName === "VIDEO") {
+    try {
+      el.currentTime = Math.max(0, startSec);
+      await new Promise((res) => {
+        const onSeek = () => { el.removeEventListener("seeked", onSeek); res(); };
+        el.addEventListener("seeked", onSeek);
+        setTimeout(() => { el.removeEventListener("seeked", onSeek); res(); }, 3000);
+      });
+      try { await el.play(); } catch (_) {}
+    } catch (_) { /* シーク不能でも現在位置から録画する */ }
+  }
+  const clipBtn = (hoverWrap && hoverWrap.querySelector("#__image-saver-video-btn__")) || btn;
+  await captureAndSend(el, clipBtn, Math.max(0.5, endSec - startSec));
+}
+
+// ---- blob: 動画の原データ取得（成功で true。MSE 等の object URL は fetch 不可→false） ----
+async function fetchBlobAndSend(el, btn) {
+  const url = el.currentSrc || el.src;
+  const prevLabel = btn.textContent;
+  btn.textContent = "⏳ 取得中…";
+  let buf = null;
+  let type = "";
+  try {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    type = blob.type || "video/mp4";
+    if (!blob.size) throw new Error("empty blob");
+    buf = await blob.arrayBuffer();
+  } catch (err) {
+    console.warn("[BorgesTag] blob fetch failed（MSE 等は仕様上 fetch 不可）:", err && err.name);
+    btn.textContent = prevLabel;
+    return false;
+  }
+  await browser.runtime.sendMessage({
+    type: "OPEN_VIDEO_CONVERT_CAPTURED",
+    buffer: buf, mime: type,
+    pageUrl: location.href,
+    videoWidth: el.videoWidth || 0, videoHeight: el.videoHeight || 0,
+    duration: Number.isFinite(el.duration) ? el.duration : 0,
+    sourceKind: "blob-file",
+  }).catch(() => null);
+  buf = null; // 巨大 payload null 代入（送信完了直後、GROUP-82 規約）
+  btn.textContent = prevLabel;
+  hideNow();
+  return true;
+}
+
+// ---- pixiv うごイラ解析（メタ＋フレーム ZIP をページ文脈で取得し変換ウィンドウへ） ----
+function _pixivIllustId() {
+  if (!/(^|\.)pixiv\.net$/.test(location.hostname)) return null;
+  const m = location.pathname.match(/artworks\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+let _ugoiraMeta = null; // {id, frames, frameMime, zipUrl} のキャッシュ（パネル表示と取得で共用）
+
+async function _fetchUgoiraMeta() {
+  const id = _pixivIllustId();
+  if (!id) throw new Error("no illust id");
+  if (_ugoiraMeta && _ugoiraMeta.id === id) return _ugoiraMeta;
+  const res = await fetch(`/ajax/illust/${id}/ugoira_meta`, { credentials: "same-origin" });
+  const meta = await res.json();
+  if (!meta || meta.error || !meta.body || !Array.isArray(meta.body.frames)) {
+    throw new Error("ugoira meta error");
+  }
+  _ugoiraMeta = {
+    id,
+    frames: meta.body.frames, // [{file, delay(ms)}]
+    frameMime: meta.body.mime_type || "image/jpeg",
+    zipUrl: meta.body.originalSrc || meta.body.src,
+  };
+  return _ugoiraMeta;
+}
+
+// user 指摘（2026-06-13）反映：pixiv canvas は解析メタで正確な尺・コマ数を表示し、
+// 範囲指定はコマ単位の正確な切り出し（録画なし）にする
+async function _loadUgoiraMetaForPanel(panel) {
+  const durEl = panel.querySelector("#__is-range-dur__");
+  const startIn = panel.querySelector("#__is-range-start__");
+  const endIn = panel.querySelector("#__is-range-end__");
+  try {
+    const meta = await _fetchUgoiraMeta();
+    const total = meta.frames.reduce((s, f) => s + (f.delay || 0), 0) / 1000;
+    durEl.textContent = `うごイラ：尺 ${total.toFixed(1)} 秒・${meta.frames.length} コマ（範囲はコマ単位で正確に切り出し）`;
+    startIn.disabled = false;
+    startIn.value = "0";
+    endIn.value = total.toFixed(1);
+  } catch (_err) {
+    durEl.textContent = "canvas：尺の取得に失敗（「これから N 秒」の録画になります）";
+  }
+}
+
+function _ugoiraReady() {
+  const id = _pixivIllustId();
+  return !!(id && _ugoiraMeta && _ugoiraMeta.id === id);
+}
+
+async function fetchUgoiraAndSend(btn, range) {
+  const prevLabel = btn.textContent;
+  btn.textContent = "⏳ 取得中…";
+  try {
+    const meta = await _fetchUgoiraMeta();
+    // range 指定時：累積 delay で該当時間帯に重なるコマだけを送る（正確な切り出し）
+    let frames = meta.frames;
+    if (range) {
+      const sMs = range.start * 1000;
+      const eMs = range.end * 1000;
+      let tMs = 0;
+      frames = meta.frames.filter((f) => {
+        const fs = tMs;
+        tMs += (f.delay || 0);
+        return fs < eMs && tMs > sMs;
+      });
+      if (!frames.length) frames = meta.frames.slice(0, 1);
+    }
+    const zipRes = await fetch(meta.zipUrl);
+    if (!zipRes.ok) throw new Error("zip http " + zipRes.status);
+    let zipBuf = await zipRes.arrayBuffer();
+    await browser.runtime.sendMessage({
+      type: "OPEN_VIDEO_CONVERT_CAPTURED",
+      buffer: zipBuf, mime: "application/x-ugoira-zip",
+      frames,
+      frameMime: meta.frameMime,
+      pageUrl: location.href,
+      videoWidth: 0, videoHeight: 0,
+      duration: frames.reduce((s, f) => s + (f.delay || 0), 0) / 1000,
+      sourceKind: "ugoira",
+    }).catch(() => null);
+    zipBuf = null; // 巨大 payload null 代入（送信完了直後、GROUP-82 規約）
+  } catch (err) {
+    console.warn("[BorgesTag] ugoira fetch failed:", err);
+    _flashBtn(btn, "🚫 全取得不可（✂ 切り抜きをご利用ください）", TIMED_LABEL);
+    return;
+  }
+  btn.textContent = prevLabel;
+  hideNow();
 }
 
 function _releaseStream(stream) {
@@ -331,7 +641,7 @@ function _releaseStream(stream) {
   try { stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
 }
 
-async function captureAndSend(el, btn) {
+async function captureAndSend(el, btn, fixedSec) {
   if (_captureActive) return;
   const isVideo = el.tagName === "VIDEO";
   let stream = null;
@@ -361,10 +671,13 @@ async function captureAndSend(el, btn) {
     return;
   }
   _captureActive = true;
+  let discard = false; // ✕ 中止（破棄）
   const chunks = [];
   recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-  const secLimit = isVideo && Number.isFinite(el.duration) && el.duration > 0
+  const baseLimit = isVideo && Number.isFinite(el.duration) && el.duration > 0
     ? Math.min(el.duration, CAPTURE_MAX_SEC) : CAPTURE_MAX_SEC;
+  // scope2 (v1.46.49)：範囲指定（時間指定録画）からの呼出しは fixedSec が優先（上限内に clamp）
+  const secLimit = fixedSec ? Math.min(fixedSec, CAPTURE_MAX_SEC) : baseLimit;
   // v1.46.48 hotfix：終了待ちを onstop 1 本に依存させない三重ガード。
   // onstop／onerror／watchdog（上限+5 秒）のどれでも必ず解け、finally で
   // カウンタ・timer・track を確実に解放する（「録画中」無限進行の構造的防止）
@@ -378,15 +691,24 @@ async function captureAndSend(el, btn) {
   const watchdog = setTimeout(() => settle("watchdog"), (secLimit + 5) * 1000);
   const requestStop = () => { try { if (recorder.state !== "inactive") recorder.stop(); } catch (_) {} };
   if (isVideo) el.addEventListener("ended", requestStop, { once: true });
+  // scope2 (v1.46.49)：録画中の操作（切り抜きボタン再押下=確定／中止ボタン=破棄）
+  _recCtl = {
+    stop: requestStop,
+    cancel: () => { discard = true; requestStop(); },
+  };
+  const timedBtnEl = hoverWrap && hoverWrap.querySelector("#__image-saver-timed-btn__");
+  const cancelBtnEl = hoverWrap && hoverWrap.querySelector("#__image-saver-cancel-btn__");
+  if (timedBtnEl) timedBtnEl.style.display = "none";
+  if (cancelBtnEl) cancelBtnEl.style.display = "";
   let elapsed = 0;
   const tick = setInterval(() => {
     elapsed++;
-    btn.textContent = `⏺ 録画中 ${elapsed}/${Math.round(secLimit)}s`;
+    btn.textContent = `⏹ ここまで確定 ${elapsed}/${Math.round(secLimit)}s`;
   }, 1000);
   let stopTimer = null;
   try {
     recorder.start(1000);
-    btn.textContent = `⏺ 録画中 0/${Math.round(secLimit)}s`;
+    btn.textContent = `⏹ ここまで確定 0/${Math.round(secLimit)}s`;
     stopTimer = setTimeout(requestStop, secLimit * 1000);
     await done;
   } catch (err) {
@@ -399,7 +721,15 @@ async function captureAndSend(el, btn) {
     requestStop();
     _releaseStream(stream);
     _captureActive = false;
-    btn.textContent = "🎬 動画→GIF";
+    _recCtl = null;
+    if (cancelBtnEl) cancelBtnEl.style.display = "none";
+    btn.textContent = CLIP_LABEL;
+    updateButtonVisibility();
+  }
+  if (discard) {
+    chunks.length = 0;
+    _flashVideoBtn(btn, "✕ 中止しました");
+    return;
   }
   let blob = new Blob(chunks, { type: mime || "video/webm" });
   chunks.length = 0;

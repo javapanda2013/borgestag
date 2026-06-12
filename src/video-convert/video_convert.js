@@ -243,6 +243,176 @@ async function blobToDataUrl(blob) {
 }
 
 // ================================================================
+// GROUP-15 scope2 (v1.46.49)：うごイラ（pixiv）解析サポート
+// ================================================================
+/**
+ * 最小 ZIP 展開（central directory 走査）。stored(0) と deflate(8) に対応。
+ * うごイラ ZIP は stored が通例だが、deflate も DecompressionStream で展開する。
+ * 返値：{ファイル名: Uint8Array}
+ */
+async function _parseZip(buf) {
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  let eocd = -1;
+  const minPos = Math.max(0, buf.byteLength - 22 - 65535);
+  for (let i = buf.byteLength - 22; i >= minPos; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("zip: end record not found");
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const out = {};
+  const td = new TextDecoder();
+  for (let i = 0; i < count; i++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) throw new Error("zip: bad central header");
+    const method = dv.getUint16(off + 10, true);
+    const csize = dv.getUint32(off + 20, true);
+    const nameLen = dv.getUint16(off + 28, true);
+    const extraLen = dv.getUint16(off + 30, true);
+    const cmtLen = dv.getUint16(off + 32, true);
+    const lho = dv.getUint32(off + 42, true);
+    const name = td.decode(u8.subarray(off + 46, off + 46 + nameLen));
+    const lnameLen = dv.getUint16(lho + 26, true);
+    const lextraLen = dv.getUint16(lho + 28, true);
+    const dataStart = lho + 30 + lnameLen + lextraLen;
+    const raw = u8.subarray(dataStart, dataStart + csize);
+    if (method === 0) {
+      out[name] = raw;
+    } else if (method === 8) {
+      const ds = new DecompressionStream("deflate-raw");
+      const dec = new Response(new Blob([raw]).stream().pipeThrough(ds));
+      out[name] = new Uint8Array(await dec.arrayBuffer());
+    } else {
+      throw new Error("zip: unsupported method " + method);
+    }
+    off += 46 + nameLen + extraLen + cmtLen;
+  }
+  return out;
+}
+
+/** うごイラ：frames（{file, delay} 列）と ZIP からフレーム blob URL 列を構築して変換フローを設定 */
+async function initUgoira(cap, pageUrl) {
+  const frames = cap.frames || [];
+  if (!frames.length) {
+    log("うごイラのコマ情報がありません。", "error");
+    document.getElementById("convert-btn").disabled = true;
+    return;
+  }
+  let entries;
+  try {
+    entries = await _parseZip(cap.buffer);
+  } catch (zipErr) {
+    log(`うごイラ ZIP の展開に失敗: ${zipErr.message}`, "error");
+    document.getElementById("convert-btn").disabled = true;
+    return;
+  }
+  cap.buffer = null; // 巨大 payload null 代入（展開後、GROUP-82 規約）
+  const frameUrls = [];
+  const delays = [];
+  for (const f of frames) {
+    const data = entries[f.file];
+    if (!data) continue;
+    frameUrls.push(URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" })));
+    delays.push(f.delay || 100);
+  }
+  entries = null;
+  if (!frameUrls.length) {
+    log("うごイラのコマが ZIP 内に見つかりません。", "error");
+    document.getElementById("convert-btn").disabled = true;
+    return;
+  }
+  window.__ugoiraFrameUrls = frameUrls;
+  window.addEventListener("unload", () => {
+    (window.__ugoiraFrameUrls || []).forEach((u) => URL.revokeObjectURL(u));
+  }, { once: true });
+
+  const totalSec = delays.reduce((a, b) => a + b, 0) / 1000;
+  const avgMs = delays.reduce((a, b) => a + b, 0) / delays.length;
+  const uniform = delays.every((d) => Math.abs(d - delays[0]) <= 1);
+
+  // メタ表示（うごイラ用）
+  const meta = document.getElementById("meta");
+  meta.innerHTML = [
+    `<div><span class="key">取得元:</span> pixiv うごイラ解析（${escapeHtml(pageUrl || "")}）</div>`,
+    `<div><span class="key">コマ数:</span> ${frameUrls.length} / <span class="key">合計:</span> ${totalSec.toFixed(1)} 秒 / <span class="key">コマ間隔:</span> ${uniform ? `${Math.round(avgMs)} ms（均一）` : `平均 ${Math.round(avgMs)} ms（不均一→平均値で近似）`}</div>`,
+  ].join("");
+
+  // プレビュー：video の代わりに先頭コマを表示
+  const video = document.getElementById("preview");
+  video.style.display = "none";
+  const pimg = document.createElement("img");
+  pimg.src = frameUrls[0];
+  pimg.style.maxWidth = "100%";
+  pimg.style.borderRadius = "6px";
+  video.parentNode.insertBefore(pimg, video);
+
+  if (typeof gifshot === "undefined") {
+    log("gifshot ライブラリの読込に失敗しました。", "error");
+    document.getElementById("convert-btn").disabled = true;
+    return;
+  }
+  document.getElementById("convert-btn").addEventListener("click", () => {
+    runUgoiraConversion(frameUrls, avgMs, pageUrl, pimg);
+  });
+  document.getElementById("cancel-btn").addEventListener("click", () => {
+    window.close();
+  });
+  log(`うごイラを受領しました（${frameUrls.length} コマ）。「GIF に変換」で開始します。`);
+}
+
+/** うごイラ：コマ列 → GIF 変換（コマ間隔は平均値で一律近似） */
+function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
+  const btn = document.getElementById("convert-btn");
+  btn.disabled = true;
+  btn.textContent = "変換中…";
+  updateProgress(0);
+  const w = previewImg.naturalWidth || 480;
+  const h = previewImg.naturalHeight || 360;
+  const size = computeGifSize(w, h);
+  const startTime = Date.now();
+  gifshot.createGIF({
+    images: frameUrls,
+    gifWidth: size.w,
+    gifHeight: size.h,
+    interval: Math.max(0.02, avgDelayMs / 1000),
+    numWorkers: PHASE1_PARAMS.NUM_WORKERS,
+    progressCallback: (p) => {
+      updateProgress(p);
+      log(`変換中… ${Math.round(p * 100)}%`);
+    },
+  }, async (obj) => {
+    if (obj.error) {
+      log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
+      btn.disabled = false;
+      btn.textContent = "再試行";
+      hideProgress();
+      return;
+    }
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const approxSize = (obj.image.length * 0.75 / 1024 / 1024).toFixed(1);
+    log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。保存モーダルを起動しています…`, "success");
+    updateProgress(1);
+    try {
+      const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      await browser.runtime.sendMessage({
+        type: "STASH_CONVERSION_PAYLOAD",
+        imageUrl: obj.image,
+        pageUrl: pageUrl || "",
+        suggestedFilename: `ugoira-${ts}.gif`,
+        associatedAudio: null,
+      });
+      await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
+      await browser.storage.local.remove("_pendingVideoConvert");
+      setTimeout(() => window.close(), 500);
+    } catch (err) {
+      log(`保存モーダル起動失敗: ${err.message}`, "error");
+      btn.disabled = false;
+      btn.textContent = "再試行";
+    }
+  });
+}
+
+// ================================================================
 // 初期化
 // ================================================================
 async function init() {
@@ -262,8 +432,13 @@ async function init() {
     if (captured) {
       const cap = await browser.runtime.sendMessage({ type: "GET_VIDEO_CAPTURE" }).catch(() => null);
       if (!cap || !cap.buffer) {
-        log("録画データの受領に失敗しました。ページ側で 🎬 を再実行してください。", "error");
+        log("受領データがありません。ページ側でボタンを再実行してください。", "error");
         document.getElementById("convert-btn").disabled = true;
+        return;
+      }
+      // scope2 (v1.46.49)：うごイラ解析は専用フロー（コマ列 → GIF、動画プレビュー不使用）
+      if (sourceKind === "ugoira") {
+        await initUgoira(cap, pageUrl);
         return;
       }
       let capBlob = new Blob([cap.buffer], { type: cap.mime || "video/webm" });
@@ -274,7 +449,9 @@ async function init() {
       window.addEventListener("unload", () => {
         if (window.__capturedBlobUrl) URL.revokeObjectURL(window.__capturedBlobUrl);
       }, { once: true });
-      sourceLabel = sourceKind === "canvas" ? "ページ内 Canvas を録画" : "ページ内動画（blob/MSE）を録画";
+      sourceLabel = sourceKind === "canvas" ? "ページ内 Canvas を録画"
+        : sourceKind === "blob-file" ? "ページ内動画の原データを取得（全体）"
+        : "ページ内動画（blob/MSE）を録画";
     }
 
     // メタ情報表示

@@ -426,6 +426,21 @@ document.addEventListener("mouseover", (e) => {
     return;
   }
 
+  // GROUP-15 UAT 是正 (v1.46.47)：X 等はプレイヤー操作のオーバーレイ div が video を覆い、
+  // closest（祖先方向）では届かない。img 用の既存対策（オーバーレイ貫通）と
+  // 同型に、カーソル位置の重なり順全要素（elementsFromPoint）から video / canvas を探す
+  if (!e.target.closest("#__image-saver-wrap__")) {
+    const stack = document.elementsFromPoint(e.clientX, e.clientY);
+    const mediaEl = stack.find((s) => s.tagName === "VIDEO" && isValidVideo(s))
+                 || stack.find((s) => s.tagName === "CANVAS" && isValidCanvas(s));
+    if (mediaEl) {
+      if (mediaEl === currentImg) { clearTimeout(hideTimer); return; }
+      clearTimeout(hideTimer); clearTimeout(showTimer);
+      showTimer = setTimeout(() => showAt(mediaEl), DELAY_SHOW);
+      return;
+    }
+  }
+
   // ① 通常ケース：<img> 要素に直接マウスが乗っている
   let img = e.target.closest("img");
 

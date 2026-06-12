@@ -88,6 +88,9 @@ const browserGlobals = {
   TextDecoder:       "readonly",
   atob:              "readonly",
   btoa:              "readonly",
+  // Compression Streams（v1.46.49 うごイラ ZIP 展開で使用。v1.46.49 の CI lint 失敗の教訓で追加）
+  DecompressionStream: "readonly",
+  CompressionStream:   "readonly",
   // Base
   globalThis:        "readonly",
   Promise:           "readonly",

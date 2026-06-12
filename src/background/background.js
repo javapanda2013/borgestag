@@ -261,11 +261,16 @@ async function openModalFromConversion() {
 // ----------------------------------------------------------------
 let videoConvertWindowId = null;
 
+// GROUP-15 範囲拡大 (v1.46.46)：ページ内録画データ（webm、数 MB）の一時保管。
+// storage.local に載せると全 context broadcast（GROUP-35 地雷）のためメモリ受け渡し。
+// 変換ウィンドウの GET_VIDEO_CAPTURE で受領後すぐ null 解放（巨大 payload 規約）。
+let _pendingVideoCapture = null;
+
 async function openVideoConvertWindow(payload) {
-  const { videoUrl, pageUrl, videoWidth, videoHeight, duration } = payload;
-  // 受領情報を storage に格納（video_convert.js が読む）
+  // 受領情報（小さいメタのみ）を storage に格納（video_convert.js が読む）。
+  // captured/sourceKind は録画経路（v1.46.46）のみ付与、従来経路は従来フィールドのまま
   await browser.storage.local.set({
-    _pendingVideoConvert: { videoUrl, pageUrl, videoWidth, videoHeight, duration },
+    _pendingVideoConvert: { ...payload },
   });
 
   // 既存ウィンドウ再利用
@@ -339,6 +344,28 @@ async function handleAsyncMessage(message, sender) {
     case "OPEN_MODAL_WINDOW":
       openModalWindow(message.imageUrl, message.pageUrl);
       return;
+    case "OPEN_VIDEO_CONVERT_CAPTURED": {
+      // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob:/MSE 動画・Canvas）の webm を
+      // メモリ保管し、変換ウィンドウを開く（録画データは storage.local に載せない）
+      _pendingVideoCapture = { buffer: message.buffer, mime: message.mime };
+      message.buffer = null; // 巨大 payload null 代入（受領直後、GROUP-82 規約）
+      openVideoConvertWindow({
+        videoUrl: "",
+        captured: true,
+        sourceKind: message.sourceKind,
+        pageUrl: message.pageUrl,
+        videoWidth: message.videoWidth,
+        videoHeight: message.videoHeight,
+        duration: message.duration,
+      });
+      return;
+    }
+    case "GET_VIDEO_CAPTURE": {
+      // 変換ウィンドウからの録画データ受領要求。渡したら即解放
+      const cap = _pendingVideoCapture;
+      _pendingVideoCapture = null;
+      return Promise.resolve(cap);
+    }
     case "OPEN_VIDEO_CONVERT":
       // GROUP-15-impl-A-phase1：動画 → GIF 変換ウィンドウを開く
       openVideoConvertWindow({

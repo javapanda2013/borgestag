@@ -21,8 +21,12 @@
  * - sampleInterval 10（gifshot 既定）
  * - numWorkers 2（gifshot 既定）
  *
+ * 対応範囲（v1.46.46 GROUP-15 範囲拡大後）：
+ * - 直 mp4/webm URL：従来どおりこのウィンドウが直接ロード
+ * - blob:/MSE 動画・Canvas 要素：content.js がページ内録画（captureStream+MediaRecorder）
+ *   した webm を background メモリ経由で受領し、blob URL 化して同じ経路に流す
+ *
  * 制限事項（Phase 2 で対応予定）：
- * - 直 mp4 URL のみ対応（blob: / MSE URL は非対応、content.js でのフレーム抽出方式は Phase 2）
  * - 変換オプション可変 UI なし（Phase 2 で settings タブに追加）
  * - 進捗永続化なし（ウィンドウ閉じると中断）
  */
@@ -248,12 +252,37 @@ async function init() {
       log("受領データがありません。ウィンドウを閉じてください。", "error");
       return;
     }
-    const { videoUrl, pageUrl, videoWidth, videoHeight, duration } = _pendingVideoConvert;
+    const { videoUrl, pageUrl, videoWidth, videoHeight, duration, captured, sourceKind } = _pendingVideoConvert;
+
+    // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画経路。blob: URL はページ文脈限定のため、
+    // content script が録画した webm を background のメモリ経由で受領し、
+    // このウィンドウ自身の blob URL に変換して以降の既存経路（プレビュー→gifshot）へ流す
+    let effectiveUrl = videoUrl;
+    let sourceLabel = null;
+    if (captured) {
+      const cap = await browser.runtime.sendMessage({ type: "GET_VIDEO_CAPTURE" }).catch(() => null);
+      if (!cap || !cap.buffer) {
+        log("録画データの受領に失敗しました。ページ側で 🎬 を再実行してください。", "error");
+        document.getElementById("convert-btn").disabled = true;
+        return;
+      }
+      let capBlob = new Blob([cap.buffer], { type: cap.mime || "video/webm" });
+      cap.buffer = null; // 巨大 payload null 代入（受領直後、GROUP-82 規約）
+      effectiveUrl = URL.createObjectURL(capBlob);
+      capBlob = null;
+      window.__capturedBlobUrl = effectiveUrl;
+      window.addEventListener("unload", () => {
+        if (window.__capturedBlobUrl) URL.revokeObjectURL(window.__capturedBlobUrl);
+      }, { once: true });
+      sourceLabel = sourceKind === "canvas" ? "ページ内 Canvas を録画" : "ページ内動画（blob/MSE）を録画";
+    }
 
     // メタ情報表示
     const meta = document.getElementById("meta");
     meta.innerHTML = [
-      `<div><span class="key">URL:</span> <code>${escapeHtml(videoUrl)}</code></div>`,
+      sourceLabel
+        ? `<div><span class="key">取得元:</span> ${escapeHtml(sourceLabel)}（${escapeHtml(pageUrl || "")}）</div>`
+        : `<div><span class="key">URL:</span> <code>${escapeHtml(videoUrl)}</code></div>`,
       `<div><span class="key">元サイズ:</span> ${videoWidth || "?"} × ${videoHeight || "?"} px / <span class="key">長さ:</span> ${duration ? duration.toFixed(1) + " 秒" : "?"}</div>`,
       `<div><span class="key">変換設定（Phase 1 固定）:</span> ${PHASE1_PARAMS.DURATION_SEC} 秒 / ${PHASE1_PARAMS.FPS} fps / 最大 ${PHASE1_PARAMS.MAX_WIDTH}px</div>`,
     ].join("");
@@ -270,7 +299,7 @@ async function init() {
     video.muted = false;
     window.__previewCorsLoaded = false; // recordAudio で参照
     try {
-      await loadPreviewVideo(video, videoUrl);
+      await loadPreviewVideo(video, effectiveUrl);
     } catch (loadErr) {
       console.error("[video_convert] preview video load failed completely:", loadErr);
       log(`⚠ 動画の読込に失敗しました: ${loadErr.message}`, "error");
@@ -292,7 +321,7 @@ async function init() {
 
     // 変換ボタン
     document.getElementById("convert-btn").addEventListener("click", () => {
-      runConversion(videoUrl, pageUrl, videoWidth, videoHeight);
+      runConversion(effectiveUrl, pageUrl, videoWidth, videoHeight);
     });
 
     // キャンセル
@@ -421,6 +450,12 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
       // Native 側も JPEG として処理 → サムネイルのアニメーションが失われる。
       let suggestedFilename = "video-capture.gif";
       try {
+        // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob URL）は basename が無意味な
+        // 内部 ID になるため、取得種別＋タイムスタンプで命名する
+        if (window.__capturedBlobUrl && videoUrl === window.__capturedBlobUrl) {
+          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+          throw { __captured: true, name: `capture-${ts}.gif` };
+        }
         const u = new URL(videoUrl);
         const basename = (u.pathname.split("/").pop() || "").replace(/\.[^.]*$/, "");
         if (basename) {
@@ -430,9 +465,13 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
           const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
           suggestedFilename = `video-${ts}.gif`;
         }
-      } catch (_) {
-        const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-        suggestedFilename = `video-${ts}.gif`;
+      } catch (e) {
+        if (e && e.__captured) {
+          suggestedFilename = e.name;
+        } else {
+          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+          suggestedFilename = `video-${ts}.gif`;
+        }
       }
 
       // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload（imageUrl 10MB + audio 5MB）を

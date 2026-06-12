@@ -159,25 +159,33 @@ function getWrap() {
   const videoBtn = document.createElement("button");
   videoBtn.id = "__image-saver-video-btn__";
   videoBtn.textContent = "🎬 動画→GIF";
-  videoBtn.title = "動画を GIF に変換して保存（Phase 1 MVP、直 mp4 URL のみ対応）";
+  videoBtn.title = "動画/Canvas を GIF に変換して保存（blob・MSE 動画と Canvas はページ内録画→変換）";
   videoBtn.style.cssText = btnStyle("rgba(120,60,160,.9)");
   videoBtn.style.display = "none"; // 初期非表示、video ホバー時のみ show
   videoBtn.addEventListener("mouseenter", () => clearTimeout(hideTimer));
   videoBtn.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
-  videoBtn.addEventListener("click", (e) => {
+  videoBtn.addEventListener("click", async (e) => {
     e.preventDefault(); e.stopPropagation();
-    if (!currentImg || currentImg.tagName !== "VIDEO") return;
-    const videoUrl = currentImg.currentSrc || currentImg.src;
-    if (!videoUrl) return;
-    browser.runtime.sendMessage({
-      type:        "OPEN_VIDEO_CONVERT",
-      videoUrl:    videoUrl,
-      pageUrl:     location.href,
-      videoWidth:  currentImg.videoWidth || 0,
-      videoHeight: currentImg.videoHeight || 0,
-      duration:    Number.isFinite(currentImg.duration) ? currentImg.duration : 0,
-    });
-    hideNow();
+    const el = currentImg;
+    if (!el || (el.tagName !== "VIDEO" && el.tagName !== "CANVAS")) return;
+    // 組合せ 3 通り（机上検証済み）：
+    //   ① VIDEO × http(s) URL → 従来経路（変換ウィンドウが URL を直接ロード、不変）
+    //   ② VIDEO × blob:/MSE 等の非 http URL → ページ内録画経路（v1.46.46 新設）
+    //   ③ CANVAS（URL なし） → ページ内録画経路（同上）
+    const directUrl = el.tagName === "VIDEO" ? (el.currentSrc || el.src) : "";
+    if (/^https?:/i.test(directUrl)) {
+      browser.runtime.sendMessage({
+        type:        "OPEN_VIDEO_CONVERT",
+        videoUrl:    directUrl,
+        pageUrl:     location.href,
+        videoWidth:  el.videoWidth || 0,
+        videoHeight: el.videoHeight || 0,
+        duration:    Number.isFinite(el.duration) ? el.duration : 0,
+      });
+      hideNow();
+      return;
+    }
+    await captureAndSend(el, videoBtn);
   });
 
   wrap.appendChild(instantBtn);
@@ -191,7 +199,9 @@ function getWrap() {
 // GROUP-15-impl-A-phase1：video / img に応じてボタン表示を切替
 function updateButtonVisibility() {
   if (!hoverWrap) return;
-  const isVideo = currentImg && currentImg.tagName === "VIDEO";
+  // GROUP-15 範囲拡大 (v1.46.46)：canvas も 🎬 のみ表示の組（video と同じ扱い）。
+  // 組合せ：img=⚡💾 ／ video=🎬 ／ canvas=🎬 の 3 通り（机上検証済み、img 系経路は不変）
+  const isVideo = currentImg && (currentImg.tagName === "VIDEO" || currentImg.tagName === "CANVAS");
   const instantBtn = hoverWrap.querySelector("#__image-saver-instant-btn__");
   const saveBtn = hoverWrap.querySelector("#__image-saver-hover-btn__");
   const videoBtn = hoverWrap.querySelector("#__image-saver-video-btn__");
@@ -291,6 +301,98 @@ function isValidVideo(el) {
   return rect.width >= MIN_SIZE && rect.height >= MIN_SIZE;
 }
 
+// GROUP-15 範囲拡大 (v1.46.46)：canvas 要素が録画候補として有効か判定。
+// アイコン・装飾用の小さい canvas を除外するため video より大きい閾値を使う
+const MIN_CANVAS_SIZE = 100;
+function isValidCanvas(el) {
+  if (!el || el.tagName !== "CANVAS") return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width >= MIN_CANVAS_SIZE && rect.height >= MIN_CANVAS_SIZE;
+}
+
+// ----------------------------------------------------------------
+// GROUP-15 範囲拡大 (v1.46.46)：blob:/MSE 動画・Canvas のページ内録画
+// blob: URL はページ文脈限定で変換ウィンドウ（拡張ページ）からロードできないため、
+// captureStream + MediaRecorder でページ内録画し、webm を background 経由で渡す。
+// 制約：許可なし cross-origin 素材は captureStream が SecurityError（→ボタンで明示）。
+// 録画は実時間進行（再生中の内容を記録）。録画データは storage.local に載せない
+// （broadcast 地雷、GROUP-35 教訓）＝ background のメモリ経由で受け渡す。
+// ----------------------------------------------------------------
+const CAPTURE_MAX_SEC = 20; // Phase 1 固定パラメータと同じ上限
+const CAPTURE_MIMES = ['video/webm;codecs="vp8"', "video/webm"];
+let _captureActive = false;
+
+function _flashVideoBtn(btn, text) {
+  btn.textContent = text;
+  setTimeout(() => { btn.textContent = "🎬 動画→GIF"; }, 2500);
+}
+
+async function captureAndSend(el, btn) {
+  if (_captureActive) return;
+  const isVideo = el.tagName === "VIDEO";
+  let stream = null;
+  try {
+    if (isVideo && el.paused) {
+      try { await el.play(); } catch (_) { /* 自動再生拒否でも録画自体は試行 */ }
+    }
+    stream = el.captureStream();
+  } catch (_err) {
+    _flashVideoBtn(btn, "🚫 取得不可（保護コンテンツ）");
+    return;
+  }
+  const mime = CAPTURE_MIMES.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  let recorder = null;
+  try {
+    recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  } catch (_err) {
+    _flashVideoBtn(btn, "🚫 録画不可（環境非対応）");
+    return;
+  }
+  _captureActive = true;
+  const chunks = [];
+  recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+  const secLimit = isVideo && Number.isFinite(el.duration) && el.duration > 0
+    ? Math.min(el.duration, CAPTURE_MAX_SEC) : CAPTURE_MAX_SEC;
+  const done = new Promise((resolve) => { recorder.onstop = resolve; });
+  const onEnded = () => { if (recorder.state !== "inactive") recorder.stop(); };
+  if (isVideo) el.addEventListener("ended", onEnded, { once: true });
+  let elapsed = 0;
+  const tick = setInterval(() => {
+    elapsed++;
+    btn.textContent = `⏺ 録画中 ${elapsed}/${Math.round(secLimit)}s`;
+  }, 1000);
+  recorder.start(1000);
+  btn.textContent = `⏺ 録画中 0/${Math.round(secLimit)}s`;
+  setTimeout(() => { if (recorder.state !== "inactive") recorder.stop(); }, secLimit * 1000);
+  await done;
+  clearInterval(tick);
+  if (isVideo) el.removeEventListener("ended", onEnded);
+  _captureActive = false;
+  let blob = new Blob(chunks, { type: mime || "video/webm" });
+  chunks.length = 0;
+  if (!blob.size) {
+    blob = null;
+    _flashVideoBtn(btn, "🚫 録画できませんでした");
+    return;
+  }
+  let buf = await blob.arrayBuffer();
+  blob = null;
+  const rect = el.getBoundingClientRect();
+  await browser.runtime.sendMessage({
+    type:        "OPEN_VIDEO_CONVERT_CAPTURED",
+    buffer:      buf,
+    mime:        mime || "video/webm",
+    pageUrl:     location.href,
+    videoWidth:  isVideo ? (el.videoWidth || 0) : (el.width || Math.round(rect.width)),
+    videoHeight: isVideo ? (el.videoHeight || 0) : (el.height || Math.round(rect.height)),
+    duration:    elapsed || secLimit,
+    sourceKind:  isVideo ? "blob-video" : "canvas",
+  }).catch(() => null);
+  buf = null; // 巨大 payload null 代入（送信完了直後、GROUP-82 規約）
+  btn.textContent = "🎬 動画→GIF";
+  hideNow();
+}
+
 let _initialMoveHandled = false;
 document.addEventListener("mousemove", (e) => {
   lastMouseX = e.clientX; lastMouseY = e.clientY;
@@ -312,6 +414,15 @@ document.addEventListener("mouseover", (e) => {
     if (video === currentImg) { clearTimeout(hideTimer); return; }
     clearTimeout(hideTimer); clearTimeout(showTimer);
     showTimer = setTimeout(() => showAt(video), DELAY_SHOW);
+    return;
+  }
+
+  // GROUP-15 範囲拡大 (v1.46.46)：canvas 要素を検知（video の次、img より先）
+  const cv = e.target.closest("canvas");
+  if (cv && isValidCanvas(cv) && !e.target.closest("#__image-saver-wrap__")) {
+    if (cv === currentImg) { clearTimeout(hideTimer); return; }
+    clearTimeout(hideTimer); clearTimeout(showTimer);
+    showTimer = setTimeout(() => showAt(cv), DELAY_SHOW);
     return;
   }
 

@@ -207,11 +207,15 @@ function updateButtonVisibility() {
 }
 
 function btnStyle(bg) {
+  // GROUP-104 (v1.46.44)：即保存ボタンの完了表示（✅/❌ 1 文字）でボタン幅が縮小し、
+  // 隣接ボタンが左へズレて連続押下時に誤押下が起きるため、min-width で幅の下限を固定する。
+  // 72px ≒「⚡ 即保存」表示時の幅（button は border-box、padding/border 込み）
   return `
     background: ${bg};
     color: #fff; border: 1px solid rgba(255,255,255,.3);
     border-radius: 6px; padding: 4px 8px;
     font-size: 12px; cursor: pointer; line-height: 1;
+    min-width: 72px; box-sizing: border-box; text-align: center;
     box-shadow: 0 2px 8px rgba(0,0,0,.4);
     transition: opacity .15s; font-family: sans-serif;
     white-space: nowrap; user-select: none;

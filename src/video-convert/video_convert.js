@@ -519,7 +519,7 @@ async function init() {
         ? `<div><span class="key">取得元:</span> ${escapeHtml(sourceLabel)}（${escapeHtml(pageUrl || "")}）</div>`
         : `<div><span class="key">URL:</span> <code>${escapeHtml(videoUrl)}</code></div>`,
       `<div><span class="key">元サイズ:</span> ${videoWidth || "?"} × ${videoHeight || "?"} px / <span class="key">長さ:</span> ${duration ? duration.toFixed(1) + " 秒" : "?"}</div>`,
-      `<div><span class="key">変換設定（Phase 1 固定）:</span> ${PHASE1_PARAMS.DURATION_SEC} 秒 / ${PHASE1_PARAMS.FPS} fps / 最大 ${PHASE1_PARAMS.MAX_WIDTH}px</div>`,
+      `<div><span class="key">変換設定:</span> 長さ＝実尺（録画上限まで） / ${PHASE1_PARAMS.FPS} fps / 最大 ${PHASE1_PARAMS.MAX_WIDTH}px</div>`,
     ].join("");
 
     // プレビュー動画
@@ -605,6 +605,10 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
     : PHASE1_PARAMS.DURATION_SEC;
   actualDur = Math.max(0.5, Math.min(actualDur, maxSec));
   const numFrames = Math.max(1, Math.round(actualDur * PHASE1_PARAMS.FPS));
+  // 長尺は変換前に概算（コマ数・尺）を通知。コマ数上限は設けず全取得を尊重する（中断はしない）。
+  if (numFrames > 600) {
+    log(`⚠ 長尺（約 ${Math.round(actualDur)} 秒・${numFrames} コマ）です。GIF のファイルが大きく、変換にも時間がかかります（中断はされません）。`);
+  }
 
   const startTime = Date.now();
   let lastProgressAt = Date.now();
@@ -620,11 +624,14 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
   // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
   // GIF エンコード段階（Web Worker）は進捗が取れない。Worker で詰まっている場合の
   // 検知のため、100% 到達後 60 秒で強制エラー表示。
+  // 診断タイムアウトをコマ数連動に（実尺化後の長尺で完了前に誤発火するため）。
+  // 短尺は従来どおり 60 秒、長尺はコマ数に比例して伸ばす。Worker 停止の真の検知は維持。
+  const encodeTimeoutMs = Math.max(60_000, numFrames * 250);
   const encodeTimeout = setInterval(() => {
-    if (reached100 && Date.now() - lastProgressAt > 60_000) {
+    if (reached100 && Date.now() - lastProgressAt > encodeTimeoutMs) {
       clearInterval(encodeTimeout);
       log(
-        "⚠ エンコード段階でタイムアウト（60 秒）。" +
+        `⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
         "ブラウザコンソール（F12）で CSP 違反や Worker エラーが出ていないか確認してください。",
         "error"
       );

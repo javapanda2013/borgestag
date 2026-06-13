@@ -5009,6 +5009,19 @@ async function _toggleHistAudio(entry, btn) {
     return;
   }
 
+  // GROUP-28：音声は GIF タイルのアニメ準備（ready）前には開始しない（読込前に押すと、
+  // 後から始まる GIF アニメと音声がズレる report 由来）。ready 前のアニメセッションがある
+  // 時だけブロックし、静止画 fallback（セッション無し）・非 GIF は素通りさせる（永久ブロック防止）。
+  {
+    const gsess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+    if (gsess && !gsess.ready) {
+      const t0 = btn.textContent;
+      btn.textContent = "⏳";
+      setTimeout(() => { try { btn.textContent = t0; } catch (_) {} }, 900);
+      return;
+    }
+  }
+
   // v1.32.0：他エントリは停止しない（複数同時再生）
 
   // 必要データ

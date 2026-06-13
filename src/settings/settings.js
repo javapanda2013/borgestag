@@ -370,12 +370,17 @@ let _extPickerLastClickedIdx = -1;  // Shift+クリック範囲選択の起点
 // 初期化
 // ----------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
-  // v1.32.1 GROUP-29：settings 画面起動時に saveHistory の savedAt 降順ソートを保証。
-  // 過去の import（v1.32.0 以前）で順序が乱れたデータを自動修復する one-time 修正。
+  // v1.32.1 GROUP-29：settings 画面起動時に saveHistory の savedAt 降順ソートを保証（legacy のみ）。
+  // 過去の import（v1.32.0 以前）や legacy の差分更新で順序が乱れたデータを自動修復する。
   // 既に降順なら何もしない（冪等）、何度実行しても安全。
   try {
     // v1.45.5 Phase C-2: migration aware read
-    const saveHistory = await _readSaveHistory();
+    // GROUP-133-F（2026-06-14）：migrated は _readSaveHistory が読込時に savedAt 降順 sort 済（本ファイル :246-250）で
+    //   本 scan は冗長な no-op。migrated は saveHistory=null で下の if を素通りさせ、毎起動の余分な IDB getAll＋
+    //   O(N) 走査を skip して起動コストを削減（特に大規模履歴）。legacy（未移送）のみ起動時に修復する
+    //   （legacy の storage.local 配列は _patchSaveHistory が新規 id を末尾追加し順序非保証のため）。
+    const _mig = await browser.storage.local.get("saveHistoryMigrationStatus");
+    const saveHistory = (_mig.saveHistoryMigrationStatus !== "migrated") ? await _readSaveHistory() : null;
     if (Array.isArray(saveHistory) && saveHistory.length >= 2) {
       let outOfOrder = false;
       for (let i = 0; i < saveHistory.length - 1; i++) {

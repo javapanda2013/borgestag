@@ -26,13 +26,13 @@
 //   - 複数 GIF 同時 decode のキューイング
 // =============================================================================
 
-import { parseGIF, decompressFrames } from "../vendor/gifuct/index.js";
+import { parseGIF, decompressFrame } from "../vendor/gifuct/index.js";
 
 // ---- セッション状態 ---------------------------------------------------------
 // id（タイル単位の識別子）→ セッション
 const _sessions = new Map();
 
-// セッション = { frames, totalDelayMs, loopCount, canvasWidth, canvasHeight, prevImageData }
+// セッション = { gif, rawFrames, decoded(Map index→decode結果), delays, totalDelayMs, loopCount, canvasWidth, canvasHeight }（GROUP-133-G1：オンデマンド decode）
 
 // ---- メッセージハンドラ ------------------------------------------------------
 self.onmessage = async (e) => {
@@ -52,57 +52,71 @@ self.onmessage = async (e) => {
 };
 
 // ---- INIT ------------------------------------------------------------------
+// 設定画面パフォーマンス改善（2026-06-14 v1.46.56）：INIT は parseGIF のみ。全フレーム一括展開
+//   （旧 decompressFrames）を廃止し、各フレームは REQ_FRAME 受信時に decompressFrame で
+//   オンデマンド decode＋session 内 cache（_decodeFrame）。
+//   狙い：① INIT が parse だけになり READY が即発火（sess.ready が早く立ち音声ゲートも改善）、
+//        ② 画面外タイルは既存 viewport gate で 1 枚 decode→pause のため全フレーム decode が消える、
+//        ③ 可視タイルも表示したフレームだけ decode（loop は cache で再 decode 回避）。
+//   旧 INIT は表示有無に関わらず全フレーム decode していた（worker 6.8s CPU の主因、profiler 実測）。
 async function handleInit({ id, gifBuffer }) {
-  // gifuct で全フレーム展開（patch=true で RGBA 配列付き）
   const gif = parseGIF(gifBuffer);
-  const frames = decompressFrames(gif, /* buildImagePatches */ true);
+  // 描画対象フレーム（image を持つもの）。旧 decompressFrames と同じ filter で index 空間を一致させる。
+  const rawFrames = gif.frames.filter(f => f.image);
+  if (rawFrames.length === 0) throw new Error("GIF にフレームが含まれていません");
 
-  if (frames.length === 0) throw new Error("GIF にフレームが含まれていません");
+  // 論理画面サイズ。decompressFrames 廃止で frames[0].dims（decode 後にのみ生成）が無いため、
+  // gif.lsd（Logical Screen Descriptor）優先、欠落時は先頭フレームの image descriptor（parse 直後に存在）。
+  const d0 = rawFrames[0].image.descriptor;
+  const canvasWidth  = gif.lsd?.width  || d0.width;
+  const canvasHeight = gif.lsd?.height || d0.height;
 
-  // GROUP-56 案 A (v1.46.0): patch 生成後の `frame.pixels`（gifuct decompressFrames が
-  // 中間生成する JS Array）は renderFrame で使用しない。SpiderMonkey の Native Array は
-  // 1 element あたり ~8 byte の GC tag を持ち、大型 GIF（600x600 級 × 数十フレーム）で
-  // session 1 件あたり 200MB+ の retain を生じさせていた（postmortem §1〜§5）。
-  // patch のみ保持すれば render 経路に影響なく、6 sessions 構成で 1+GB 削減見込み。
-  for (const f of frames) f.pixels = null;
-
-  // 論理画面サイズ（GIF 全体のキャンバスサイズ）
-  // gif.lsd は Logical Screen Descriptor。frames[0].dims はサブフレームサイズ
-  const canvasWidth  = gif.lsd?.width  || frames[0].dims.width;
-  const canvasHeight = gif.lsd?.height || frames[0].dims.height;
-
-  // ループカウント（Netscape Application Extension）
-  // gifuct は parsedGif.loopCount として直接公開しないため、frames から間接取得
   const loopCount = (gif.loopCount === undefined) ? 0 : gif.loopCount; // 0 = 無限ループ
 
+  // delay は gce から（decompressFrame と同一換算：(gce.delay || 10) * 10 ms）。decode 不要で算出可能。
+  const delays = rawFrames.map(f => ((f.gce && f.gce.delay ? f.gce.delay : 10) * 10));
   let totalDelayMs = 0;
-  for (const f of frames) totalDelayMs += (f.delay || 100);
+  for (const d of delays) totalDelayMs += d;
 
   _sessions.set(id, {
-    frames,
+    gif,                  // parse 済（gct 参照・オンデマンド decode に使用）
+    rawFrames,            // 未 decode のフレーム記述子（index 空間 = 旧 frames と同一）
+    decoded: new Map(),   // index → decompressFrame 結果（patch/dims）。オンデマンドで充填
+    delays,
     totalDelayMs,
     loopCount,
     canvasWidth,
     canvasHeight,
-    prevImageData: null, // disposal method 3 (restore previous) のため保持
   });
 
   self.postMessage({
     type: "READY",
     id,
-    frameCount: frames.length,
+    frameCount: rawFrames.length,
     dims: { width: canvasWidth, height: canvasHeight },
     totalDelayMs,
     loopCount,
   });
 }
 
+// 指定 index のフレームをオンデマンド decode（cache 済ならそれを返す）。
+// GROUP-56：patch 生成後に pixels（中間 JS Array）を null 化して SpiderMonkey の retain を回避。
+function _decodeFrame(sess, index) {
+  let fr = sess.decoded.get(index);
+  if (!fr) {
+    fr = decompressFrame(sess.rawFrames[index], sess.gif.gct, /* buildImagePatch */ true);
+    if (fr) fr.pixels = null;
+    sess.decoded.set(index, fr);
+  }
+  return fr;
+}
+
 // ---- REQ_FRAME -------------------------------------------------------------
 async function handleReqFrame({ id, index }) {
   const sess = _sessions.get(id);
   if (!sess) throw new Error(`session not found: ${id}`);
-  if (index < 0 || index >= sess.frames.length) {
-    throw new Error(`index out of range: ${index}/${sess.frames.length}`);
+  if (index < 0 || index >= sess.rawFrames.length) {
+    throw new Error(`index out of range: ${index}/${sess.rawFrames.length}`);
   }
   const bitmap = await renderFrame(sess, index);
   self.postMessage({
@@ -110,7 +124,7 @@ async function handleReqFrame({ id, index }) {
     id,
     index,
     bitmap,
-    delay: sess.frames[index].delay || 100,
+    delay: sess.delays[index] || 100,
   }, [bitmap]); // transferable
 }
 
@@ -124,9 +138,9 @@ async function handleReqFrameAt({ id, elapsedMs }) {
   if (sess.totalDelayMs > 0) t = elapsedMs % sess.totalDelayMs;
 
   let acc = 0;
-  let pickIndex = sess.frames.length - 1;
-  for (let i = 0; i < sess.frames.length; i++) {
-    acc += (sess.frames[i].delay || 100);
+  let pickIndex = sess.rawFrames.length - 1;
+  for (let i = 0; i < sess.rawFrames.length; i++) {
+    acc += (sess.delays[i] || 100);
     if (t < acc) { pickIndex = i; break; }
   }
 
@@ -136,7 +150,7 @@ async function handleReqFrameAt({ id, elapsedMs }) {
     id,
     index: pickIndex,
     bitmap,
-    delay: sess.frames[pickIndex].delay || 100,
+    delay: sess.delays[pickIndex] || 100,
   }, [bitmap]);
 }
 
@@ -151,7 +165,8 @@ function handleDestroy({ id }) {
 // disposal method の合成（method 2 = restore to bg、method 3 = restore previous）は
 // Phase 2 以降で追加。多くの動画変換 GIF では disposal=2 で問題なく見える。
 async function renderFrame(sess, index) {
-  const f = sess.frames[index];
+  const f = _decodeFrame(sess, index);  // GROUP-133-G1：オンデマンド decode（cache 済なら再利用）
+  if (!f) throw new Error(`frame decode failed: ${index}`);
   const off = new OffscreenCanvas(sess.canvasWidth, sess.canvasHeight);
   const ctx = off.getContext("2d");
 

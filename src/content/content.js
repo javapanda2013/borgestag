@@ -48,7 +48,17 @@ browser.storage.onChanged.addListener((changes) => {
     instantSaveEnabled = changes.instantSaveEnabled.newValue !== false;
     if (hoverWrap) updateInstantBtn();
   }
+  // GROUP-33-T1 (v1.46.51)：録画上限秒の設定変更を追従（CAPTURE_MAX_SEC は let、下部で定義）
+  if ("videoMaxRecSec" in changes) _applyMaxRecSec(changes.videoMaxRecSec.newValue);
 });
+
+// GROUP-33-T1 (v1.46.51)：録画上限秒は設定画面「動画」タブで可変（既定 20・最小 1・上限なし）。
+// content / 変換ウィンドウ / 設定画面 の 3 文脈は storage.local キー videoMaxRecSec で共有する。
+function _applyMaxRecSec(v) {
+  const n = parseFloat(v);
+  if (Number.isFinite(n) && n >= 1) CAPTURE_MAX_SEC = n;
+}
+browser.storage.local.get("videoMaxRecSec").then(r => _applyMaxRecSec(r.videoMaxRecSec));
 
 // GROUP-84 (v1.46.21)：即保存ボタンの連続押下対応 + 件数表示
 // disabled 化を廃し、進行中の保存数をカウンタ表示。背後の handleInstantSave は
@@ -328,7 +338,11 @@ function showAt(img) {
   const wrap = getWrap();
   currentImg = img;
   updateButtonVisibility(); // GROUP-15-impl-A-phase1：video / img でボタン切替
-  const ww = 180, bh = 28;
+  // GROUP-33-T1 (v1.46.51)：ボタン群の幅は内容で変わる（動画/Canvas は「⏱ 時間指定録画」
+  // 「✂ 切り抜き開始」等で 180px を超える）。固定 180 でなく wrap の実幅でクランプして
+  // 画面右端のはみ出しを防ぐ（offsetWidth は opacity:0 でも display:flex なら実幅を返す）
+  const bh = 28;
+  const ww = wrap.offsetWidth || 180;
   let left = rect.right - ww - 4;
   let top  = rect.top + 4;
   left = Math.max(4, Math.min(left, window.innerWidth  - ww - 4));
@@ -411,7 +425,16 @@ function isValidCanvas(el) {
 // 録画は実時間進行（再生中の内容を記録）。録画データは storage.local に載せない
 // （broadcast 地雷、GROUP-35 教訓）＝ background のメモリ経由で受け渡す。
 // ----------------------------------------------------------------
-const CAPTURE_MAX_SEC = 20; // Phase 1 固定パラメータと同じ上限
+let CAPTURE_MAX_SEC = 20; // GROUP-33-T1：設定画面「動画」タブの videoMaxRecSec で上書き（既定 20）
+const WARN_REC_SEC = 30; // GROUP-33-T1：これを超える録画は開始前にサイズ警告（上限自由化に伴う安全弁）
+// 概算 GIF サイズ（10fps / 480px の粗い目安：約 0.26 MB/秒）。録画開始前の確認ダイアログ用。
+function _confirmLongRecording(sec) {
+  const mb = (0.26 * sec).toFixed(1);
+  return window.confirm(
+    "約 " + Math.round(sec) + " 秒の録画になります（GIF 概算 約 " + mb + " MB）。\n" +
+    "長尺ほど GIF のサイズが大きくなります。このまま録画を開始しますか？"
+  );
+}
 const TIMED_LABEL = "⏱ 時間指定録画";
 const CLIP_LABEL  = "✂ 切り抜き開始";
 let _captureActive = false;
@@ -678,6 +701,14 @@ async function captureAndSend(el, btn, fixedSec) {
     ? Math.min(el.duration, CAPTURE_MAX_SEC) : CAPTURE_MAX_SEC;
   // scope2 (v1.46.49)：範囲指定（時間指定録画）からの呼出しは fixedSec が優先（上限内に clamp）
   const secLimit = fixedSec ? Math.min(fixedSec, CAPTURE_MAX_SEC) : baseLimit;
+  // GROUP-33-T1 (v1.46.51)：上限自由化に伴い、長尺録画は開始前にサイズ警告（中止なら録画しない）
+  if (secLimit > WARN_REC_SEC && !_confirmLongRecording(secLimit)) {
+    _releaseStream(stream);
+    _captureActive = false;
+    _recCtl = null;
+    updateButtonVisibility();
+    return;
+  }
   // v1.46.48 hotfix：終了待ちを onstop 1 本に依存させない三重ガード。
   // onstop／onerror／watchdog（上限+5 秒）のどれでも必ず解け、finally で
   // カウンタ・timer・track を確実に解放する（「録画中」無限進行の構造的防止）

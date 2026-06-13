@@ -407,6 +407,14 @@ async function handleAsyncMessage(message, sender) {
       // imageUrl / associatedAudio などの大データは _pendingConversionStash から取得。
       openModalFromConversion();
       return;
+    case "INSTANT_SAVE_CONVERSION":
+      // GROUP-33-T1 (v1.46.51)：変換ウィンドウの「即保存」。保存ウィンドウを開かず、
+      // stash 済み変換結果を正規保存経路（handleSave）で保存（音声・サムネ・履歴込み）。
+      return handleInstantSaveConversion();
+    case "OPEN_VIDEO_SETTINGS_TAB":
+      // GROUP-33-T1：変換ウィンドウの「動画設定タブを開く」
+      openSettingsToVideoTab();
+      return;
     case "LIST_DIR":
       return listDir(message.path);
     case "EXECUTE_SAVE":
@@ -1434,6 +1442,54 @@ async function handleInstantSave(imageUrl, pageUrl) {
   } catch (err) {
     addLog("ERROR", `即保存失敗: ${err.message}`);
     return { success: false, error: err.message };
+  }
+}
+
+// GROUP-33-T1 (v1.46.51)：変換結果の即保存。handleInstantSave と同じ保存先決定・タグ引き継ぎ
+// （Q33-5-a 確定）を用い、保存自体は音声・サムネ・履歴を含む正規経路 handleSave に委ねる。
+async function handleInstantSaveConversion() {
+  const stash = _pendingConversionStash;
+  if (!stash || !stash.imageUrl) return { success: false, error: "変換データがありません（再変換してください）" };
+  try {
+    const [explorerSettings, stored] = await Promise.all([
+      getExplorerSettings(),
+      browser.storage.local.get([
+        "lastSaveDir", "retainTag", "retainSubTag", "retainAuthor",
+        "retainedTags", "retainedSubTags", "retainedAuthors",
+      ]),
+    ]);
+    let savePath = null;
+    if (explorerSettings.startPriority === "lastSave" && stored.lastSaveDir) savePath = stored.lastSaveDir;
+    else if (explorerSettings.rootPath) savePath = explorerSettings.rootPath;
+    else if (stored.lastSaveDir) savePath = stored.lastSaveDir;
+    if (!savePath) return { success: false, error: "保存先が設定されていません" };
+    const tags    = stored.retainTag    ? (stored.retainedTags    || []) : [];
+    const subTags = stored.retainSubTag ? (stored.retainedSubTags || []) : [];
+    const authors = stored.retainAuthor ? (stored.retainedAuthors || []) : [];
+    const result = await handleSave({
+      imageUrl: stash.imageUrl,
+      filename: stash.suggestedFilename || "video-capture.gif",
+      tags, subTags, authors,
+      pageUrl: stash.pageUrl || "",
+      associatedAudio: stash.associatedAudio || null,
+      savePath,
+    });
+    if (result && result.success) _pendingConversionStash = null; // 成功時のみ消費（失敗時は再試行用に保持）
+    return result;
+  } catch (err) {
+    addLog("ERROR", `変換結果の即保存失敗: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+// GROUP-33-T1 (v1.46.51)：設定画面を開いて「動画」タブを選択。options_ui はクエリを付けられ
+// ないため、初期タブ指定を storage.local._settingsInitialTab 経由で settings.js へ渡す。
+async function openSettingsToVideoTab() {
+  try {
+    await browser.storage.local.set({ _settingsInitialTab: "video" });
+    await browser.runtime.openOptionsPage();
+  } catch (err) {
+    addLog("WARN", `動画設定タブ起動失敗: ${err.message}`);
   }
 }
 

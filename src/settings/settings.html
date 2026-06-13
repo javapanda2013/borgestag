@@ -931,6 +931,7 @@
       <button class="tab-btn"        data-tab="tags">🏷 タグ・保存先</button>
       <button class="tab-btn"        data-tab="authors">👤 権利者</button>
       <button class="tab-btn"        data-tab="sns">🔗 SNS連携</button>
+      <button class="tab-btn"        data-tab="video">🎬 動画</button>
     </div>
     <div class="tab-scroll-indicator tab-scroll-left">‹</div>
     <div class="tab-scroll-indicator tab-scroll-right">›</div>
@@ -1842,6 +1843,36 @@
     #busy-modal-overlay[data-shown="1"] { display: flex !important; }
     #busy-modal-close:hover { background:#4a90e2; color:#fff; }
   </style>
+
+  <!-- 🎬 動画タブ（GROUP-33-T1 v1.46.51）：動画→GIF 変換の設定 -->
+  <div class="tab-panel" id="tab-video">
+    <div>
+      <div class="section-title">動画 → GIF 変換</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          動画・Canvas をページ内録画して GIF 化する際の録画上限です。<br>
+          切り抜き／範囲指定／全取得の自動録画すべてに適用されます。長尺ほど GIF のサイズが大きくなります。
+        </div>
+        <label class="export-auto-label">
+          録画の上限秒数：
+          <input type="number" id="video-max-rec-sec" min="1" step="0.1" value="20" style="width:84px;" />
+          秒（最小 1・上限なし）
+        </label>
+      </div>
+    </div>
+    <div>
+      <div class="section-title">変換後の動作</div>
+      <div class="root-path-section" style="padding:12px 14px;">
+        <div style="font-size:12px;color:#555;margin-bottom:10px;">
+          OFF にすると、変換ウィンドウに「即保存」「保存ウィンドウを開く」ボタンが表示されます（連続して切り抜く用途向け）。
+        </div>
+        <label class="export-auto-label">
+          <input type="checkbox" id="video-auto-open-modal" checked />
+          変換後に自動で保存ウィンドウを開く
+        </label>
+      </div>
+    </div>
+  </div>
 
   <!-- JSZip v3.10.1（MIT、GROUP-26-unzip / v1.30.0）: zip インポート展開用 -->
   <script src="../vendor/jszip.min.js"></script>

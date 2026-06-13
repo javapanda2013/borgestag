@@ -401,15 +401,73 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
         suggestedFilename: `ugoira-${ts}.gif`,
         associatedAudio: null,
       });
-      await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
-      await browser.storage.local.remove("_pendingVideoConvert");
-      setTimeout(() => window.close(), 500);
+      await _routeAfterConvert(); // GROUP-33-T1：自動遷移 ON/OFF で分岐
     } catch (err) {
       log(`保存モーダル起動失敗: ${err.message}`, "error");
       btn.disabled = false;
       btn.textContent = "再試行";
     }
   });
+}
+
+// ================================================================
+// GROUP-33-T1 (v1.46.51)：変換後の遷移（自動 ON＝保存ウィンドウへ／OFF＝保存方法ボタン表示）
+// ================================================================
+async function _routeAfterConvert() {
+  let auto = true;
+  try {
+    const r = await browser.storage.local.get("videoAutoOpenModal");
+    auto = r.videoAutoOpenModal !== false; // 既定 ON
+  } catch (_) {}
+  if (auto) {
+    await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
+    await browser.storage.local.remove("_pendingVideoConvert");
+    setTimeout(() => window.close(), 500);
+  } else {
+    _showPostConvertActions();
+  }
+}
+
+function _showPostConvertActions() {
+  const cbtn = document.getElementById("convert-btn");
+  const cancel = document.getElementById("cancel-btn");
+  if (cbtn) cbtn.style.display = "none";
+  if (cancel) cancel.style.display = "none";
+  if (document.getElementById("post-convert-actions")) return;
+  const box = document.createElement("div");
+  box.id = "post-convert-actions";
+  box.style.cssText = "display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;";
+  const mk = (label, handler) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "padding:8px 14px;font-size:13px;cursor:pointer;border-radius:6px;" +
+      "border:1px solid #4a90e2;background:#fff;color:#1a4d8c;font-weight:600;font-family:inherit;";
+    b.addEventListener("click", handler);
+    return b;
+  };
+  box.appendChild(mk("⚡ 即保存", async () => {
+    box.querySelectorAll("button").forEach(b => { b.disabled = true; });
+    log("即保存しています…");
+    const res = await browser.runtime.sendMessage({ type: "INSTANT_SAVE_CONVERSION" }).catch(() => null);
+    if (res && res.success) {
+      log("✅ 即保存しました。ウィンドウを閉じます。", "success");
+      await browser.storage.local.remove("_pendingVideoConvert");
+      setTimeout(() => window.close(), 800);
+    } else {
+      log("❌ 即保存に失敗: " + ((res && res.error) || "不明"), "error");
+      box.querySelectorAll("button").forEach(b => { b.disabled = false; });
+    }
+  }));
+  box.appendChild(mk("💾 保存ウィンドウを開く", async () => {
+    await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
+    await browser.storage.local.remove("_pendingVideoConvert");
+    setTimeout(() => window.close(), 300);
+  }));
+  box.appendChild(mk("🎬 動画設定タブを開く", () => {
+    browser.runtime.sendMessage({ type: "OPEN_VIDEO_SETTINGS_TAB" });
+  }));
+  (cbtn && cbtn.parentNode ? cbtn.parentNode : document.body).appendChild(box);
+  log("✅ 変換が完了しました。保存方法を選んでください（自動遷移は設定画面の動画タブで切替）。", "success");
 }
 
 // ================================================================
@@ -663,12 +721,8 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
         associatedAudio,
       });
 
-      await browser.runtime.sendMessage({ type: "OPEN_MODAL_FROM_CONVERSION" });
-      // 受領データクリア（次回衝突防止）
-      await browser.storage.local.remove("_pendingVideoConvert");
-      // v1.31.5：_pendingModal は background 側で既に __fromConversion フラグでセット済。
-      // 自ウィンドウを閉じる（少し待って保存モーダル起動を先に）
-      setTimeout(() => window.close(), 500);
+      // GROUP-33-T1 (v1.46.51)：自動遷移 ON は保存ウィンドウへ、OFF はボタン表示
+      await _routeAfterConvert();
     } catch (err) {
       log(`保存モーダル起動失敗: ${err.message}`, "error");
       btn.disabled = false;

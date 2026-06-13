@@ -437,6 +437,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // GROUP-33-T1 (v1.46.51)：変換ウィンドウの「動画設定タブを開く」から指定された初期タブを選択
+  try {
+    const { _settingsInitialTab } = await browser.storage.local.get("_settingsInitialTab");
+    if (_settingsInitialTab) {
+      await browser.storage.local.remove("_settingsInitialTab");
+      const tb = document.querySelector('.tab-btn[data-tab="' + _settingsInitialTab + '"]');
+      if (tb) tb.click();
+    }
+  } catch (_) {}
+
   await loadData();
   renderAll();
   setupBackup();
@@ -451,6 +461,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupLogs();
   setupHistoryTab();
   setupHistoryDisplayMode();
+  setupVideoTab(); // GROUP-33-T1 (v1.46.51)：動画タブ（録画上限・自動遷移）
   setupAuthorsTab();
   setupDisplayCounts();
 
@@ -1872,6 +1883,32 @@ async function setupMinimizeAfterSave() {
   chk.checked = !!minimizeAfterSave; // デフォルトOFF
   chk.addEventListener("change", async () => {
     await browser.storage.local.set({ minimizeAfterSave: chk.checked });
+  });
+}
+
+// GROUP-33-T1 (v1.46.51)：動画タブ。録画上限秒（既定 20・最小 1・上限なし・0.1 刻み・自動クランプ）
+// と「変換後に自動で保存ウィンドウを開く」（既定 ON）を storage.local（videoMaxRecSec /
+// videoAutoOpenModal）へ保存。content.js / video_convert.js が同キーを読んで挙動を共有する。
+async function setupVideoTab() {
+  const sec = document.getElementById("video-max-rec-sec");
+  const auto = document.getElementById("video-auto-open-modal");
+  if (!sec || !auto) return;
+  const r = await browser.storage.local.get(["videoMaxRecSec", "videoAutoOpenModal"]);
+  sec.value = (typeof r.videoMaxRecSec === "number" && r.videoMaxRecSec >= 1) ? r.videoMaxRecSec : 20;
+  auto.checked = r.videoAutoOpenModal !== false; // 既定 ON
+  const saveSec = async () => {
+    // 自動クランプ：空は既定 20、最小 1（負/0/不正も 1）、0.1 刻みに丸め。エラーにしない
+    let n = parseFloat(sec.value);
+    if (sec.value.trim() === "") n = 20;
+    else if (!Number.isFinite(n) || n < 1) n = 1;
+    n = Math.round(n * 10) / 10;
+    sec.value = n;
+    await browser.storage.local.set({ videoMaxRecSec: n });
+  };
+  sec.addEventListener("change", saveSec);
+  sec.addEventListener("blur", saveSec);
+  auto.addEventListener("change", async () => {
+    await browser.storage.local.set({ videoAutoOpenModal: auto.checked });
   });
 }
 

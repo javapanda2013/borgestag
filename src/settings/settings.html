@@ -48,10 +48,11 @@
       position: sticky; top: 41px; z-index: 9; background: #fff;
     }
     .tab-bar {
-      display: flex; background: #fff; border-bottom: 2px solid #e0e0e0;
+      display: flex; flex-wrap: wrap; background: #fff; border-bottom: 2px solid #e0e0e0;
       padding: 0 16px;
-      overflow-x: auto; scrollbar-width: none;
     }
+    /* GROUP-33-T1 (v1.46.52)：タブ増で右端タブ（🎬 動画）が横スクロールで隠れる問題の修正。
+       折り返し表示で全タブ常時表示。scrollWidth==clientWidth となりスクロールインジケータは自動非表示 */
     .tab-bar::-webkit-scrollbar { display: none; }
     .tab-btn {
       background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px;

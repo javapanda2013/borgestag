@@ -521,19 +521,25 @@ async function executeFullCapture(el, btn) {
 // ---- 範囲指定：開始秒へシークして自動録画（canvas は「これから N 秒」） ----
 async function autoRecordRange(el, btn, startSec, endSec) {
   if (_captureActive) return;
+  let synced = false;
   if (el.tagName === "VIDEO") {
     try {
+      // GROUP-15（録画開始オフセット対策）：録画準備（captureStream・MediaRecorder・確認ダイアログ）
+      // の間に再生が進むと開始がズレるため、一旦停止してからシーク。再生再開は captureAndSend が
+      // recorder.start() の直後に行い、録画開始を currentTime=startSec にピン留めする。
+      el.pause();
       el.currentTime = Math.max(0, startSec);
       await new Promise((res) => {
         const onSeek = () => { el.removeEventListener("seeked", onSeek); res(); };
         el.addEventListener("seeked", onSeek);
         setTimeout(() => { el.removeEventListener("seeked", onSeek); res(); }, 3000);
       });
-      try { await el.play(); } catch (_) {}
+      synced = true;
     } catch (_) { /* シーク不能でも現在位置から録画する */ }
   }
   const clipBtn = (hoverWrap && hoverWrap.querySelector("#__image-saver-video-btn__")) || btn;
-  await captureAndSend(el, clipBtn, Math.max(0.5, endSec - startSec));
+  await captureAndSend(el, clipBtn, Math.max(0.5, endSec - startSec),
+    synced ? { startSec: Math.max(0, startSec), endSec } : null);
 }
 
 // ---- blob: 動画の原データ取得（成功で true。MSE 等の object URL は fetch 不可→false） ----
@@ -664,12 +670,15 @@ function _releaseStream(stream) {
   try { stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
 }
 
-async function captureAndSend(el, btn, fixedSec) {
+async function captureAndSend(el, btn, fixedSec, syncOpts) {
   if (_captureActive) return;
   const isVideo = el.tagName === "VIDEO";
+  // GROUP-15：全取得/範囲指定（syncOpts あり）は録画開始を動画位置に同期し、1 周の境界で停止する
+  const sync = !!(isVideo && syncOpts);
   let stream = null;
   try {
-    if (isVideo && el.paused) {
+    // sync 時は準備中に再生を進めない（開始オフセット 0）。録画開始後に play する
+    if (isVideo && el.paused && !sync) {
       try { await el.play(); } catch (_) { /* 自動再生拒否でも録画自体は試行 */ }
     }
     stream = el.captureStream();
@@ -706,6 +715,7 @@ async function captureAndSend(el, btn, fixedSec) {
     _releaseStream(stream);
     _captureActive = false;
     _recCtl = null;
+    if (sync) { try { el.play(); } catch (_) {} } // 確認キャンセル時は一時停止した動画を再生へ戻す
     updateButtonVisibility();
     return;
   }
@@ -732,20 +742,42 @@ async function captureAndSend(el, btn, fixedSec) {
   if (timedBtnEl) timedBtnEl.style.display = "none";
   if (cancelBtnEl) cancelBtnEl.style.display = "";
   let elapsed = 0;
+  const startSec = sync ? (syncOpts.startSec || 0) : 0;
+  let maxT = startSec; // 実録画尺の算出用（到達した最大 currentTime）
   const tick = setInterval(() => {
-    elapsed++;
+    if (sync) {
+      const t = el.currentTime;
+      if (t > maxT) maxT = t;
+      elapsed = Math.max(0, Math.round(t - startSec));
+    } else {
+      elapsed++;
+    }
     btn.textContent = `⏹ ここまで確定 ${elapsed}/${Math.round(secLimit)}s`;
   }, 1000);
+  // GROUP-15：sync 時は currentTime を監視し、1 周到達 or 巻き戻り（ループ境界）で即停止
+  let monitor = null;
+  if (sync) {
+    let lastT = startSec;
+    monitor = setInterval(() => {
+      const t = el.currentTime;
+      if (t > maxT) maxT = t;
+      if (t >= syncOpts.endSec - 0.05 || t < lastT - 0.3) requestStop();
+      lastT = t;
+    }, 100);
+  }
   let stopTimer = null;
   try {
     recorder.start(1000);
     btn.textContent = `⏹ ここまで確定 0/${Math.round(secLimit)}s`;
-    stopTimer = setTimeout(requestStop, secLimit * 1000);
+    // sync 時は録画開始の直後に再生＝開始オフセット 0。停止は monitor（境界）が主、timer は保険
+    if (sync) { try { await el.play(); } catch (_) {} }
+    stopTimer = setTimeout(requestStop, (secLimit + 1) * 1000);
     await done;
   } catch (err) {
     console.warn("[BorgesTag] capture start failed:", err && err.name, err && err.message);
   } finally {
     clearInterval(tick);
+    if (monitor) clearInterval(monitor);
     clearTimeout(watchdog);
     if (stopTimer) clearTimeout(stopTimer);
     if (isVideo) el.removeEventListener("ended", requestStop);
@@ -779,7 +811,7 @@ async function captureAndSend(el, btn, fixedSec) {
     pageUrl:     location.href,
     videoWidth:  isVideo ? (el.videoWidth || 0) : (el.width || Math.round(rect.width)),
     videoHeight: isVideo ? (el.videoHeight || 0) : (el.height || Math.round(rect.height)),
-    duration:    elapsed || secLimit,
+    duration:    sync ? Math.max(0.5, maxT - startSec) : (elapsed || secLimit),
     sourceKind:  isVideo ? "blob-video" : "canvas",
   }).catch(() => null);
   buf = null; // 巨大 payload null 代入（送信完了直後、GROUP-82 規約）

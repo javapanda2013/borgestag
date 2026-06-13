@@ -555,8 +555,12 @@ async function init() {
     }
 
     // 変換ボタン
+    // GROUP-15：実尺変換のため、受領した尺と録画上限（設定値）を変換へ渡す
+    const { videoMaxRecSec } = await browser.storage.local.get("videoMaxRecSec");
+    const capSec = (Number.isFinite(videoMaxRecSec) && videoMaxRecSec >= 1)
+      ? videoMaxRecSec : PHASE1_PARAMS.DURATION_SEC;
     document.getElementById("convert-btn").addEventListener("click", () => {
-      runConversion(effectiveUrl, pageUrl, videoWidth, videoHeight);
+      runConversion(effectiveUrl, pageUrl, videoWidth, videoHeight, duration, capSec);
     });
 
     // キャンセル
@@ -582,7 +586,7 @@ function escapeHtml(s) {
 // ================================================================
 // 変換実行
 // ================================================================
-function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
+function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, capSec) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
@@ -590,7 +594,17 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   updateProgress(0);
 
   const size = computeGifSize(origWidth, origHeight);
-  const numFrames = PHASE1_PARAMS.DURATION_SEC * PHASE1_PARAMS.FPS;
+  // GROUP-15：実尺で変換（固定 20 秒/200 コマを廃止）。preview の duration を優先、無ければ
+  // 受領 duration、上限 capSec（設定値）で clamp。GIF 長 = numFrames × interval が実尺に一致し、
+  // 短い素材を 20 秒へ引き伸ばす際の末尾ループ/フリーズと音ずれを解消する。
+  const previewVideo = document.getElementById("preview");
+  const maxSec = (Number.isFinite(capSec) && capSec >= 1) ? capSec : PHASE1_PARAMS.DURATION_SEC;
+  let actualDur = (Number.isFinite(previewVideo.duration) && previewVideo.duration > 0)
+    ? previewVideo.duration
+    : (Number.isFinite(hintDuration) && hintDuration > 0) ? hintDuration
+    : PHASE1_PARAMS.DURATION_SEC;
+  actualDur = Math.max(0.5, Math.min(actualDur, maxSec));
+  const numFrames = Math.max(1, Math.round(actualDur * PHASE1_PARAMS.FPS));
 
   const startTime = Date.now();
   let lastProgressAt = Date.now();
@@ -600,8 +614,7 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
   // gifshot は独自 video を内部生成するが、録音は既存 preview video を流用する。
   // v1.31.5 修正：同一 URL を 2 要素で同時ロードするとタブクラッシュしたため統合。
   // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
-  const previewVideo = document.getElementById("preview");
-  const audioPromise = recordAudio(previewVideo, PHASE1_PARAMS.DURATION_SEC);
+  const audioPromise = recordAudio(previewVideo, actualDur);
 
   // v1.31.1 診断：100% に達してからのタイムアウト（GIF エンコードが無限に待たないよう）。
   // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
@@ -667,7 +680,7 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight) {
           dataUrl: audioDataUrl,
           mimeType: "audio/webm",
           extension: PHASE1_PARAMS.AUDIO_EXT,
-          durationSec: PHASE1_PARAMS.DURATION_SEC,
+          durationSec: actualDur,
         };
         log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB + 音声 ${audioSizeMB} MB）。保存モーダルを起動しています…`, "success");
       } else {

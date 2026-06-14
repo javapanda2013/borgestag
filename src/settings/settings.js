@@ -4056,6 +4056,7 @@ function renderHistoryGrid() {
   const totalPages = Math.max(1, Math.ceil(totalFiltered / _histPageSize));
   if (_histPage >= totalPages) _histPage = totalPages - 1;
   const pageSlice = filtered.slice(_histPage * _histPageSize, (_histPage + 1) * _histPageSize);
+  _thumbFetchN = _histPageSize; // GROUP-133 B：lazy thumb の throttle N を render 開始時の表示件数で capture（Q-133-9）
 
   const countEl = document.getElementById("hist-count");
   if (countEl) {
@@ -4405,29 +4406,34 @@ function _buildGroupWrapperElement(group) {
         }
       }).catch(() => {});
     } else {
-      // 非 GIF は dataUrl 経路。v1.41.2：frontend cache hit なら同期で <img> を attach
-      const _attachImgFromUrl = (dataUrl) => {
-        allDataUrls[0] = dataUrl;
+      // GROUP-133 B：非GIF 代表サムネを binary（Blob URL）化。lightbox は allDataUrls[0]=null（初期値）
+      // のままにして updateView が都度 GET_THUMB_DATA_URL で取り直す（card 用 Blob URL は load 後 revoke）。
+      const _attachImgFromBlob = (blob) => {
+        const url = URL.createObjectURL(blob);
         const img = document.createElement("img");
         img.className = "hist-card-thumb";
-        img.src = dataUrl;
         img.style.cursor = "zoom-in";
+        const _rv = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
+        img.addEventListener("load", _rv, { once: true });
+        img.addEventListener("error", _rv, { once: true });
         img.addEventListener("click", () => {
           const _navData = _currentFilteredHistory ?? _historyData;
           const gIdx = _navData.findIndex(h => h.id === first.id);
           showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
         });
+        img.src = url;
         placeholder.replaceWith(img);
       };
       const cached = _frontCacheGet(first.thumbId);
       if (cached) {
-        _attachImgFromUrl(cached);
+        _attachImgFromBlob(cached);
       } else {
-        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: first.thumbId })
+        browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId: first.thumbId })
           .then(r => {
-            if (r?.dataUrl) {
-              _frontCachePut(first.thumbId, r.dataUrl);
-              _attachImgFromUrl(r.dataUrl);
+            if (r?.ok && r.buffer) {
+              const blob = new Blob([r.buffer], { type: r.mime || "image/jpeg" });
+              _frontCachePut(first.thumbId, blob);
+              _attachImgFromBlob(blob);
             }
           }).catch(() => {});
       }
@@ -5277,82 +5283,156 @@ function _updateFavButtonsForEntry(entryId, isFav) {
 // settings.js プロセス内に dataUrl Map を持ち、cache hit なら同期で
 // _attachThumbImgFromDataUrl して空白期間を消す。
 // =============================================================================
-const _frontDataUrlCache = new Map(); // thumbId → dataUrl
-let _frontDataUrlCacheBytes = 0;
-const FRONT_DATA_URL_CACHE_MAX_ENTRIES = 300;
-const FRONT_DATA_URL_CACHE_MAX_BYTES   = 100 * 1024 * 1024; // 100 MB
+// GROUP-133 B（2026-06-14）：front cache を dataUrl 文字列 → Blob 本体保持へ。
+// 受信は GET_THUMB_BINARY（runtime.sendMessage は transferable 非対応＝structured clone copy だが
+// base64 化と JSON 直列化を省けてペイロードも約33%減）。URL は attach 毎に createObjectURL し
+// load 後 revoke＝同一 thumbId を複数カードが共有しても multi-reference revoke 事故にならない。
+const _frontThumbBlobCache = new Map(); // thumbId → Blob
+let _frontThumbCacheBytes = 0;
+const FRONT_THUMB_CACHE_MAX_ENTRIES = 300;
+const FRONT_THUMB_CACHE_MAX_BYTES   = 100 * 1024 * 1024; // 100 MB
 
 function _frontCacheGet(thumbId) {
-  if (!thumbId || !_frontDataUrlCache.has(thumbId)) return null;
-  const v = _frontDataUrlCache.get(thumbId);
-  // LRU：取得した要素を末尾へ移動
-  _frontDataUrlCache.delete(thumbId);
-  _frontDataUrlCache.set(thumbId, v);
+  if (!thumbId || !_frontThumbBlobCache.has(thumbId)) return null;
+  const v = _frontThumbBlobCache.get(thumbId);
+  _frontThumbBlobCache.delete(thumbId); _frontThumbBlobCache.set(thumbId, v); // LRU
   return v;
 }
 
-function _frontCachePut(thumbId, dataUrl) {
-  if (!thumbId || !dataUrl) return;
-  // GROUP-56 案 B (v1.46.0): GIF dataUrl は cache 対象外。
-  // 1 件あたり 38 MB+ で 100 MB 上限を瞬時に圧迫し、他の通常サムネを LRU で evict する。
-  // GIF は GIF Worker session pool 経由の rendering（_initGifTile）で別管理されており、
-  // dataUrl 経由の同期描画は不要（_attachThumbImgFromDataUrl で空白消去する目的に対し
-  // GIF は GIF Worker INIT 完了で初フレーム表示するため、dataUrl での先行描画は元々経路ゼロ）。
-  if (dataUrl.startsWith("data:image/gif;")) return;
-  if (_frontDataUrlCache.has(thumbId)) {
-    _frontDataUrlCacheBytes -= _frontDataUrlCache.get(thumbId).length;
-    _frontDataUrlCache.delete(thumbId);
+function _frontCachePut(thumbId, blob) {
+  if (!thumbId || !blob || typeof blob.size !== "number") return;
+  // GROUP-56 踏襲（mime 判定化）：GIF は Worker session pool で別管理＝cache 対象外。
+  if (blob.type === "image/gif") return;
+  if (_frontThumbBlobCache.has(thumbId)) {
+    _frontThumbCacheBytes -= _frontThumbBlobCache.get(thumbId).size;
+    _frontThumbBlobCache.delete(thumbId);
   }
-  _frontDataUrlCache.set(thumbId, dataUrl);
-  _frontDataUrlCacheBytes += dataUrl.length;
+  _frontThumbBlobCache.set(thumbId, blob);
+  _frontThumbCacheBytes += blob.size;
   while (
-    _frontDataUrlCache.size > FRONT_DATA_URL_CACHE_MAX_ENTRIES ||
-    _frontDataUrlCacheBytes > FRONT_DATA_URL_CACHE_MAX_BYTES
+    _frontThumbBlobCache.size > FRONT_THUMB_CACHE_MAX_ENTRIES ||
+    _frontThumbCacheBytes > FRONT_THUMB_CACHE_MAX_BYTES
   ) {
-    const firstKey = _frontDataUrlCache.keys().next().value;
+    const firstKey = _frontThumbBlobCache.keys().next().value;
     if (firstKey === undefined) break;
-    _frontDataUrlCacheBytes -= _frontDataUrlCache.get(firstKey).length;
-    _frontDataUrlCache.delete(firstKey);
+    _frontThumbCacheBytes -= _frontThumbBlobCache.get(firstKey).size;
+    _frontThumbBlobCache.delete(firstKey);
   }
 }
 
-// 共通：dataUrl を持っている前提で hist-card の placeholder を <img> に置換し
-// click ハンドラを attach する（_buildHistCardInner 専用、グループ wrapper では使わない）
-function _attachThumbImgFromDataUrl(card, entry, dataUrl, onThumbClick) {
-  const placeholder = card.querySelector(".hist-card-thumb-placeholder");
-  if (!placeholder) return;
+// Blob → <img>（createObjectURL、load/error once で revoke＝URL 使い捨て）。
+// click は Lightbox を dataUrl 経路へ委譲（null 渡し→updateView が都度 GET_THUMB_DATA_URL 取得）。
+function _attachThumbImgFromBlob(placeholder, entry, blob, onThumbClick) {
+  if (!placeholder || !placeholder.isConnected) return;
+  const url = URL.createObjectURL(blob);
   const img = document.createElement("img");
   img.className = "hist-card-thumb";
-  img.src = dataUrl;
   img.title = "クリックで拡大";
   img.style.cursor = "zoom-in";
+  const _revoke = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
+  img.addEventListener("load", _revoke, { once: true });
+  img.addEventListener("error", _revoke, { once: true });
   img.addEventListener("click", (e) => {
     e.stopPropagation();
     if (onThumbClick) {
-      onThumbClick(dataUrl, img);
+      onThumbClick(null, img);
     } else {
       const _navData = _currentFilteredHistory ?? _historyData;
       const gIdx = _navData.findIndex(h => h.id === entry.id);
-      showGroupLightbox([dataUrl], 0, [entry], { startEntryIndex: gIdx });
+      showGroupLightbox([null], 0, [entry], { startEntryIndex: gIdx });
     }
   });
+  img.src = url;
   placeholder.replaceWith(img);
 }
 
-// 非 GIF サムネを placeholder へ流し込む（cache hit なら同期、miss なら async＋cache put）
-function _setupNonGifThumbInPlaceholder(card, entry, onThumbClick) {
+// =============================================================================
+// GROUP-133 B（lazy-load、2026-06-14）：非 GIF サムネを「可視化時に binary で都度取得」。
+//  - build 時の一斉 fetch を廃止し、placeholder を IntersectionObserver で監視（grid 挿入後に observe）。
+//  - 可視化→throttle キュー（同時上限 N＝render 開始時の _histPageSize を capture）→ GET_THUMB_BINARY。
+//  - 完了時 placeholder.isConnected かつ dataset.thumbId 一致なら attach（reuse/orphan を自然吸収＝
+//    再利用カードの in-flight も DOM 同一なら反映され「永久 placeholder」を回避）。
+// =============================================================================
+const _thumbLazyMeta = new WeakMap();   // placeholder → { entry, onThumbClick }
+const _thumbFetchQueue = [];            // 取得待ち placeholder
+let   _thumbInFlight = 0;
+let   _thumbFetchN = 100;               // render 開始時に _histPageSize を capture（Q-133-9）
+let   _thumbPumping = false;            // 再入ガード（cache hit 同期完了の深い再帰を防ぎ反復処理に）
+
+let _thumbLazyObserver = null;
+function _getThumbLazyObserver() {
+  if (_thumbLazyObserver || typeof IntersectionObserver === "undefined") return _thumbLazyObserver;
+  _thumbLazyObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const ph = e.target;
+      if (ph.dataset.thumbQueued === "1") continue; // 二重 enqueue 防止
+      ph.dataset.thumbQueued = "1";
+      _thumbFetchQueue.push(ph);
+    }
+    _pumpThumbQueue();
+  }, { root: null, rootMargin: "150px" }); // 150px 先読み（GIF observer と同値）
+  return _thumbLazyObserver;
+}
+
+// grid 挿入後に observe する（detached subtree 観測による初回発火漏れ回避＝microtask で遅延）。
+function _observeThumbPlaceholderDeferred(card, entry, onThumbClick) {
+  const ph = card.querySelector(".hist-card-thumb-placeholder");
+  if (!ph) return;
+  _thumbLazyMeta.set(ph, { entry, onThumbClick });
+  ph.dataset.thumbId = entry.thumbId || "";
+  const io = _getThumbLazyObserver();
+  if (!io) { _setupNonGifThumbInPlaceholder(card, entry, onThumbClick); return; } // 非対応環境は即時
+  queueMicrotask(() => { if (ph.isConnected) { try { io.observe(ph); } catch (_) {} } });
+}
+
+function _pumpThumbQueue() {
+  if (_thumbPumping) return; // 再入（同期 cache hit の done→pump）はガードして外側 while に委ねる
+  _thumbPumping = true;
+  try {
+    while (_thumbInFlight < _thumbFetchN && _thumbFetchQueue.length > 0) {
+      const ph = _thumbFetchQueue.shift();
+      if (!ph || !ph.isConnected) continue; // orphan は捨てる
+      const meta = _thumbLazyMeta.get(ph);
+      if (!meta) continue;
+      if (_thumbLazyObserver) { try { _thumbLazyObserver.unobserve(ph); } catch (_) {} }
+      _thumbInFlight++;
+      _fetchThumbForPlaceholder(ph, meta.entry, meta.onThumbClick, () => { _thumbInFlight--; _pumpThumbQueue(); });
+    }
+  } finally { _thumbPumping = false; }
+}
+
+// placeholder へ binary 取得 → Blob → attach。done は throttle 経由時のみ渡す（即時 fallback は省略）。
+function _fetchThumbForPlaceholder(ph, entry, onThumbClick, done) {
+  const _done = done || (() => {});
   const cached = _frontCacheGet(entry.thumbId);
-  if (cached) {
-    _attachThumbImgFromDataUrl(card, entry, cached, onThumbClick);
-    return;
-  }
-  browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+  if (cached) { _attachThumbImgFromBlob(ph, entry, cached, onThumbClick); _done(); return; }
+  browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId: entry.thumbId })
     .then(r => {
-      if (r?.dataUrl) {
-        _frontCachePut(entry.thumbId, r.dataUrl);
-        _attachThumbImgFromDataUrl(card, entry, r.dataUrl, onThumbClick);
+      if (r?.ok && r.buffer) {
+        const blob = new Blob([r.buffer], { type: r.mime || "image/jpeg" });
+        _frontCachePut(entry.thumbId, blob);
+        if (ph.isConnected && ph.dataset.thumbId === (entry.thumbId || "")) {
+          _attachThumbImgFromBlob(ph, entry, blob, onThumbClick);
+        }
       }
-    }).catch(() => {});
+    }).catch(() => {}).finally(_done);
+}
+
+// 即時取得（IntersectionObserver 非対応の fallback ＋ 再利用カードの未 load placeholder 救済）。
+function _setupNonGifThumbInPlaceholder(card, entry, onThumbClick) {
+  const ph = (card && card.classList && card.classList.contains("hist-card-thumb-placeholder"))
+    ? card : (card && card.querySelector ? card.querySelector(".hist-card-thumb-placeholder") : null);
+  if (!ph) return;
+  _fetchThumbForPlaceholder(ph, entry, onThumbClick);
+}
+
+// カード破棄/再描画時に未 load placeholder の observe を解除（leak 防止、_destroyGifSessionsInTree と対）。
+function _unobserveThumbsInTree(rootEl) {
+  if (!_thumbLazyObserver || !rootEl || !rootEl.querySelectorAll) return;
+  for (const ph of rootEl.querySelectorAll(".hist-card-thumb-placeholder")) {
+    try { _thumbLazyObserver.unobserve(ph); } catch (_) {}
+  }
 }
 
 // =============================================================================
@@ -5625,6 +5705,7 @@ function _destroyGifSession(id) {
 // @spec 設計書類/画面別/01_設定画面_保存履歴タブ_詳細.md
 function _destroyGifSessionsInTree(rootEl) {
   if (!rootEl) return;
+  _unobserveThumbsInTree(rootEl); // GROUP-133 B：未 load の非GIF placeholder の observe も解除（leak 防止）
   const canvases = rootEl.matches?.("canvas[data-gif-session-id]")
     ? [rootEl]
     : Array.from(rootEl.querySelectorAll?.("canvas[data-gif-session-id]") || []);
@@ -6000,7 +6081,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     if (_isGifEntry(entry)) {
       _setupGifCanvasInPlaceholder(card, entry, onThumbClick);
     } else {
-      _setupNonGifThumbInPlaceholder(card, entry, onThumbClick);
+      // GROUP-133 B：可視化時に lazy 取得（build 一斉 fetch を廃止）。observe は grid 挿入後（microtask 遅延）。
+      _observeThumbPlaceholderDeferred(card, entry, onThumbClick);
     }
   }
 
@@ -6219,11 +6301,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     authorInput.value = "";
     authorSugEl.style.display = "none";
     // サムネイル取得→インライン表示
-    const imgEl = card.querySelector(".hist-card-thumb, img.hist-card-thumb");
-    if (imgEl?.src) {
-      infoThumb.src = imgEl.src;
-      infoThumb.style.display = "";
-    } else if (entry.thumbId) {
+    // GROUP-133 B：card の img.src は revoke 済 Blob URL になり得る（コピー不可）。常に thumbId から取得。
+    if (entry.thumbId) {
       browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
         .then(r => { if (r?.dataUrl) { infoThumb.src = r.dataUrl; infoThumb.style.display = ""; } })
         .catch(() => {});

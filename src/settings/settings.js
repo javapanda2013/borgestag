@@ -34,6 +34,13 @@ function getEntryAuthors(entry) {
 const _PHASE_C1_IDB_NAME    = "ImageSaverThumbDB";
 const _PHASE_C1_IDB_VERSION = 3;
 const _PHASE_C1_HISTORY_STORE = "saveHistory";
+// GROUP-133 A（2026-06-14）：サムネを background IPC でなく同一 origin の IDB から in-process 直読みするため、
+// settings 側 onupgradeneeded を background.js（openThumbDB）と同一スキーマに揃える。
+// 理由：fresh-install で settings が background より先に DB を初回 open すると、従来は saveHistory のみ
+// create され thumbnails / externalImportThumbs が欠落 → 直読みで NotFoundError＝サムネ全滅の異常系を防ぐ。
+// version は 3 据置（background.js:1919 と一致、衝突なし）。
+const _PHASE_C1_THUMB_STORE = "thumbnails";
+const _PHASE_C1_EXT_STORE   = "externalImportThumbs";
 
 async function _phaseC1OpenDB() {
   return new Promise((resolve, reject) => {
@@ -44,10 +51,47 @@ async function _phaseC1OpenDB() {
         const s = db.createObjectStore(_PHASE_C1_HISTORY_STORE, { keyPath: "id" });
         s.createIndex("savedAt", "savedAt", { unique: false });
       }
+      // GROUP-133 A：background.js:1927-1939 と同一の thumbnails / externalImportThumbs を create。
+      if (!db.objectStoreNames.contains(_PHASE_C1_THUMB_STORE)) {
+        db.createObjectStore(_PHASE_C1_THUMB_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(_PHASE_C1_EXT_STORE)) {
+        const ext = db.createObjectStore(_PHASE_C1_EXT_STORE, { keyPath: "filePath" });
+        ext.createIndex("rootPath", "rootPath", { unique: false });
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
   });
+}
+
+// GROUP-133 A（2026-06-14）：サムネ Blob を IDB から in-process 直読み（GET_THUMB_BINARY の
+// プロセス間コピー＝PWindowGlobal IPC memcpy を normal path から除去）。
+//  - tx 内は get のみ。Blob→ArrayBuffer 変換は呼び出し側で tx 外実行（tx 寿命ルール）。
+//  - readonly 固定（書込/削除を構造的に拒否＝データ保護）。
+//  - store 不在 / open 失敗（fresh-install 異常系の保険）時のみ従来 GET_THUMB_BINARY へ fallback。
+//    record 不在（該当 thumbId なし）は fallback せず { ok:false }＝従来 handler の { ok:false } と等価。
+//  - 接続は既存 _phaseC1OpenDB パターン踏襲（新規接続キャッシュは導入しない＝versionchange 管理増を回避）。
+async function _getThumbBlob(thumbId) {
+  if (!thumbId) return { ok: false };
+  try {
+    const db = await _phaseC1OpenDB();
+    const rec = await new Promise((resolve, reject) => {
+      const tx  = db.transaction(_PHASE_C1_THUMB_STORE, "readonly");
+      const req = tx.objectStore(_PHASE_C1_THUMB_STORE).get(thumbId);
+      req.onsuccess = (e) => resolve(e.target.result || null);
+      req.onerror   = (e) => reject(e.target.error);
+    });
+    if (rec && rec.blob) return { ok: true, blob: rec.blob };
+    return { ok: false };
+  } catch (err) {
+    // store 不在（NotFoundError）/ open 失敗 → 従来 IPC へ fallback（B1 保険）
+    try {
+      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId });
+      if (r?.ok && r.buffer) return { ok: true, blob: new Blob([r.buffer], { type: r.mime || "image/jpeg" }) };
+    } catch (_) {}
+    return { ok: false };
+  }
 }
 
 async function _mirrorSaveHistoryToIDB(history, options = {}) {
@@ -4428,12 +4472,12 @@ function _buildGroupWrapperElement(group) {
       if (cached) {
         _attachImgFromBlob(cached);
       } else {
-        browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId: first.thumbId })
+        // GROUP-133 A：background IPC でなく IDB 直読み（_getThumbBlob）。
+        _getThumbBlob(first.thumbId)
           .then(r => {
-            if (r?.ok && r.buffer) {
-              const blob = new Blob([r.buffer], { type: r.mime || "image/jpeg" });
-              _frontCachePut(first.thumbId, blob);
-              _attachImgFromBlob(blob);
+            if (r.ok && r.blob) {
+              _frontCachePut(first.thumbId, r.blob);
+              _attachImgFromBlob(r.blob);
             }
           }).catch(() => {});
       }
@@ -5284,9 +5328,9 @@ function _updateFavButtonsForEntry(entryId, isFav) {
 // _attachThumbImgFromDataUrl して空白期間を消す。
 // =============================================================================
 // GROUP-133 B（2026-06-14）：front cache を dataUrl 文字列 → Blob 本体保持へ。
-// 受信は GET_THUMB_BINARY（runtime.sendMessage は transferable 非対応＝structured clone copy だが
-// base64 化と JSON 直列化を省けてペイロードも約33%減）。URL は attach 毎に createObjectURL し
-// load 後 revoke＝同一 thumbId を複数カードが共有しても multi-reference revoke 事故にならない。
+// GROUP-133 A（2026-06-14）：Blob の供給元を GET_THUMB_BINARY（IPC）→ IDB in-process 直読み（_getThumbBlob）へ。
+// プロセス間 structured clone copy（PWindowGlobal IPC memcpy）を normal path から除去。URL は attach 毎に
+// createObjectURL し load 後 revoke＝同一 thumbId を複数カードが共有しても multi-reference revoke 事故にならない。
 const _frontThumbBlobCache = new Map(); // thumbId → Blob
 let _frontThumbCacheBytes = 0;
 const FRONT_THUMB_CACHE_MAX_ENTRIES = 300;
@@ -5349,7 +5393,7 @@ function _attachThumbImgFromBlob(placeholder, entry, blob, onThumbClick) {
 // =============================================================================
 // GROUP-133 B（lazy-load、2026-06-14）：非 GIF サムネを「可視化時に binary で都度取得」。
 //  - build 時の一斉 fetch を廃止し、placeholder を IntersectionObserver で監視（grid 挿入後に observe）。
-//  - 可視化→throttle キュー（同時上限 N＝render 開始時の _histPageSize を capture）→ GET_THUMB_BINARY。
+//  - 可視化→throttle キュー（同時上限 N＝render 開始時の _histPageSize を capture）→ IDB 直読み（_getThumbBlob、GROUP-133 A）。
 //  - 完了時 placeholder.isConnected かつ dataset.thumbId 一致なら attach（reuse/orphan を自然吸収＝
 //    再利用カードの in-flight も DOM 同一なら反映され「永久 placeholder」を回避）。
 // =============================================================================
@@ -5407,13 +5451,13 @@ function _fetchThumbForPlaceholder(ph, entry, onThumbClick, done) {
   const _done = done || (() => {});
   const cached = _frontCacheGet(entry.thumbId);
   if (cached) { _attachThumbImgFromBlob(ph, entry, cached, onThumbClick); _done(); return; }
-  browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId: entry.thumbId })
+  // GROUP-133 A：background IPC でなく IDB 直読み（_getThumbBlob）。
+  _getThumbBlob(entry.thumbId)
     .then(r => {
-      if (r?.ok && r.buffer) {
-        const blob = new Blob([r.buffer], { type: r.mime || "image/jpeg" });
-        _frontCachePut(entry.thumbId, blob);
+      if (r.ok && r.blob) {
+        _frontCachePut(entry.thumbId, r.blob);
         if (ph.isConnected && ph.dataset.thumbId === (entry.thumbId || "")) {
-          _attachThumbImgFromBlob(ph, entry, blob, onThumbClick);
+          _attachThumbImgFromBlob(ph, entry, r.blob, onThumbClick);
         }
       }
     }).catch(() => {}).finally(_done);
@@ -5641,17 +5685,13 @@ async function _initGifTile(canvas, entry) {
   _gifThumbCachePut(entry.thumbId, sess);
   canvas.dataset.gifSessionId = String(id);
   _observeGifCanvas(canvas); // v1.46.42 GROUP-118：viewport 監視へ登録
-  let binResp;
+  // GROUP-133 A：GIF binary も IDB 直読み。Blob→ArrayBuffer は tx 外で変換（tx 寿命ルール）し Worker へ transfer。
+  let gifBuffer;
   try {
-    binResp = await browser.runtime.sendMessage({
-      type:    "GET_THUMB_BINARY",
-      thumbId: entry.thumbId,
-    });
+    const r = await _getThumbBlob(entry.thumbId);
+    if (!r.ok || !r.blob) { _destroyGifSession(id); return null; }
+    gifBuffer = await r.blob.arrayBuffer();
   } catch (err) {
-    _destroyGifSession(id);
-    return null;
-  }
-  if (!binResp?.ok || !binResp.buffer) {
     _destroyGifSession(id);
     return null;
   }
@@ -5662,8 +5702,8 @@ async function _initGifTile(canvas, entry) {
   }
   try {
     w.postMessage(
-      { type: "INIT", id, gifBuffer: binResp.buffer },
-      [binResp.buffer]
+      { type: "INIT", id, gifBuffer },
+      [gifBuffer]
     );
   } catch (err) {
     console.warn("[gif-worker] INIT postMessage 失敗", err);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.5
+version: 1.11.6
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -475,6 +475,38 @@ def handle_write_file(path, content):
         except Exception:
             pass
         return {"ok": False, "error": f"書き込み権限がありません: {path}"}
+    except Exception as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
+
+
+def handle_write_file_binary(path, content_b64):
+    """
+    base64 文字列をデコードしてバイナリファイルを書き出す（v1.11.6 GROUP-135 fix A）。
+    エクスポートのサムネを生バイナリ個別ファイルで zip 格納するための経路。
+    巨大 JSON 文字列連結（旧 thumbs-NNN.json）を廃し 1 枚ずつ書くことで実行中 peak を抑える。
+    親フォルダは自動作成（os.makedirs）。アトミック書込（.tmp → os.replace）。
+    """
+    import base64 as _b64
+    tmp_path = path + ".tmp"
+    try:
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        data = _b64.b64decode(content_b64 or "")
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+        return {"ok": True, "bytes": len(data)}
     except Exception as e:
         try:
             if os.path.exists(tmp_path):
@@ -1533,6 +1565,12 @@ def _dispatch_command(message):
         return handle_write_file(
             message.get("path", ""),
             message.get("content", "")
+        )
+
+    elif cmd == "WRITE_FILE_BINARY":
+        return handle_write_file_binary(
+            message.get("path", ""),
+            message.get("contentB64", ""),
         )
 
     elif cmd == "SAVE_IMAGE_BASE64":

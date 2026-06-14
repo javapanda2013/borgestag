@@ -65,8 +65,10 @@ async function _phaseC1OpenDB() {
   });
 }
 
-// GROUP-133 A（2026-06-14）：サムネ Blob を IDB から in-process 直読み（GET_THUMB_BINARY の
-// プロセス間コピー＝PWindowGlobal IPC memcpy を normal path から除去）。
+// GROUP-133 A（2026-06-14）：サムネ Blob を IDB から直読み。注意：Firefox の IDB backend は Main プロセスにあり、
+// store.get も Main への structured-clone IPC（in-process ではない）。本変更は GET_THUMB_BINARY 経由
+// （settings⇄background ＋ background⇄Main＝大 payload 2 leg）を settings⇄Main の 1 leg に削減するもので、IPC 除去ではない
+// （誤認訂正 2026-06-14・監査 we84mnyie。真の残存重さ＝saveHistory getAll は本変更の対象外）。
 //  - tx 内は get のみ。Blob→ArrayBuffer 変換は呼び出し側で tx 外実行（tx 寿命ルール）。
 //  - readonly 固定（書込/削除を構造的に拒否＝データ保護）。
 //  - store 不在 / open 失敗（fresh-install 異常系の保険）時のみ従来 GET_THUMB_BINARY へ fallback。
@@ -1165,46 +1167,44 @@ async function exportData() {
     files.push({ category: "history", path: histName, entries: batch.length });
     log(`✏️ ${histName} 書込（${Math.min(i + CHUNK_SIZE, historyTotal)}/${historyTotal}）`);
 
-    // thumbs-NNN.json 書出（サムネ ON かつ該当エントリに thumbId があれば）
+    // GROUP-135 fix A（formatVersion 3）：サムネを生バイナリで個別ファイル（thumbs/<id>.<ext>）化。
+    // 1 枚ずつ取得→書込で巨大 JSON 連結（旧 thumbs-NNN.json）を廃し、実行中 peak を 1 枚分に抑える
+    // （thumbs-001 の allocation size overflow＝500 件 base64 を 1 文字列に連結→Main への巨大 IPC の構造対策）。
     if (exportThumbsEnabled) {
-      const thumbIds = batch.map(e => e.thumbId).filter(Boolean);
-      if (thumbIds.length > 0) {
-        const thumbsRes = await browser.runtime.sendMessage({
-          type: "GET_IDB_THUMBS_BY_IDS",
-          ids: thumbIds,
+      for (const e of batch) {
+        if (!e.thumbId) continue;
+        const r = await browser.runtime.sendMessage({ type: "GET_IDB_THUMBS_BY_IDS", ids: [e.thumbId] });
+        if (!r?.ok) { logError(`thumb 取得失敗（${e.thumbId}）: ${r?.error || ""}`); return; }
+        const t = r.thumbs && r.thumbs[0];
+        if (!t || !t.dataUrl) continue; // record 不在は skip（旧 {ok:false} と等価）
+        const ci = t.dataUrl.indexOf(",");
+        const semi = t.dataUrl.indexOf(";");
+        const mime = (semi > 5 ? t.dataUrl.slice(5, semi) : "") || "image/jpeg";
+        const ext = mime === "image/gif" ? "gif" : mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+        const relPath = `thumbs/${e.thumbId}.${ext}`;
+        const wr = await browser.runtime.sendMessage({
+          type: "WRITE_FILE_BINARY",
+          path: `${tempDir}\\thumbs\\${e.thumbId}.${ext}`,
+          contentB64: ci >= 0 ? t.dataUrl.slice(ci + 1) : "",
         });
-        if (!thumbsRes?.ok) {
-          logError(`thumbs-${String(n).padStart(3, "0")}.json 取得失敗: ${thumbsRes?.error || ""}`);
-          return;
-        }
-        if (thumbsRes.thumbs.length > 0) {
-          const thumbsName = `thumbs-${String(n).padStart(3, "0")}.json`;
-          const writeRes = await browser.runtime.sendMessage({
-            type: "WRITE_FILE",
-            path: `${tempDir}\\${thumbsName}`,
-            content: JSON.stringify(thumbsRes.thumbs, null, 2),
-          });
-          if (!writeRes?.ok) {
-            logError(`${thumbsName} 書込失敗: ${writeRes?.error || ""}`);
-            return;
-          }
-          files.push({ category: "thumbs", path: thumbsName, entries: thumbsRes.thumbs.length });
-          thumbsTotalWritten += thumbsRes.thumbs.length;
-          log(`✏️ ${thumbsName} 書込（${thumbsRes.thumbs.length} 件）`);
-        }
+        if (!wr?.ok) { logError(`thumb 書込失敗（${relPath}）: ${wr?.error || ""}`); return; }
+        files.push({ category: "thumbbin", path: relPath, id: e.thumbId, mime });
+        thumbsTotalWritten++;
       }
+      log(`✏️ thumbs 書込（chunk ${n}：累計 ${thumbsTotalWritten} 枚・生バイナリ個別ファイル）`);
     }
   }
   exportHistory = null;
   const thumbsTotal = thumbsTotalWritten;
 
   // manifest.json 書出
-  // v1.46.14 Phase C-3：formatVersion 2 へ bump
-  // 変更点：saveHistory の読込元が migration aware（_readSaveHistory 経由で IDB 主・storage.local fallback）。
-  // V1 と V2 の zip ファイル構造は同一（save_history.json + thumbnails/）、import 側は両方を accept する。
+  // v1.46.14 Phase C-3：formatVersion 2（saveHistory 読込元が migration aware）。
+  // v1.46.59 GROUP-135 fix A：formatVersion 3 へ bump。thumbs を base64 JSON（旧 thumbs-NNN.json）でなく
+  //   生バイナリ個別ファイル（thumbs/<id>.<ext>、category:"thumbbin"）で格納＝export の allocation size overflow 対策。
+  //   import は 1/2（旧 base64 JSON）と 3（binary）を両方 accept。
   const manifestData = {
-    formatVersion: 2,
-    borgestagVersion: "1.46.14",
+    formatVersion: 3,
+    borgestagVersion: "1.46.59",
     app: "image-saver-tags",
     exportedAt,
     isDiff,
@@ -1331,9 +1331,9 @@ async function _parseZipImport(file, log, logError) {
   }
   log(`📋 manifest: formatVersion=${manifest.formatVersion} / ${manifest.files?.length || 0} ファイル`);
 
-  // v1.46.14 Phase C-3：V1 / V2 の両方を accept（schema 同一、saveHistory 読込元のみ差分あり）
-  if (manifest.formatVersion !== 1 && manifest.formatVersion !== 2) {
-    logError(`未対応フォーマット: formatVersion=${manifest.formatVersion}（対応 V1 / V2）`);
+  // V1/V2（base64 JSON thumbs）と V3（GROUP-135 fix A：生バイナリ個別ファイル thumbs）を accept
+  if (![1, 2, 3].includes(manifest.formatVersion)) {
+    logError(`未対応フォーマット: formatVersion=${manifest.formatVersion}（対応 V1 / V2 / V3）`);
     return null;
   }
 
@@ -1366,8 +1366,8 @@ async function _parseZipImport(file, log, logError) {
     }
   }
 
-  // thumbs-NNN.json を順次連結
-  const allThumbs = [];
+  // thumbs（V1/V2）：thumbs-NNN.json（base64 JSON）を順次連結
+  const allThumbs = []; // V3 では空のまま（下で streaming import 済）
   const thumbsFiles = (manifest.files || []).filter(f => f.category === "thumbs");
   for (const f of thumbsFiles) {
     const tf = zip.file(f.path);
@@ -1380,6 +1380,40 @@ async function _parseZipImport(file, log, logError) {
       logError(`${f.path} 解析失敗: ${err?.message || String(err)}`);
       return null;
     }
+  }
+  // thumbs（V3 = GROUP-135 fix A）：thumbbin（生バイナリ個別ファイル）を小バッチで streaming import。
+  // 全件を 1 配列に積まず IMPORT_IDB_THUMBS をバッチ送信＝import 側の peak も抑える（M1/M2）。
+  const thumbBinFiles = (manifest.files || []).filter(f => f.category === "thumbbin");
+  if (thumbBinFiles.length > 0) {
+    const BATCH = 50;
+    let addedTotal = 0;
+    for (let i = 0; i < thumbBinFiles.length; i += BATCH) {
+      const slice = thumbBinFiles.slice(i, i + BATCH);
+      const batch = [];
+      for (const f of slice) {
+        const bf = zip.file(f.path);
+        if (!bf) { log(`⚠️ ${f.path} が zip 内に見つかりません（スキップ）`); continue; }
+        try {
+          const u8 = await bf.async("uint8array");
+          const blob = new Blob([u8], { type: f.mime || "image/jpeg" });
+          const dataUrl = await new Promise((res, rej) => {
+            const fr = new FileReader();
+            fr.onload = () => res(fr.result);
+            fr.onerror = () => rej(fr.error || new Error("FileReader error"));
+            fr.readAsDataURL(blob);
+          });
+          batch.push({ id: f.id, dataUrl });
+        } catch (err) {
+          log(`⚠️ ${f.path} 読込失敗（スキップ）: ${err?.message || String(err)}`);
+        }
+      }
+      if (batch.length > 0) {
+        const ir = await browser.runtime.sendMessage({ type: "IMPORT_IDB_THUMBS", thumbs: batch });
+        if (ir?.ok) addedTotal += (ir.added || 0);
+        else log(`⚠️ thumbbin import 失敗（batch ${Math.floor(i / BATCH)}）: ${ir?.error || "不明"}`);
+      }
+    }
+    log(`✏️ thumbs（V3 binary）streaming import 完了（${addedTotal} 件追加 / ${thumbBinFiles.length} ファイル）`);
   }
 
   // 旧 JSON 形式と同構造の擬似 payload を組立てる
@@ -5328,8 +5362,9 @@ function _updateFavButtonsForEntry(entryId, isFav) {
 // _attachThumbImgFromDataUrl して空白期間を消す。
 // =============================================================================
 // GROUP-133 B（2026-06-14）：front cache を dataUrl 文字列 → Blob 本体保持へ。
-// GROUP-133 A（2026-06-14）：Blob の供給元を GET_THUMB_BINARY（IPC）→ IDB in-process 直読み（_getThumbBlob）へ。
-// プロセス間 structured clone copy（PWindowGlobal IPC memcpy）を normal path から除去。URL は attach 毎に
+// GROUP-133 A（2026-06-14）：Blob の供給元を GET_THUMB_BINARY → IDB 直読み（_getThumbBlob）へ。
+// 注意：IDB backend は Main プロセス＝直読みも Main への structured-clone IPC（in-process ではない・誤認訂正 2026-06-14）。
+// 効果は大 payload の IPC leg を 2→1 に削減（除去ではない）。URL は attach 毎に
 // createObjectURL し load 後 revoke＝同一 thumbId を複数カードが共有しても multi-reference revoke 事故にならない。
 const _frontThumbBlobCache = new Map(); // thumbId → Blob
 let _frontThumbCacheBytes = 0;

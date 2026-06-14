@@ -669,6 +669,14 @@ async function handleAsyncMessage(message, sender) {
       if (!path) return { ok: false, error: "DELETE_CHUNK_FILE: path は必須" };
       return sendNative({ cmd: "DELETE_CHUNK_FILE", path });
     }
+    // v1.46.60 GROUP-135 fix A hotfix: サムネ生バイナリ個別書込の Native 中継。
+    // v1.46.59 で settings.js 呼出 + native handler は追加したが、この background.js 中継 case を
+    // 追加し忘れ、WRITE_FILE_BINARY が switch を素通り（undefined 戻り）→ export が必ず失敗した回帰の修正。
+    case "WRITE_FILE_BINARY": {
+      const { path, contentB64 } = message;
+      if (!path) return { ok: false, error: "WRITE_FILE_BINARY: path は必須" };
+      return sendNative({ cmd: "WRITE_FILE_BINARY", path, contentB64: contentB64 || "" });
+    }
     case "GET_STORAGE_SIZE":
       return getStorageSize();
     // ---- エクスプローラーで開く ----
@@ -767,7 +775,7 @@ function sendNative(payload) {
     // Size check：大容量 string フィールド（content / dataUrl）の length で概算。
     // WRITE_FILE / SAVE_IMAGE_BASE64 / READ_LOCAL_IMAGE_BASE64 は exempt（想定内の大容量）。
     // それ以外のコマンドで想定外の巨大ペイロードが来た場合は早期リジェクト。
-    const exemptCmds = ["WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
+    const exemptCmds = ["WRITE_FILE", "WRITE_FILE_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
     if (!exemptCmds.includes(cmdName)) {
       let estimatedSize = 0;
       if (typeof payload.content === "string") estimatedSize += payload.content.length;
@@ -815,7 +823,7 @@ function sendNative(payload) {
     // - READ_FILE_BASE64: 大容量ローカル画像読込（サムネイル再生成で使用）
     // 既知懸念（04_影響範囲マップ G1「大ファイル書き込みは超過リスク」）の解消。
     const LONG_TIMEOUT_CMDS = [
-      "WRITE_FILE", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
+      "WRITE_FILE", "WRITE_FILE_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
       "SCAN_EXTERNAL_IMAGES", "GENERATE_THUMBS_BATCH", "LIST_SUBFOLDERS",
       "SAVE_IMAGE", "FETCH_PREVIEW", "READ_FILE_BASE64",
       // v1.22.9: 大容量 GIF 分割読み込み関連

@@ -1171,6 +1171,21 @@ async function exportData() {
     // 1 枚ずつ取得→書込で巨大 JSON 連結（旧 thumbs-NNN.json）を廃し、実行中 peak を 1 枚分に抑える
     // （thumbs-001 の allocation size overflow＝500 件 base64 を 1 文字列に連結→Main への巨大 IPC の構造対策）。
     if (exportThumbsEnabled) {
+      // GROUP-135 fix B（v1.46.61）：per-thumb の WRITE_FILE_BINARY（呼出毎に connectNative＝Python spawn）を
+      // byte-aware batch（≤約24MB・≤50 件）にまとめ WRITE_FILES_BINARY で 1 往復に。Native spawn を約 50 分の 1 に。
+      // GET は per-thumb のまま（500 件一括 base64 連結＝旧 thumbs-NNN.json overflow を再発させない）。
+      const THUMB_FLUSH_BYTES = 24 * 1024 * 1024;
+      const THUMB_FLUSH_COUNT = 50;
+      let pend = [];
+      let pendBytes = 0;
+      const flushThumbs = async () => {
+        if (pend.length === 0) return true;
+        const fr = await browser.runtime.sendMessage({ type: "WRITE_FILES_BINARY", files: pend });
+        pend = [];          // 送信後に解放（GROUP-26 巨大 payload 残留対策）
+        pendBytes = 0;
+        if (!fr?.ok) { logError(`thumbs 一括書込失敗: ${fr?.error || ""}`); return false; }
+        return true;
+      };
       for (const e of batch) {
         if (!e.thumbId) continue;
         const r = await browser.runtime.sendMessage({ type: "GET_IDB_THUMBS_BY_IDS", ids: [e.thumbId] });
@@ -1182,16 +1197,17 @@ async function exportData() {
         const mime = (semi > 5 ? t.dataUrl.slice(5, semi) : "") || "image/jpeg";
         const ext = mime === "image/gif" ? "gif" : mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
         const relPath = `thumbs/${e.thumbId}.${ext}`;
-        const wr = await browser.runtime.sendMessage({
-          type: "WRITE_FILE_BINARY",
-          path: `${tempDir}\\thumbs\\${e.thumbId}.${ext}`,
-          contentB64: ci >= 0 ? t.dataUrl.slice(ci + 1) : "",
-        });
-        if (!wr?.ok) { logError(`thumb 書込失敗（${relPath}）: ${wr?.error || ""}`); return; }
+        const b64 = ci >= 0 ? t.dataUrl.slice(ci + 1) : "";
+        pend.push({ path: `${tempDir}\\thumbs\\${e.thumbId}.${ext}`, contentB64: b64 });
+        pendBytes += b64.length;
         files.push({ category: "thumbbin", path: relPath, id: e.thumbId, mime });
         thumbsTotalWritten++;
+        if (pend.length >= THUMB_FLUSH_COUNT || pendBytes >= THUMB_FLUSH_BYTES) {
+          if (!(await flushThumbs())) return;
+        }
       }
-      log(`✏️ thumbs 書込（chunk ${n}：累計 ${thumbsTotalWritten} 枚・生バイナリ個別ファイル）`);
+      if (!(await flushThumbs())) return;
+      log(`✏️ thumbs 書込（chunk ${n}：累計 ${thumbsTotalWritten} 枚・batch 一括書込）`);
     }
   }
   exportHistory = null;
@@ -1261,6 +1277,16 @@ async function exportData() {
 
   // ---- AutoSave OFF: zip を chunk で読み込み → Blob DL → 一時 zip 削除 ----
   log("💾 ダウンロード準備中...");
+  // GROUP-135 fix B（v1.46.61）：データ消失修正で zip がサムネ込みの実サイズになる。AutoSave OFF の
+  // 読戻し（READ_FILE_CHUNKS_B64→Blob 組立）は zip 全体を base64 で 1 応答に載せ、大容量で overflow する。
+  // 大サイズ時は読戻しを避け、設定の「保存先フォルダ」指定（AutoSave ON＝任意フォルダ直接保存）を促す。
+  const OFF_DOWNLOAD_MAX = 200 * 1024 * 1024;
+  if (zipRes.zipSize > OFF_DOWNLOAD_MAX) {
+    logError(`zip が大きく（${zipSizeMB} MB）ブラウザダウンロードの上限を超えます。設定の「保存先フォルダ」を指定して再実行すると任意フォルダへ直接保存できます。一時ファイル: ${actualZipPath}`);
+    showCenterToast(`⚠️ サイズ超過のため保存先フォルダ指定での再実行を推奨\n（${zipSizeMB} MB）`);
+    browser.runtime.sendMessage({ type: "DELETE_CHUNK_FILE", path: actualZipPath }).catch(() => {});
+    return;
+  }
   const chunkReadRes = await browser.runtime.sendMessage({
     type: "READ_FILE_CHUNKS_B64",
     path: actualZipPath,

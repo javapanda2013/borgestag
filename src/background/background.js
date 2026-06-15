@@ -677,6 +677,12 @@ async function handleAsyncMessage(message, sender) {
       if (!path) return { ok: false, error: "WRITE_FILE_BINARY: path は必須" };
       return sendNative({ cmd: "WRITE_FILE_BINARY", path, contentB64: contentB64 || "" });
     }
+    // v1.46.61 GROUP-135 fix B: サムネ一括バイナリ書出の中継（per-thumb connectNative の batch 化）。
+    case "WRITE_FILES_BINARY": {
+      const files = message.files;
+      if (!Array.isArray(files)) return { ok: false, error: "WRITE_FILES_BINARY: files 配列が必須" };
+      return sendNative({ cmd: "WRITE_FILES_BINARY", files });
+    }
     case "GET_STORAGE_SIZE":
       return getStorageSize();
     // ---- エクスプローラーで開く ----
@@ -775,7 +781,7 @@ function sendNative(payload) {
     // Size check：大容量 string フィールド（content / dataUrl）の length で概算。
     // WRITE_FILE / SAVE_IMAGE_BASE64 / READ_LOCAL_IMAGE_BASE64 は exempt（想定内の大容量）。
     // それ以外のコマンドで想定外の巨大ペイロードが来た場合は早期リジェクト。
-    const exemptCmds = ["WRITE_FILE", "WRITE_FILE_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
+    const exemptCmds = ["WRITE_FILE", "WRITE_FILE_BINARY", "WRITE_FILES_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
     if (!exemptCmds.includes(cmdName)) {
       let estimatedSize = 0;
       if (typeof payload.content === "string") estimatedSize += payload.content.length;
@@ -823,7 +829,7 @@ function sendNative(payload) {
     // - READ_FILE_BASE64: 大容量ローカル画像読込（サムネイル再生成で使用）
     // 既知懸念（04_影響範囲マップ G1「大ファイル書き込みは超過リスク」）の解消。
     const LONG_TIMEOUT_CMDS = [
-      "WRITE_FILE", "WRITE_FILE_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
+      "WRITE_FILE", "WRITE_FILE_BINARY", "WRITE_FILES_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
       "SCAN_EXTERNAL_IMAGES", "GENERATE_THUMBS_BATCH", "LIST_SUBFOLDERS",
       "SAVE_IMAGE", "FETCH_PREVIEW", "READ_FILE_BASE64",
       // v1.22.9: 大容量 GIF 分割読み込み関連

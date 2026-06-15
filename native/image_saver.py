@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.6
+version: 1.11.7
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -514,6 +514,30 @@ def handle_write_file_binary(path, content_b64):
         except Exception:
             pass
         return {"ok": False, "error": str(e)}
+
+
+def handle_write_files_binary(files):
+    """
+    複数バイナリファイルを 1 回の Native 呼出で一括書出（v1.46.61 GROUP-135 fix B）。
+    files = [{path, contentB64}, ...]。各ファイルを handle_write_file_binary（atomic .tmp→os.replace）で書く。
+    export のサムネ書込を per-thumb の connectNative（呼出毎に Python プロセス spawn）から batch 化し、
+    Native プロセス起動回数を約 50 分の 1 に削減（per-thumb の遅さ対策）。one-shot 1 往復モデルは不変。
+    途中 1 件でも失敗したら written を添えて即 {ok:False}（呼出側で export 中断）。
+    """
+    if not isinstance(files, list):
+        return {"ok": False, "error": "files が配列ではありません"}
+    written = 0
+    for f in files:
+        if not isinstance(f, dict):
+            return {"ok": False, "error": "files 要素が object ではありません", "written": written}
+        path = f.get("path")
+        if not isinstance(path, str) or not path:
+            return {"ok": False, "error": "files 要素の path が不正です", "written": written}
+        r = handle_write_file_binary(path, f.get("contentB64"))
+        if not r.get("ok"):
+            return {"ok": False, "error": f"{f.get('path')}: {r.get('error')}", "written": written}
+        written += 1
+    return {"ok": True, "written": written}
 
 
 def handle_fetch_preview(url):
@@ -1447,8 +1471,9 @@ def handle_zip_directory(src_dir, dst_zip_path, delete_src=True):
     """
     v1.11.0: GROUP-26-split 対応。src_dir 内の全ファイルを zip 化して dst_zip_path に書き出す。
     v1.11.1: delete_src=True 時の rmtree を retry 付きに変更、失敗時は cleanupWarning で通知。
-    - zipfile.ZIP_DEFLATED 圧縮（サムネ dataUrl 等テキスト系は大幅圧縮可能）
-    - 再帰なし（エクスポート一時 dir は平坦構造前提）、サブディレクトリは無視
+    - 既定 zipfile.ZIP_DEFLATED 圧縮（manifest/history/settings の .json は大幅圧縮可能）
+    - v1.46.61 GROUP-135 fix B：os.walk で再帰化し thumbs/<id>.<ext> サブフォルダを収録。
+      arcname は src_dir 相対で zip 規約の "/" 区切りに正規化。既圧縮メディア（thumbs/ 配下）は STORE で CPU 浪費回避
     - delete_src=True なら zip 化成功後に retry 付き rmtree で一時 dir 削除
     - 削除失敗時は応答に cleanupWarning / tempDirPath を含めて呼出元に通知（非致命）
     - dst_zip_path が既存なら unique_path で連番付与（誤上書き防止）
@@ -1474,13 +1499,17 @@ def handle_zip_directory(src_dir, dst_zip_path, delete_src=True):
             dst_zip_path = unique_path(dst_zip_path)
 
         file_count = 0
+        # v1.46.61 GROUP-135 fix B：os.walk で全階層を辿りサブフォルダ（thumbs/）も収録。
+        # arcname は src_dir 相対 ＋ zip 規約の "/" 区切りに正規化。既圧縮メディア（thumbs/ 配下）は
+        # STORE（無圧縮）、テキスト系（manifest/history/settings .json）は DEFLATED。
         with zipfile.ZipFile(dst_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name in os.listdir(src_dir):
-                src_file = os.path.join(src_dir, name)
-                if not os.path.isfile(src_file):
-                    continue
-                zf.write(src_file, arcname=name)
-                file_count += 1
+            for root, _dirs, names in os.walk(src_dir):
+                for name in names:
+                    src_file = os.path.join(root, name)
+                    arc = os.path.relpath(src_file, src_dir).replace(os.sep, "/")
+                    ctype = zipfile.ZIP_STORED if arc.startswith("thumbs/") else zipfile.ZIP_DEFLATED
+                    zf.write(src_file, arcname=arc, compress_type=ctype)
+                    file_count += 1
 
         zip_size = os.path.getsize(dst_zip_path)
 
@@ -1658,6 +1687,10 @@ def _dispatch_command(message):
             message.get("dstZipPath", ""),
             bool(message.get("deleteSrc", True)),
         )
+
+    # v1.46.61 GROUP-135 fix B: サムネ一括バイナリ書出（per-thumb connectNative の batch 化）
+    elif cmd == "WRITE_FILES_BINARY":
+        return handle_write_files_binary(message.get("files", []))
 
     else:
         return {"ok": False, "error": f"不明なコマンド: {cmd}"}

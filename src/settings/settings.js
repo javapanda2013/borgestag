@@ -465,7 +465,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ---- タブ切り替え ----
   document.querySelectorAll(".tab-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
       document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       btn.classList.add("active");
@@ -478,6 +478,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       // 保存履歴タブに切り替えたら描画
       if (btn.dataset.tab === "history") renderHistoryTab();
       if (btn.dataset.tab === "authors") renderAuthorsTab();
+      // GROUP-143 α #1：タグ・保存先タブに切り替えたら最新読み直し（モーダル等の他コンテキスト追加分を反映）
+      if (btn.dataset.tab === "tags") {
+        try { await loadData(); renderAll(); } catch {}
+      }
     });
   });
   // v1.25.0 GROUP-12-width: 初期表示時に現在アクティブタブが external-import なら wide-tab を適用
@@ -577,10 +581,23 @@ async function loadData() {
   authorDestinations = authorDestsRes.authorDestinations     || {};
 }
 
-async function saveData() {
+// GROUP-143 α #2：編集直前の最新読み直し＋ merge で stale-cache 上書きによるデータ消失を予防。
+// 報告された方向（モーダル追加分が設定画面側の操作で消える）のみ解消。
+// 逆方向（モーダル削除分が設定画面側の操作で復活）は本 merge ロジック上残存（GROUP-145 で別途追跡）。
+// 改名・削除など意図的に key を消す呼出元は deletedKeys に旧 key を渡す。
+// 注意：merge は key 単位で、同一タグ内の dests array は cache で完全上書き。
+//       同一タグへの他コンテキスト追加 dest は α 範囲外で保護されない（GROUP-145 と同型）。
+async function saveData({ deletedKeys = [] } = {}) {
+  const res = await browser.runtime.sendMessage({ type: "GET_TAG_DESTINATIONS" });
+  const remote = res?.tagDestinations || {};
+  // remote をベースに cache の編集内容を上書き：cache に無い key（他コンテキストの追加分）は remote から保持。
+  const merged = { ...remote, ...tagDestinations };
+  for (const k of deletedKeys) delete merged[k];
+  // ローカル cache も merge 結果で同期して、次の操作で stale にならないようにする。
+  tagDestinations = merged;
   await browser.runtime.sendMessage({
     type: "SET_TAG_DESTINATIONS",
-    data: tagDestinations,
+    data: merged,
   });
   showStatus("保存しました ✔");
 }
@@ -631,8 +648,10 @@ function renderAll() {
   const addTagBtn = document.createElement("button");
   addTagBtn.className = "tag-add-btn";
   addTagBtn.textContent = "＋ 新しいタグを追加";
-  addTagBtn.addEventListener("click", () => {
+  addTagBtn.addEventListener("click", async () => {
     if (list.querySelector(".tag-add-form")) return; // 既に表示中
+    // GROUP-143 α #1：form 表示直前に最新読み直し（モーダル追加分を反映してから入力させる）
+    try { await loadData(); } catch {}
     const form = document.createElement("div");
     form.className = "tag-add-form";
     form.innerHTML = `
@@ -756,7 +775,8 @@ function buildTagRow(tag) {
 
     openTags.delete(tag);
     openTags.add(trimmed);
-    saveData();
+    // GROUP-143 α：改名は旧 key を deletedKeys で渡す（merge 後の merged から旧 key を除外）。
+    saveData({ deletedKeys: [tag] });
     renderAll();
     showStatus(`タグ名を「${tag}」→「${trimmed}」に変更しました ✔`);
   });
@@ -772,7 +792,8 @@ function buildTagRow(tag) {
       const updated = (stored.globalTags || []).filter(t => t !== tag);
       await browser.storage.local.set({ globalTags: updated });
     } catch {}
-    saveData();
+    // GROUP-143 α：削除は対象 key を deletedKeys で渡す（merge 後の merged から削除対象 key を除外）。
+    saveData({ deletedKeys: [tag] });
     renderAll();
   });
 
@@ -797,9 +818,11 @@ function buildTagRow(tag) {
   const addBtn = document.createElement("button");
   addBtn.className = "dest-add-btn";
   addBtn.textContent = "＋ 保存先を追加";
-  addBtn.addEventListener("click", (e) => {
+  addBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (destList.querySelector(".dest-add-form")) return; // 既に表示中
+    // GROUP-143 α #1：form 表示直前に最新読み直し（モーダル追加分を反映してから入力させる）
+    try { await loadData(); } catch {}
     const form = document.createElement("div");
     form.className = "dest-add-form";
     form.innerHTML = `

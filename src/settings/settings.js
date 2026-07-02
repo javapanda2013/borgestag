@@ -610,7 +610,14 @@ function renderAll() {
   list["innerHTML"] = "";
 
   // tagDestinations のキーと globalTags をマージ（サブタグ含む全タグを表示）
-  let tags = [...new Set([...Object.keys(tagDestinations), ...globalTags])];
+  // GROUP-146: globalTags（登録順を保持する配列）を並びの正とし、globalTags に無い
+  // tagDestinations キーのみのタグ（レガシー／未保存タグ）は先頭＝最古扱いに置く。
+  // これにより「登録が新しい順」（reverse）で最新登録タグが最上位に来る。
+  const globalTagsSet = new Set(globalTags);
+  let tags = [...new Set([
+    ...Object.keys(tagDestinations).filter(t => !globalTagsSet.has(t)),
+    ...globalTags,
+  ])];
 
   if (tags.length === 0) {
     list["innerHTML"] = `
@@ -686,6 +693,9 @@ function renderAll() {
           browser.storage.local.set({ globalTags: gt });
         }
       });
+      // GROUP-146: renderAll が globalTags を並びの正とするため in-memory も即時同期
+      // （storage 書込は上の非同期 .then のままで可。同期しないと直後の renderAll で新タグが最古扱いに沈む）
+      if (!globalTags.includes(tagName)) globalTags.push(tagName);
       openTags.add(tagName);
       saveData();
       renderAll();
@@ -758,6 +768,7 @@ function buildTagRow(tag) {
       if (idx !== -1) tags[idx] = trimmed;
       else if (!tags.includes(trimmed)) tags.push(trimmed);
       await browser.storage.local.set({ globalTags: tags });
+      globalTags = tags; // GROUP-146: in-memory 同期（旧名の phantom 行と新名の最古扱い沈みを防ぐ）
     } catch {}
 
     // saveHistoryのtags内のタグ名を変更
@@ -791,6 +802,7 @@ function buildTagRow(tag) {
       const stored = await browser.storage.local.get("globalTags");
       const updated = (stored.globalTags || []).filter(t => t !== tag);
       await browser.storage.local.set({ globalTags: updated });
+      globalTags = updated; // GROUP-146: in-memory 同期（削除タグの phantom 行を防ぐ）
     } catch {}
     // GROUP-143 α：削除は対象 key を deletedKeys で渡す（merge 後の merged から削除対象 key を除外）。
     saveData({ deletedKeys: [tag] });

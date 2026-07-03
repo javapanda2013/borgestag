@@ -774,14 +774,24 @@ function buildTagRow(tag) {
     // saveHistoryのtags内のタグ名を変更
     try {
       // v1.46.40 GROUP-118：全件 read/clear+put をやめ、タグを含む entry のみ更新して差分 put。
+      // GROUP-147(O-1)：走査元を表示キャッシュ _historyData から fresh 全読みへ変更。
+      // 履歴タブ未表示だと _historyData が空で追従が silent no-op になる穴の解消（権利者改名 M-1 と同穴）。
+      const all = await _readSaveHistory();
       const changedEntries = [];
-      for (const entry of (_historyData || [])) {
+      for (const entry of (all || [])) {
         if (entry && Array.isArray(entry.tags) && entry.tags.includes(tag)) {
           entry.tags = entry.tags.map(t => t === tag ? trimmed : t);
           changedEntries.push(entry);
         }
       }
-      if (changedEntries.length > 0) await _patchSaveHistory({ put: changedEntries });
+      if (changedEntries.length > 0) {
+        await _patchSaveHistory({ put: changedEntries });
+        // 履歴タブ表示済みなら表示キャッシュにも同 id の entry を差し替えて反映
+        if (Array.isArray(_historyData) && _historyData.length > 0) {
+          const byId = new Map(changedEntries.map(en => [en.id, en]));
+          _historyData = _historyData.map(en => (en && byId.has(en.id)) ? byId.get(en.id) : en);
+        }
+      }
     } catch {}
 
     openTags.delete(tag);
@@ -7045,7 +7055,8 @@ function _buildAuthorRow(author) {
     renameInput.style.display = "";
     renameConfirm.style.display = "";
     renameCancel.style.display = "";
-    renameInput.value = author;
+    // GROUP-147 P1(M-2)：再改名時に closure 旧名でなく最新名を初期値にする
+    renameInput.value = row.dataset.author || author;
     renameInput.focus();
     renameInput.select();
   }
@@ -7064,21 +7075,59 @@ function _buildAuthorRow(author) {
   });
   renameConfirm.addEventListener("click", async (e) => {
     e.stopPropagation();
+    // GROUP-147 P1(M-2)：同一行の再改名（A→B→C）で closure 旧名 author を参照すると
+    // B が残置・追従不能になるため、常に最新名 curName（row.dataset.author）基準で処理する
+    const curName = row.dataset.author || author;
     const newName = renameInput.value.trim();
-    if (!newName || newName === author) { cancelRename(); return; }
+    if (!newName || newName === curName) { cancelRename(); return; }
     if (globalAuthors.includes(newName)) { alert(`「${newName}」は既に存在します`); return; }
-    // globalAuthors の更新
-    const idx = globalAuthors.indexOf(author);
-    if (idx !== -1) globalAuthors[idx] = newName;
-    // authorDestinations のキー変更
-    if (authorDestinations[author]) {
-      authorDestinations[newName] = authorDestinations[author];
-      delete authorDestinations[author];
+    // GROUP-147 P1：globalAuthors は保存経路の producer が自動追記するため、stale cache の
+    // 全置換を避け、書込直前に fresh 読取＋改名適用（v1.46.62 saveData の fresh merge と同型）。
+    let freshAuthors;
+    try {
+      const stored = await browser.storage.local.get("globalAuthors");
+      freshAuthors = stored.globalAuthors || [];
+    } catch (_) { freshAuthors = [...globalAuthors]; } // 読取失敗時は従来挙動（cache 基準）へ縮退
+    const fIdx = freshAuthors.indexOf(curName);
+    if (freshAuthors.includes(newName)) {
+      // 改名先が fresh 側に既存（並行追加等）：旧名の除去のみで重複追加を避ける
+      if (fIdx !== -1) freshAuthors.splice(fIdx, 1);
+    } else if (fIdx !== -1) {
+      freshAuthors[fIdx] = newName;
+    } else {
+      freshAuthors.push(newName);
+    }
+    globalAuthors = freshAuthors; // in-memory 同期
+    // authorDestinations のキー変更（producer 不在で display-only 分類＝従来どおり cache 基準）
+    if (authorDestinations[curName]) {
+      authorDestinations[newName] = authorDestinations[curName];
+      delete authorDestinations[curName];
     }
     await Promise.all([
-      browser.storage.local.set({ globalAuthors }),
+      browser.storage.local.set({ globalAuthors: freshAuthors }),
       browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations }),
     ]);
+    // GROUP-147 P1(M-1)：saveHistory の authors 内の権利者名も追従。
+    // 表示キャッシュ _historyData は履歴タブ未表示だと空のため走査元にせず、
+    // fresh 全読み（改名は稀な操作なので許容）で旧名を含む entry を確実に拾う。
+    try {
+      const all = await _readSaveHistory();
+      const changedEntries = [];
+      for (const entry of (all || [])) {
+        if (entry && Array.isArray(entry.authors) && entry.authors.includes(curName)) {
+          entry.authors = entry.authors.map(a => a === curName ? newName : a);
+          changedEntries.push(entry);
+        }
+      }
+      if (changedEntries.length > 0) {
+        await _patchSaveHistory({ put: changedEntries });
+        // 履歴タブ表示済みなら表示キャッシュにも同 id の entry を差し替えて反映
+        if (Array.isArray(_historyData) && _historyData.length > 0) {
+          const byId = new Map(changedEntries.map(en => [en.id, en]));
+          _historyData = _historyData.map(en => (en && byId.has(en.id)) ? byId.get(en.id) : en);
+        }
+      }
+    } catch {}
     nameEl.textContent = newName;
     // author 変数を更新（クロージャの参照を更新するため row.dataset を使用）
     row.dataset.author = newName;
@@ -7165,7 +7214,9 @@ function _buildAuthorRow(author) {
       const newDest = { id: opt.value, path: opt.dataset.path, label: opt.dataset.label };
       if (!authorDestinations[n]) authorDestinations[n] = [];
       if (!authorDestinations[n].some(d => d.id === newDest.id)) {
-        authorDestinations[author].push(newDest);
+        // GROUP-147 P1：改名後は closure の旧名 author が authorDestinations に存在せず
+        // TypeError になるため、最新名 n（row.dataset.author）へ push する
+        authorDestinations[n].push(newDest);
         await browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations });
         renderDestList();
         const n2 = row.dataset.author || author;
@@ -7185,11 +7236,19 @@ function _buildAuthorRow(author) {
     e.stopPropagation();
     const currentName = row.dataset.author || author;
     if (!confirm(`「${currentName}」を権利者一覧から削除しますか？`)) return;
-    globalAuthors = globalAuthors.filter(a => a !== currentName);
+    // GROUP-147 P1：fresh 読取＋filter（stale cache 全置換で、保存が自動追記した
+    // 新権利者まで消えるのを防止。v1.46.62 saveData の fresh merge と同型）
+    let freshAuthors;
+    try {
+      const stored = await browser.storage.local.get("globalAuthors");
+      freshAuthors = stored.globalAuthors || [];
+    } catch (_) { freshAuthors = [...globalAuthors]; } // 読取失敗時は従来挙動へ縮退
+    freshAuthors = freshAuthors.filter(a => a !== currentName);
+    globalAuthors = freshAuthors; // in-memory 同期
     delete authorDestinations[currentName];
     await Promise.all([
       browser.runtime.sendMessage({ type: "SET_AUTHOR_DESTINATIONS", data: authorDestinations }),
-      browser.storage.local.set({ globalAuthors }),
+      browser.storage.local.set({ globalAuthors: freshAuthors }),
     ]);
     row.remove();
     showStatus("権利者を削除しました");
@@ -10642,6 +10701,11 @@ function _extB1IsSameFolder(dirA, dirB) {
 // - 背後で：リネーム → サムネ生成 → 保存履歴書込 → ファイルコピー
 // - 成功時：cur.status = "done"、失敗時：cur.status = "save-failed" + 通知メッセージ
 // - 失敗 entry は絞り込み「未保存」表示時に再保存可能（保存ボタンは pending / save-failed 両方を受付）
+// GROUP-147 P2：1 枚ずつ保存の背後処理を直列化するチェーン。
+// 従来は fire-and-forget の自己並走で「履歴の全読み→書込」が交錯し、
+// 連続保存で直前 entry が消える lost update が成立していた。UI の即遷移は維持する。
+let _extB1SaveChain = Promise.resolve();
+
 async function _extB1SaveAndNext() {
   const session = _extActiveSession;
   if (!session) return;
@@ -10705,9 +10769,9 @@ async function _extB1SaveAndNext() {
   _extB1AdvanceCursorInFiltered(session);
   await _extB1LoadCurrent();
 
-  // 背後で保存処理（fire-and-forget、await しない）
+  // 背後で保存処理（await しない＝UI は即遷移。GROUP-147 P2：チェーンへ直列投入し自己並走を排除）
   // closure で cur 参照を保持（cursor 進行後も targetCur は元 entry を指し続ける）
-  (async () => {
+  _extB1SaveChain = _extB1SaveChain.then(async () => {
     const targetCur = cur;
     const _failWith = async (msg) => {
       targetCur.status = "save-failed";
@@ -10772,10 +10836,8 @@ async function _extB1SaveAndNext() {
     };
 
     try {
-      const _hist = await _readSaveHistory();
-      const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"])) };
-      const merged = [...(stored.saveHistory || []), entry]
-        .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+      // GROUP-147 P2：saveHistory の全読み→全置換をやめ差分 put 化（下記）。全読みも不要になった。
+      const stored = await browser.storage.local.get(["globalTags", "globalAuthors", "recentTags", "recentSubTags", "recentAuthors"]);
       const gTagSet    = new Set([...(stored.globalTags    || []), ...allTags]);
       const gAuthorSet = new Set([...(stored.globalAuthors || []), ...allAuthors]);
 
@@ -10797,14 +10859,17 @@ async function _extB1SaveAndNext() {
         }
       }
 
-      await _setStorageWithHistoryMirror({
-        saveHistory:   merged,
+      // GROUP-147 P2：saveHistory は entry 単位の差分 put（clear+putAll の全置換をやめる。
+      // 並行して走る保存があっても他 entry を巻き込んで消さない）
+      await _patchSaveHistory({ put: [entry] });
+      await browser.storage.local.set({
         globalTags:    [...gTagSet],
         globalAuthors: [...gAuthorSet],
         recentTags, recentSubTags, recentAuthors,
         tagDestinations,
       });
-      _historyData  = merged;
+      _historyData  = [...(_historyData || []), entry]
+        .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
       globalTags    = [...gTagSet];
       globalAuthors = [...gAuthorSet];
     } catch (e) {
@@ -10838,7 +10903,11 @@ async function _extB1SaveAndNext() {
         showStatus(`⚠️ 「${targetCur.fileName}」保存は成功、コピー送信エラー: ${e.message || ""}`, true);
       }
     }
-  })();
+  }).catch((e) => {
+    // GROUP-147 P2：想定外例外でチェーンが切れて以後の保存が滞留しないための保険
+    // （本体のエラーは _failWith で処理済み、ここに来るのは想定外のみ）
+    console.error("[外部取込 1枚ずつ] 保存チェーン想定外例外", e);
+  });
 }
 
 // ---------- v1.23.0: GROUP-4 絞り込み / GROUP-1-a1 ナビ ヘルパー ----------

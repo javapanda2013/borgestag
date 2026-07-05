@@ -96,6 +96,9 @@ async function handleInit({ id, gifBuffer }) {
     dims: { width: canvasWidth, height: canvasHeight },
     totalDelayMs,
     loopCount,
+    // GROUP-142：音声追従駆動用。main 側が audio.currentTime からフレーム番号を逆算するための
+    // per-frame delay 表（ms）。数値配列のみで軽量（structured clone）。
+    delays,
   });
 }
 

@@ -5234,6 +5234,9 @@ async function _toggleHistAudio(entry, btn) {
     }
 
     await cached.audio.play();
+    // GROUP-142 案 B：GIF タイル（ready・delay 表あり）があれば音声追従駆動へ切替。
+    // 対象外（非 GIF・静止画 fallback 等）は何も起きず従来どおり独立再生。
+    _gifAudioFollowStart(entry, cached.audio);
     _histAudioPlayingId = entry.id;
     // v1.32.0：再生終了時（audio 側が loop=true だが何らかで pause 状態に）も UI を戻す
     cached.audio.onpause = () => {
@@ -5602,6 +5605,8 @@ const _gifSessions = new Map();
 // pool の dormant(canvas=null)/rebind/eviction には干渉せず、再生スケジュールのみを gate。
 function _gifResumeIfNeeded(sess) {
   if (!sess || !sess.paused || !sess.ready || !sess.canvas) return;
+  // GROUP-142：音声追従駆動中は自走の REQ_FRAME を発行しない（追従ループが描画を駆動、二重要求防止）
+  if (sess.driveMode === "audio") return;
   if ((typeof document !== "undefined" && document.hidden) || sess.visible === false) return;
   sess.paused = false;
   if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: sess.currentIndex || 0 });
@@ -5705,6 +5710,9 @@ function _onGifWorkerMessage(e) {
     sess.ready = true;
     sess.frameCount = msg.frameCount || 1;
     sess.dims = msg.dims;
+    // GROUP-142：音声追従駆動用の delay 表と総尺を保持（無ければ追従対象外＝従来自走のみ）
+    sess.delays = Array.isArray(msg.delays) ? msg.delays : null;
+    sess.totalDelayMs = msg.totalDelayMs || 0;
     // v1.41.3：dormant 中（canvas == null）に READY が来た場合、dims のみ記録して REQ_FRAME 送信は skip
     if (msg.dims && sess.canvas) {
       sess.canvas.width  = msg.dims.width;
@@ -5713,6 +5721,14 @@ function _onGifWorkerMessage(e) {
     sess.currentIndex = 0;
     if (sess.canvas && _gifWorker) {
       _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: 0 });
+    }
+    // GROUP-142(M2)：音声再生継続中に session が作り直された場合（LRU 破棄後の再 INIT 等）、
+    // READY 到達時点で追従を自動再接続する（従来は無音で自走に戻っていた）
+    if (sess.entryId && _histAudioPlayingIds.has(sess.entryId)) {
+      const c = _histAudioCache.get(sess.entryId);
+      if (c && c.audio && !c.audio.paused) {
+        _gifAudioFollowStart({ id: sess.entryId, thumbId: sess.thumbId }, c.audio);
+      }
     }
   } else if (msg.type === "FRAME") {
     // v1.41.3：dormant 中（canvas == null）は drawImage skip ＋ setTimeout 組まない（無駄な再 REQ 抑制）
@@ -5724,6 +5740,12 @@ function _onGifWorkerMessage(e) {
       }
     }
     if (msg.bitmap?.close) try { msg.bitmap.close(); } catch (_) {}
+    // GROUP-142：音声追従駆動中は自走の再スケジュールを組まない（フレーム要求は追従ループが
+    // audio.currentTime から逆算して発行する）。currentIndex も「次」でなく描画した現在値を保持。
+    if (sess.driveMode === "audio") {
+      sess.currentIndex = msg.index;
+      return;
+    }
     const nextIndex = (msg.index + 1) % (sess.frameCount || 1);
     sess.currentIndex = nextIndex;
     if (sess.canvas) {
@@ -5733,6 +5755,9 @@ function _onGifWorkerMessage(e) {
         sess.paused = true;
       } else {
         sess.paused = false;
+        // GROUP-142(M1)：音声停止直後の in-flight FRAME が self で着弾した際などに
+        // 既存タイマーへ上書きしてチェーンが多重化する race の防止（rebind 経路の同族も収束）
+        if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} }
         sess.timerId = setTimeout(() => {
           if (!_gifSessions.has(sess.id)) return;
           if (sess.canvas == null) return; // dormant 化されたら停止
@@ -5772,6 +5797,13 @@ async function _initGifTile(canvas, entry) {
     if (_gifWorker && cached.ready) {
       _gifWorker.postMessage({ type: "REQ_FRAME", id: cached.id, index: cached.currentIndex });
     }
+    // GROUP-142(M2)：音声再生継続中の dormant→rebind（ページ送り→戻る等）でも追従を自動再接続
+    if (cached.ready && _histAudioPlayingIds.has(entry.id)) {
+      const c = _histAudioCache.get(entry.id);
+      if (c && c.audio && !c.audio.paused) {
+        _gifAudioFollowStart(entry, c.audio);
+      }
+    }
     return cached.id;
   }
   // 新規 session
@@ -5786,6 +5818,9 @@ async function _initGifTile(canvas, entry) {
     // v1.46.42 GROUP-118：viewport/visibility gate。画面外・タブ非表示では次フレーム要求を止め
     // （paused=true）、再表示時に resume。pool の dormant(canvas=null)/rebind には非干渉。
     visible: true, paused: false,
+    // GROUP-142：駆動モード（self=従来の setTimeout 自走 ／ audio=音声追従）。
+    // delays/totalDelayMs は READY で充填。audioEntryId は駆動権を持つ entry（後勝ち規約）。
+    driveMode: "self", delays: null, totalDelayMs: 0, audioEntryId: null, followRafId: null,
   };
   _gifSessions.set(id, sess);
   _gifThumbCachePut(entry.thumbId, sess);
@@ -5819,12 +5854,73 @@ async function _initGifTile(canvas, entry) {
   return id;
 }
 
+// =============================================================================
+// GROUP-142 案 B：音声追従駆動（追従再生）
+// GIF の表示フレームを audio.currentTime から逆算して駆動する。時間源が音声そのもの
+// なので自走（setTimeout）と違いズレが蓄積せず、ループも剰余で非累積に追従する。
+// - 開始条件：GIF セッションが ready かつ delay 表（READY の delays）を保持していること。
+//   満たさない場合（非 GIF・静止画 fallback・総尺 0）は何もしない＝従来の自走のまま。
+// - 停止検知：追従ループが毎 tick で audio.paused / ended を見る（個別停止・一括停止・
+//   システム起因 pause のすべてを一元検知）。検知したら自走へ復帰。
+// - dormant（canvas=null）・画面外・タブ非表示：フレーム要求だけ skip して継続（音声は
+//   鳴り続ける既存仕様に合わせる）。再表示時は次 tick で正位置から自然復帰。
+// - 後勝ち規約：同じサムネを共有する別 entry の音声が駆動中でも、新しい再生が駆動権を取る。
+// =============================================================================
+function _gifAudioFollowStart(entry, audio) {
+  const sess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+  if (!sess || !sess.ready || !Array.isArray(sess.delays) || !(sess.totalDelayMs > 0)) return;
+  if (sess.followRafId) { try { cancelAnimationFrame(sess.followRafId); } catch (_) {} sess.followRafId = null; }
+  sess.audioEntryId = entry.id;
+  sess.driveMode = "audio";
+  if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} sess.timerId = null; }
+  const tick = () => {
+    // 駆動権・セッション生存の確認（destroy／別 entry の後勝ち／自走復帰済みなら終了）
+    if (_gifSessions.get(sess.id) !== sess) return;
+    if (sess.driveMode !== "audio" || sess.audioEntryId !== entry.id) return;
+    if (audio.paused || audio.ended) { _gifAudioFollowStop(sess); return; }
+    const drawable = sess.canvas && sess.visible !== false &&
+      !(typeof document !== "undefined" && document.hidden);
+    if (drawable) {
+      const tMs = (audio.currentTime * 1000) % sess.totalDelayMs;
+      let acc = 0, idx = sess.delays.length - 1;
+      for (let i = 0; i < sess.delays.length; i++) {
+        acc += (sess.delays[i] || 100);
+        if (tMs < acc) { idx = i; break; }
+      }
+      if (idx !== sess.currentIndex) {
+        sess.currentIndex = idx;
+        if (_gifWorker) {
+          try { _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: idx }); } catch (_) {}
+        }
+      }
+    }
+    sess.followRafId = requestAnimationFrame(tick);
+  };
+  sess.followRafId = requestAnimationFrame(tick);
+}
+
+function _gifAudioFollowStop(sess) {
+  if (!sess) return;
+  if (sess.followRafId) { try { cancelAnimationFrame(sess.followRafId); } catch (_) {} sess.followRafId = null; }
+  if (sess.driveMode !== "audio") return;
+  sess.driveMode = "self";
+  sess.audioEntryId = null;
+  // 自走復帰：paused 扱いにして既存 resume 経路（ready/canvas/visible/hidden の全チェック）へ委譲
+  sess.paused = true;
+  _gifResumeIfNeeded(sess);
+}
+
 function _destroyGifSession(id) {
   const sess = _gifSessions.get(id);
   if (!sess) return;
   if (sess.timerId) {
     try { clearTimeout(sess.timerId); } catch (_) {}
     sess.timerId = null;
+  }
+  // GROUP-142：追従ループが残っていれば解除（RAF leak 防止）
+  if (sess.followRafId) {
+    try { cancelAnimationFrame(sess.followRafId); } catch (_) {}
+    sess.followRafId = null;
   }
   if (sess.canvas) _unobserveGifCanvas(sess.canvas); // v1.46.42 GROUP-118：viewport 監視解除
   _gifSessions.delete(id);

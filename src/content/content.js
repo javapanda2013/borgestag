@@ -583,12 +583,67 @@ function _pixivIllustId() {
 
 let _ugoiraMeta = null; // {id, frames, frameMime, zipUrl} のキャッシュ（パネル表示と取得で共用）
 
+// GROUP-15-bug-ugoira-meta（v1.47.1）：ページコンテキスト fetch。
+// 真因＝コンテンツスクリプトの相対 fetch（/ajax/...）はページ基準で解決されず失敗し、
+// ZIP（別オリジン i.pximg.net）は Referer 必須。ページの window.fetch で取得すれば
+// Referer も自然に付き、manifest の権限変更も不要。
+// 方式＝script 要素を注入してページ側で fetch し、結果を window.postMessage で受領
+// （ArrayBuffer は transfer で移譲）。ページ CSP 等で注入が動かない場合は
+// コンテンツスクリプトの絶対 URL fetch に退避（メタは通る見込み・ZIP は Referer 不足の
+// 403 リスクが残る。最終的に失敗した場合：パネルの尺表示は「これから N 秒」録画の案内へ、
+// 全取得は 🚫 表示で ✂ 切り抜き（手動録画）への誘導となる＝呼出元の既存 catch どおり）。
+// timeout はメタ（軽量・パネル表示の即時性が必要）と ZIP（大容量）で使い分ける。
+function _pageFetch(url, kind /* "json" | "buffer" */, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const reqId = "borgestag-pgf-" + Math.random().toString(36).slice(2);
+    const timer = setTimeout(() => { cleanup(); reject(new Error("page fetch timeout")); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); window.removeEventListener("message", onMsg); }
+    function onMsg(ev) {
+      if (ev.source !== window || !ev.data || ev.data.__borgestagPgf !== reqId) return;
+      cleanup();
+      if (ev.data.ok) resolve(kind === "json" ? ev.data.json : ev.data.buffer);
+      else reject(new Error(ev.data.error || "page fetch failed"));
+    }
+    window.addEventListener("message", onMsg);
+    const script = document.createElement("script");
+    script.textContent = `(async () => {
+      const _rid = ${JSON.stringify(reqId)};
+      try {
+        const r = await fetch(${JSON.stringify(url)}, { credentials: "same-origin" });
+        if (!r.ok) throw new Error("http " + r.status);
+        if (${JSON.stringify(kind)} === "json") {
+          const j = await r.json();
+          window.postMessage({ __borgestagPgf: _rid, ok: true, json: j }, "*");
+        } else {
+          const b = await r.arrayBuffer();
+          window.postMessage({ __borgestagPgf: _rid, ok: true, buffer: b }, "*", [b]);
+        }
+      } catch (e) {
+        window.postMessage({ __borgestagPgf: _rid, ok: false, error: String(e && e.message || e) }, "*");
+      }
+    })();`;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+  });
+}
+
 async function _fetchUgoiraMeta() {
   const id = _pixivIllustId();
   if (!id) throw new Error("no illust id");
   if (_ugoiraMeta && _ugoiraMeta.id === id) return _ugoiraMeta;
-  const res = await fetch(`/ajax/illust/${id}/ugoira_meta`, { credentials: "same-origin" });
-  const meta = await res.json();
+  // 絶対 URL 化（相対 URL がページ基準で解決されない content script 特有問題の回避）
+  const metaUrl = new URL(`/ajax/illust/${id}/ugoira_meta`, location.origin).href;
+  let meta;
+  try {
+    // 本命：ページコンテキスト fetch。メタは軽量なので 8 秒で見切り
+    // （CSP 等で注入が無応答の環境でパネル表示を長時間待たせない）
+    meta = await _pageFetch(metaUrl, "json", 8000);
+  } catch (_) {
+    // 退避：コンテンツスクリプトの絶対 URL fetch（注入がページ CSP 等で動かない環境向け）
+    const res = await fetch(metaUrl, { credentials: "same-origin" });
+    if (!res.ok) throw new Error("meta http " + res.status);
+    meta = await res.json();
+  }
   if (!meta || meta.error || !meta.body || !Array.isArray(meta.body.frames)) {
     throw new Error("ugoira meta error");
   }
@@ -642,9 +697,16 @@ async function fetchUgoiraAndSend(btn, range) {
       });
       if (!frames.length) frames = meta.frames.slice(0, 1);
     }
-    const zipRes = await fetch(meta.zipUrl);
-    if (!zipRes.ok) throw new Error("zip http " + zipRes.status);
-    let zipBuf = await zipRes.arrayBuffer();
+    // GROUP-15-bug-ugoira-meta：ZIP は別オリジン i.pximg.net で Referer 必須のため
+    // ページコンテキスト fetch を本命に、失敗時のみ従来 fetch へ退避
+    let zipBuf;
+    try {
+      zipBuf = await _pageFetch(meta.zipUrl, "buffer");
+    } catch (_) {
+      const zipRes = await fetch(meta.zipUrl);
+      if (!zipRes.ok) throw new Error("zip http " + zipRes.status);
+      zipBuf = await zipRes.arrayBuffer();
+    }
     await browser.runtime.sendMessage({
       type: "OPEN_VIDEO_CONVERT_CAPTURED",
       buffer: zipBuf, mime: "application/x-ugoira-zip",

@@ -5605,6 +5605,8 @@ const _gifSessions = new Map();
 // pool の dormant(canvas=null)/rebind/eviction には干渉せず、再生スケジュールのみを gate。
 function _gifResumeIfNeeded(sess) {
   if (!sess || !sess.paused || !sess.ready || !sess.canvas) return;
+  // GROUP-15 ライトボックス連動：一時停止中は再開しない（クローズ時に解除）
+  if (sess.lbSuspended) return;
   // GROUP-142：音声追従駆動中は自走の REQ_FRAME を発行しない（追従ループが描画を駆動、二重要求防止）
   if (sess.driveMode === "audio") return;
   if ((typeof document !== "undefined" && document.hidden) || sess.visible === false) return;
@@ -5751,7 +5753,8 @@ function _onGifWorkerMessage(e) {
     if (sess.canvas) {
       // v1.46.42 GROUP-118：画面外（IntersectionObserver で visible=false）/ タブ非表示は
       // 次フレームを要求せず一時停止（paused）。継続的な decode/drawImage/repaint churn を削減。
-      if (sess.visible === false || (typeof document !== "undefined" && document.hidden)) {
+      // GROUP-15 ライトボックス連動：一時停止中も同様（in-flight FRAME 着弾時の再開防止）。
+      if (sess.visible === false || sess.lbSuspended || (typeof document !== "undefined" && document.hidden)) {
         sess.paused = true;
       } else {
         sess.paused = false;
@@ -5878,7 +5881,7 @@ function _gifAudioFollowStart(entry, audio) {
     if (_gifSessions.get(sess.id) !== sess) return;
     if (sess.driveMode !== "audio" || sess.audioEntryId !== entry.id) return;
     if (audio.paused || audio.ended) { _gifAudioFollowStop(sess); return; }
-    const drawable = sess.canvas && sess.visible !== false &&
+    const drawable = sess.canvas && sess.visible !== false && !sess.lbSuspended &&
       !(typeof document !== "undefined" && document.hidden);
     if (drawable) {
       const tMs = (audio.currentTime * 1000) % sess.totalDelayMs;
@@ -5897,6 +5900,56 @@ function _gifAudioFollowStart(entry, audio) {
     sess.followRafId = requestAnimationFrame(tick);
   };
   sess.followRafId = requestAnimationFrame(tick);
+}
+
+// =============================================================================
+// GROUP-15 ライトボックス連動：表示中は「今見ている entry」の元タイルの
+// GIF アニメ＋音声を一時停止し、entry 切替・クローズで再開する
+// （プレビューと背景タイルの二重再生を避ける。lbSuspended は visible/paused と独立の gate）。
+// =============================================================================
+let _lbSuspendedTile = null; // { entryId, thumbId, audioWasPlaying }
+
+function _lbSuspendEntryTile(entry) {
+  _lbResumeEntryTile(); // 直前の entry 分を先に再開（グループ内・全体ナビの切替に対応）
+  if (!entry) return;
+  const st = { entryId: entry.id, thumbId: entry.thumbId || null, audioWasPlaying: false };
+  // 音声：再生中なら一時停止（再生位置は維持、閉じたら再開）。pause により GROUP-142 の
+  // 追従ループは次 tick で自走復帰するが、直後の GIF suspend で自走側も止める。
+  const cached = _histAudioCache.get(entry.id);
+  if (cached && cached.audio && !cached.audio.paused) {
+    st.audioWasPlaying = true;
+    try { cached.audio.pause(); } catch (_) {}
+  }
+  const sess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+  if (sess) {
+    sess.lbSuspended = true;
+    if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} sess.timerId = null; }
+    sess.paused = true;
+  }
+  _lbSuspendedTile = st;
+}
+
+function _lbResumeEntryTile() {
+  const st = _lbSuspendedTile;
+  if (!st) return;
+  _lbSuspendedTile = null;
+  const sess = st.thumbId ? _gifSessionsByThumbId.get(st.thumbId) : null;
+  if (sess) {
+    sess.lbSuspended = false;
+    sess.paused = true;
+    _gifResumeIfNeeded(sess); // 自走再開（ready/canvas/visible/hidden の条件は既存経路に委譲）
+  }
+  // レビュー指摘(B-3)：suspend 中にユーザーが Lightbox の音声ボタンで明示停止した場合は
+  // 再開しない（明示停止は _histAudioPlayingIds から外れるため、Set 残存＝一時停止のみ再開）
+  if (st.audioWasPlaying && _histAudioPlayingIds.has(st.entryId)) {
+    const cached = _histAudioCache.get(st.entryId);
+    if (cached && cached.audio && cached.audio.paused) {
+      cached.audio.play().then(() => {
+        // GROUP-142：音声再開に合わせて追従駆動も再開
+        _gifAudioFollowStart({ id: st.entryId, thumbId: st.thumbId }, cached.audio);
+      }).catch(() => {});
+    }
+  }
 }
 
 function _gifAudioFollowStop(sess) {
@@ -6929,6 +6982,9 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     function openGlobalEntry(gIdx) {
       const entry = _globalData[gIdx];
       if (!entry) return;
+      // GROUP-15 ライトボックス連動（レビュー指摘 B-2）：全体ナビ ▲▼ でも suspend を新 entry へ差し替え
+      // （前の entry 分はヘルパー内で先に再開される）
+      _lbSuspendEntryTile(entry);
       if (entry.thumbId) {
         browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
           .then(r => {
@@ -7010,6 +7066,9 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         audioBtn.style.display = "none";
         audioBtn.removeAttribute("data-audio-entry-id");
       }
+      // GROUP-15 ライトボックス連動：今見ている entry の元タイル（GIF アニメ＋音声）を一時停止
+      // （前の entry 分はヘルパー内で先に再開される。クローズ時は _lbResumeEntryTile）
+      _lbSuspendEntryTile(entry);
     }
 
     audioBtn.addEventListener("click", (e) => {
@@ -7030,12 +7089,15 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     const onResize = () => setFixedNavPositions();
     window.addEventListener("resize", onResize);
 
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); window.removeEventListener("resize", onResize); } });
-    overlay.querySelector(".lb-close").addEventListener("click", () => { overlay.remove(); window.removeEventListener("resize", onResize); });
+    // GROUP-15 ライトボックス連動：クローズ 3 経路（背景クリック／✕／Escape）で元タイルを再開。
+    // レビュー指摘(B-1)：背景クリック・✕ でも keydown リスナを解除（未解除だとクローズ後の
+    // 矢印キーで updateView→suspend が発火し、タイルが停止されたまま復帰不能になる）
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); } });
+    overlay.querySelector(".lb-close").addEventListener("click", () => { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); });
 
     const onKey = (e) => {
       if (["Escape","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)) e.preventDefault();
-      if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); }
+      if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); }
       else if (e.key === "ArrowLeft")  { rtl ? goPrev() : goNext(); }
       else if (e.key === "ArrowRight") { rtl ? goNext() : goPrev(); }
       else if (e.key === "ArrowUp")    { goGlobalPrev(); }

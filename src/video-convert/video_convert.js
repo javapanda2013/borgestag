@@ -43,6 +43,10 @@ const PHASE1_PARAMS = {
   // Phase 1.5 GROUP-28 mvdl：音声録音パラメータ
   AUDIO_MIME: "audio/webm; codecs=opus",
   AUDIO_EXT: "webm",
+  // GROUP-150 (v1.47.2)：うごイラ→GIF のメモリ暴走防止ガード。
+  // gifshot の images 経路は全コマの <img> を 1 tick で一斉に原寸デコードするため、
+  // コマ数上限（超過は等間隔間引き）＋入力の事前縮小（下記 initUgoira）で頭打ちにする。
+  UGOIRA_MAX_FRAMES: 300,
 };
 
 // ================================================================
@@ -290,6 +294,45 @@ async function _parseZip(buf) {
   return out;
 }
 
+/**
+ * GROUP-150：コマ数上限を超えるうごイラを等間隔で間引く。
+ * 総再生尺を保つため、採用コマの delay を間引き後コマ数で按分し直す
+ * （うごイラ変換は元々 delay 平均値で一律近似のため、総尺＝平均×コマ数を維持すれば再生尺は不変）。
+ */
+function _decimateUgoiraFrames(frames, maxN) {
+  if (frames.length <= maxN) return frames;
+  const totalDelay = frames.reduce((a, f) => a + (f.delay || 0), 0);
+  const step = frames.length / maxN;
+  const picked = [];
+  for (let i = 0; i < maxN; i++) picked.push(frames[Math.floor(i * step)]);
+  const evenDelay = Math.max(1, Math.round(totalDelay / picked.length));
+  return picked.map((f) => ({ ...f, delay: evenDelay }));
+}
+
+/**
+ * GROUP-150：1 コマ分の原寸バイト列を、出力サイズ（computeGifSize）まで縮小した
+ * JPEG blob URL に変換する。原寸画像はこの関数内で 1 枚だけ生成→即 revoke するため、
+ * 全コマを原寸で同時保持する gifshot の暴走（支配項 B）を上流で断つ。
+ * 縮小に失敗した場合は null を返し、呼び出し側が原寸へ退避する。
+ */
+async function _downscaleFrameToUrl(data, mime, targetW, targetH) {
+  const srcUrl = URL.createObjectURL(new Blob([data], { type: mime }));
+  try {
+    const img = new Image();
+    img.src = srcUrl;
+    await img.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+    return blob ? URL.createObjectURL(blob) : null;
+  } finally {
+    URL.revokeObjectURL(srcUrl);
+  }
+}
+
 /** うごイラ：frames（{file, delay} 列）と ZIP からフレーム blob URL 列を構築して変換フローを設定 */
 async function initUgoira(cap, pageUrl) {
   const frames = cap.frames || [];
@@ -307,13 +350,51 @@ async function initUgoira(cap, pageUrl) {
     return;
   }
   cap.buffer = null; // 巨大 payload null 代入（展開後、GROUP-82 規約）
+
+  // GROUP-150：コマ数上限（超過は等間隔間引き）＋各コマを出力サイズへ事前縮小してから blob 化。
+  // 先頭コマの原寸から出力サイズを確定し、以降のコマを同サイズへ逐次縮小する。原寸画像は
+  // _downscaleFrameToUrl 内で 1 枚ずつ生成→即 revoke するため、全コマ原寸同時保持を上流で断つ。
+  const workFrames = _decimateUgoiraFrames(frames, PHASE1_PARAMS.UGOIRA_MAX_FRAMES);
+  if (workFrames.length < frames.length) {
+    log(`コマ数が多いため ${frames.length} → ${workFrames.length} コマへ間引きます（再生尺は維持）。`);
+  }
   const frameUrls = [];
   const delays = [];
-  for (const f of frames) {
+  let targetSize = null;
+  let prepared = 0;
+  for (const f of workFrames) {
     const data = entries[f.file];
     if (!data) continue;
-    frameUrls.push(URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" })));
+    if (!targetSize) {
+      // 先頭コマだけ原寸をデコードして出力サイズ（computeGifSize）を確定
+      const probe = URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" }));
+      try {
+        const probeImg = new Image();
+        probeImg.src = probe;
+        await probeImg.decode();
+        targetSize = computeGifSize(probeImg.naturalWidth || 480, probeImg.naturalHeight || 360);
+      } catch (_) {
+        targetSize = computeGifSize(480, 360);
+      } finally {
+        URL.revokeObjectURL(probe);
+      }
+    }
+    let url = null;
+    try {
+      url = await _downscaleFrameToUrl(data, cap.frameMime || "image/jpeg", targetSize.w, targetSize.h);
+    } catch (_) {
+      url = null;
+    }
+    if (!url) {
+      // 縮小失敗時は原寸で退避（極稀）
+      url = URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" }));
+    }
+    frameUrls.push(url);
     delays.push(f.delay || 100);
+    prepared++;
+    if (prepared % 20 === 0 || prepared === workFrames.length) {
+      log(`コマを準備中… ${prepared}/${workFrames.length}`);
+    }
   }
   entries = null;
   if (!frameUrls.length) {
@@ -370,6 +451,30 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
   const h = previewImg.naturalHeight || 360;
   const size = computeGifSize(w, h);
   const startTime = Date.now();
+
+  // GROUP-150：変換完了/失敗時にフレーム blob を逐次解放（unload 依存の常駐を解消）
+  const cleanupFrames = () => {
+    try { frameUrls.forEach((u) => URL.revokeObjectURL(u)); } catch (_) {}
+  };
+
+  // GROUP-150：進捗停止検知ウォッチドッグ（動画パス runVideoConversion 相当をうごイラにも）。
+  // Worker 停止など「進捗が止まったまま」を検知し、強制終了以外の回復手段（再試行）を与える。
+  let lastProgressAt = Date.now();
+  let reached100 = false;
+  const encodeTimeoutMs = Math.max(60_000, frameUrls.length * 250);
+  const encodeTimeout = setInterval(() => {
+    if (reached100 && Date.now() - lastProgressAt > encodeTimeoutMs) {
+      clearInterval(encodeTimeout);
+      log(
+        `⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
+        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認してください。",
+        "error"
+      );
+      btn.disabled = false;
+      btn.textContent = "再試行";
+    }
+  }, 5_000);
+
   gifshot.createGIF({
     images: frameUrls,
     gifWidth: size.w,
@@ -378,10 +483,19 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
     numWorkers: PHASE1_PARAMS.NUM_WORKERS,
     progressCallback: (p) => {
       updateProgress(p);
-      log(`変換中… ${Math.round(p * 100)}%`);
+      lastProgressAt = Date.now();
+      if (p >= 1.0 && !reached100) {
+        reached100 = true;
+        log("キャプチャ完了、GIF エンコード中…");
+      } else {
+        log(`変換中… ${Math.round(p * 100)}%`);
+      }
     },
   }, async (obj) => {
+    clearInterval(encodeTimeout);
     if (obj.error) {
+      // 失敗時は frameUrls を解放しない（「再試行」が同じ frameUrls を再利用するため）。
+      // 最終的な解放は unload ハンドラに委ねる。
       log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
       btn.disabled = false;
       btn.textContent = "再試行";
@@ -401,8 +515,10 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
         suggestedFilename: `ugoira-${ts}.gif`,
         associatedAudio: null,
       });
+      cleanupFrames(); // 送信完了後に解放（成功終端のみ。previewImg は描画済みで frameUrls 再参照なし）
       await _routeAfterConvert(); // GROUP-33-T1：自動遷移 ON/OFF で分岐
     } catch (err) {
+      // 送信失敗時は frameUrls を解放しない（「再試行」で再利用するため）。解放は unload に委ねる。
       log(`保存モーダル起動失敗: ${err.message}`, "error");
       btn.disabled = false;
       btn.textContent = "再試行";

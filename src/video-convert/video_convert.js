@@ -290,26 +290,85 @@ async function _parseZip(buf) {
   return out;
 }
 
+/** GROUP-151：1 コマを decode する（中断シグナル対応） */
+async function _decodeImageForFrame(url, signal) {
+  if (signal && signal.aborted) throw new Error("cancelled");
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  if (signal && signal.aborted) throw new Error("cancelled");
+  return img;
+}
+
 /**
- * GROUP-150 v1.48.0：うごイラを原寸・全コマ・縮小なしでストリーミング GIF エンコードする。
- * gifshot の images 一括方式（全コマを 1 tick で一斉に原寸デコード＋yield 無し LZW）を廃し、
- * 使い捨て Module Worker（gif-encoder.worker.js）へ 1 コマずつ ImageData を transfer で渡し、
- * Worker 側で「量子化(NeuQuant)→GifWriter.addFrame→出力バッファ追記」を逐次実行する。
- * メイン側は 1 コマデコード→getImageData→送信→Worker の完了(PROGRESS)を待つ（backpressure）。
- * 保持は「現コマの ImageData＋累積出力バッファ」に有界化＝原寸・全コマでもフリーズしない。
+ * GROUP-151：うごイラ用のフレーム供給元。
+ * `init()` で先頭コマをデコードして原寸を確定し（previewImg 非依存＝未デコード時の縮退競合を排除）、
+ * その ImageData は `next(0)` で使い回す（先頭コマの二重デコードを避ける）。
  */
-function streamEncodeUgoiraGif(frameUrls, delays, onProgress) {
+function makeUgoiraFrameSource(frameUrls, delays) {
+  let canvas = null, ctx = null, size = null, firstRgba = null;
+  const drawToRgba = (img) => {
+    ctx.clearRect(0, 0, size.w, size.h);
+    ctx.drawImage(img, 0, 0, size.w, size.h);
+    return ctx.getImageData(0, 0, size.w, size.h).data.buffer;
+  };
+  return {
+    total: frameUrls.length,
+    async init(signal) {
+      const img = await _decodeImageForFrame(frameUrls[0], signal);
+      // 実寸が取れない画像を 1×1 に黙って縮退させない（契約どおり throw）。
+      // || 1 で握り潰すと 1×1 の GIF を「成功」で作り、原因不明の空 GIF を生むだけ。
+      const w = img.naturalWidth, h = img.naturalHeight;
+      if (!w || !h) throw new Error("うごイラ先頭コマの実寸を取得できませんでした");
+      size = { w, h };
+      canvas = document.createElement("canvas");
+      canvas.width = size.w;
+      canvas.height = size.h;
+      ctx = canvas.getContext("2d", { willReadFrequently: true });
+      firstRgba = drawToRgba(img);
+      return size;
+    },
+    async next(i, signal) {
+      if (i === 0 && firstRgba) {
+        const buf = firstRgba;
+        firstRgba = null; // transfer するので参照を手放す
+        return { rgba: buf, delayMs: delays[0] };
+      }
+      const img = await _decodeImageForFrame(frameUrls[i], signal);
+      return { rgba: drawToRgba(img), delayMs: delays[i] };
+    },
+    dispose() { canvas = null; ctx = null; firstRgba = null; },
+  };
+}
+
+/**
+ * GROUP-150 v1.48.0 / GROUP-151 v1.49.0：ストリーミング GIF エンコード（供給元非依存）。
+ * gifshot の一括方式（全コマを 1 tick で一斉に原寸デコード＋yield 無し LZW）を廃し、
+ * 使い捨て Module Worker（gif-encoder.worker.js）へ 1 コマずつ ImageData を transfer で渡し、
+ * Worker 側で「量子化(NeuQuant)→GifWriter.addFrame→出力追記」を逐次実行する。
+ * メイン側は 1 コマ供給→送信→Worker の完了(PROGRESS)を待つ（backpressure）。
+ * 保持は「現コマの ImageData＋累積出力」に有界化＝原寸・全コマでもフリーズしない。
+ *
+ * frameSource: { total, init(signal)->{w,h}, next(i,signal)->{rgba:ArrayBuffer, delayMs}, dispose() }
+ *   ※ init/next は実寸が不明なら throw する（黙示 fallback を作らない）。
+ * 中断：cancel() は Worker を即 terminate し、AbortSignal で供給ループを解く。ただし
+ *   `img.decode()` の**最中**は次の await 境界まで実際の離脱が遅れる（最大 1 コマ分）。
+ */
+function streamEncodeGif(frameSource, onProgress) {
   let settled = false;
   let ackResolve = null;
   let worker = null;
+  const ac = new AbortController();
   const cleanup = () => { try { if (worker) worker.terminate(); } catch (_) {} };
   // 保留中の backpressure ack を解放して送信ループを解く（settled 後にループが FINISH を送らず抜ける）
   const releaseAck = () => { if (ackResolve) { const r = ackResolve; ackResolve = null; r(); } };
 
   let doReject = null, doResolve = null;
   const promise = new Promise((resolve, reject) => { doResolve = resolve; doReject = reject; });
-  const fail = (err) => { if (!settled) { settled = true; cleanup(); releaseAck(); doReject(err); } };
-  const succeed = (bytes) => { if (!settled) { settled = true; cleanup(); doResolve(bytes); } };
+  const fail = (err) => {
+    if (!settled) { settled = true; cleanup(); ac.abort(); releaseAck(); doReject(err); }
+  };
+  const succeed = (v) => { if (!settled) { settled = true; cleanup(); doResolve(v); } };
   // watchdog 等の外部から stuck Worker を terminate して中断する（Worker 累積を防ぐ）
   const cancel = () => fail(new Error("cancelled"));
 
@@ -326,7 +385,7 @@ function streamEncodeUgoiraGif(frameUrls, delays, onProgress) {
       if (onProgress) onProgress(m.done, m.total);
       releaseAck();
     } else if (m.type === "RESULT") {
-      succeed(new Uint8Array(m.gif));
+      succeed(m.gif); // Blob（実体コピーなしで受け取る）
     } else if (m.type === "ERROR") {
       fail(new Error(m.message));
     }
@@ -335,49 +394,26 @@ function streamEncodeUgoiraGif(frameUrls, delays, onProgress) {
 
   (async () => {
     try {
-      let size = null;
-      let ctx = null;
-      for (let i = 0; i < frameUrls.length && !settled; i++) {
-        const img = new Image();
-        img.src = frameUrls[i];
-        await img.decode();
-        if (!size) {
-          // 原寸は先頭コマのデコード後の実寸から取る（previewImg 非依存＝未デコード時の縮退競合を排除）。
-          size = { w: img.naturalWidth || 1, h: img.naturalHeight || 1 };
-          const canvas = document.createElement("canvas");
-          canvas.width = size.w;
-          canvas.height = size.h;
-          ctx = canvas.getContext("2d", { willReadFrequently: true });
-          worker.postMessage({ type: "INIT", width: size.w, height: size.h, loop: 0 });
-        }
-        ctx.clearRect(0, 0, size.w, size.h);
-        ctx.drawImage(img, 0, 0, size.w, size.h);
-        const imgData = ctx.getImageData(0, 0, size.w, size.h);
-        const buf = imgData.data.buffer;
+      const size = await frameSource.init(ac.signal);
+      worker.postMessage({ type: "INIT", width: size.w, height: size.h, loop: 0 });
+      for (let i = 0; i < frameSource.total && !settled; i++) {
+        const { rgba, delayMs } = await frameSource.next(i, ac.signal);
         const acked = new Promise((r) => { ackResolve = r; });
         worker.postMessage({
-          type: "FRAME", index: i, total: frameUrls.length,
-          rgba: buf, width: size.w, height: size.h, delayMs: delays[i],
-        }, [buf]);
+          type: "FRAME", index: i, total: frameSource.total,
+          rgba, width: size.w, height: size.h, delayMs,
+        }, [rgba]);
         await acked; // backpressure：Worker が当該コマを処理し終えるまで次を送らない
       }
       if (!settled) worker.postMessage({ type: "FINISH" });
     } catch (err) {
       fail(err);
+    } finally {
+      try { frameSource.dispose(); } catch (_) {}
     }
   })();
 
   return { promise, cancel };
-}
-
-/** GROUP-150 v1.48.0：GIF バイト列を base64 dataURL 化。巨大時は文字列上限で throw（呼出側で明示エラー） */
-function _gifBytesToDataUrl(bytes) {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return "data:image/gif;base64," + btoa(binary);
 }
 
 /** うごイラ：frames（{file, delay} 列）と ZIP からフレーム blob URL 列を構築して変換フローを設定 */
@@ -400,7 +436,7 @@ async function initUgoira(cap, pageUrl) {
 
   // GROUP-150 v1.48.0：うごイラは原寸・全コマ・縮小/再エンコードなし。各コマは ZIP 内の
   // 原寸バイトをそのまま blob URL 化する（圧縮 JPEG のまま保持＝メモリはコマ数×圧縮JPEG に有界）。
-  // 原寸 RGBA への展開はエンコード時に 1 コマずつ行い（streamEncodeUgoiraGif の backpressure）、
+  // 原寸 RGBA への展開はエンコード時に 1 コマずつ行い（streamEncodeGif の backpressure）、
   // 全コマを原寸で同時保持しない。間引き・出力縮小は行わない（サイズ・解像度を落とさない）。
   const frameUrls = [];
   const delays = [];
@@ -485,41 +521,28 @@ function runUgoiraConversion(frameUrls, delays, pageUrl) {
     }
   }, 5_000);
 
-  enc = streamEncodeUgoiraGif(frameUrls, delays, (done, total) => {
+  enc = streamEncodeGif(makeUgoiraFrameSource(frameUrls, delays), (done, total) => {
     lastProgressAt = Date.now();
     updateProgress(done / total);
     log(`変換中… ${done}/${total} コマ`);
   });
-  enc.promise.then(async (gifBytes) => {
+  enc.promise.then(async (gifBlob) => {
     clearInterval(encodeTimeout);
     if (watchdogFired) return; // タイムアウト表示後に遅れて完了しても二重処理しない
 
-    // Uint8Array → base64 dataURL（既存の保存経路に載せる）。巨大出力は文字列上限で throw ＝
-    // 明示エラーで受ける（サイズ低下はしない。真の巨大対応＝chunk/binary は GROUP-144 で本対応）。
-    let dataUrl;
-    try {
-      dataUrl = _gifBytesToDataUrl(gifBytes);
-    } catch (_convErr) {
-      log(
-        `GIF が大きすぎて保存用データに変換できません（約 ${(gifBytes.length / 1024 / 1024).toFixed(1)} MB）。` +
-        "コマ数の少ないうごイラでお試しください（巨大 GIF の保存は今後対応予定）。",
-        "error"
-      );
-      btn.disabled = false;
-      btn.textContent = "再試行";
-      hideProgress();
-      return;
-    }
-
+    // GROUP-151 v1.49.0：GIF は **Blob のまま** background へ渡す。
+    // 旧実装は base64 dataURL 化していたが、それが allocation overflow の発生源だった
+    // （文字列 2byte/char → btoa 1.33n → 連結でピーク約 3.3n、さらに structured clone を 4 回通過）。
+    // Blob の structured clone は実体をコピーしないため、巨大でもコピーが起きない。
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const approxSize = (gifBytes.length / 1024 / 1024).toFixed(1);
+    const approxSize = (gifBlob.size / 1024 / 1024).toFixed(1);
     log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。保存モーダルを起動しています…`, "success");
     updateProgress(1);
     try {
       const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
       await browser.runtime.sendMessage({
         type: "STASH_CONVERSION_PAYLOAD",
-        imageUrl: dataUrl,
+        imageBlob: gifBlob,
         pageUrl: pageUrl || "",
         suggestedFilename: `ugoira-${ts}.gif`,
         associatedAudio: null,

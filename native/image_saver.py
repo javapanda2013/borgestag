@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 image_saver.py  —  Firefox Native Messaging ホスト
-version: 1.11.7
+version: 1.11.8
 
 受け取るコマンド:
   {"cmd": "LIST_DIR",      "path": null}
@@ -12,6 +12,8 @@ version: 1.11.7
   {"cmd": "RENAME_FILE",   "srcPath": "...", "dstPath": "..."}  # v1.10.0 GROUP-5-A
   {"cmd": "MKDIR_EXPORT_TMP", "parentPath": null}  # v1.11.0 GROUP-26-split
   {"cmd": "ZIP_DIRECTORY",   "srcDir": "...", "dstZipPath": "...", "deleteSrc": true}  # v1.11.0 GROUP-26-split
+  {"cmd": "WRITE_FILE_BINARY_CHUNK", "path": "...", "token": "...", "contentB64": "...",
+   "offset": 0, "done": false, "unique": true, "abort": false}  # v1.11.8 GROUP-151：巨大 GIF の分割書込
 """
 
 import sys
@@ -511,6 +513,83 @@ def handle_write_file_binary(path, content_b64):
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
+
+
+def handle_write_file_binary_chunk(path, token, content_b64, offset, done, unique, abort=False):
+    """
+    巨大バイナリを分割して書き出す（v1.49.0 GROUP-151-stage1）。
+
+    理由：変換 GIF は原寸化で数十〜数百 MB になり得る。従来は GIF 全体を base64 dataURL 化して
+    SAVE_IMAGE の url に載せていたが、その文字列生成（2byte/char → btoa 1.33n → 連結）が
+    allocation size overflow の発生源だった（GROUP-144）。呼出側は Blob を 4MB 刻みで
+    slice して本コマンドへ渡すため、1 メッセージあたりの base64 は約 5.3MB に収まり、
+    「単一の巨大 base64 を作らない」を満たす。base64 自体は chunk 粒度なら無害。
+
+    契約：
+      offset==0        : `.part` を新規作成（既存があれば削除）。親フォルダは **作成しない**
+                         （存在しなければ DIR_NOT_FOUND。SAVE_IMAGE と同一契約＝呼出側が依存）
+      offset>0         : 既存 `.part` のサイズが offset と一致することを検証（欠落・順序入替の検知）
+      done==True       : `.part` → 本パスへ os.replace（unique 指定時は連番付与）。savedPath を返す
+      abort==True      : 書きかけの `.part` を破棄して終了（呼出側の中断・失敗時の後始末）
+    一時ファイルは `f"{path}.{token}.part"`＝**宛先と同ボリューム**（%TEMP% だとドライブ跨ぎで
+    os.replace が失敗する）。token で連続保存時の同名衝突を防ぐ。
+
+    注意：同ボリュームである以上、`.part` は**利用者の保存フォルダに見える**。中断で放置すると
+    `foo.gif.<token>.part` がゴミとして残るため、失敗・中断時は呼出側が abort を投げる。
+    """
+    part_path = f"{path}.{token}.part"
+    try:
+        if abort:
+            if os.path.exists(part_path):
+                os.remove(part_path)
+            return {"ok": True, "aborted": True}
+
+        save_dir = os.path.dirname(path)
+        if save_dir and not os.path.isdir(save_dir):
+            return {
+                "ok": False,
+                "error": f"保存先フォルダが存在しません: {save_dir}",
+                "errorCode": "DIR_NOT_FOUND",
+            }
+
+        offset = int(offset or 0)
+        if offset == 0:
+            if os.path.exists(part_path):
+                # 削除失敗（ロック等）を握り潰すと直後の "ab" が**既存内容へ追記**し、
+                # 壊れたファイルを「成功」で返す。検知できない破損は作らない。
+                os.remove(part_path)
+        else:
+            if not os.path.exists(part_path):
+                return {"ok": False, "error": f"分割書込の一時ファイルがありません（offset={offset}）"}
+            cur = os.path.getsize(part_path)
+            if cur != offset:
+                # 列が壊れている以上この `.part` は再利用できない。孤児として残さず破棄する。
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "error": f"分割書込のオフセット不一致（期待 {offset} / 実際 {cur}）",
+                }
+
+        data = base64.b64decode(content_b64 or "")
+        with open(part_path, "ab") as f:
+            f.write(data)
+
+        if not done:
+            return {"ok": True, "written": len(data), "offset": offset + len(data)}
+
+        final_path = unique_path(path) if unique else path
+        os.replace(part_path, final_path)
+        return {"ok": True, "savedPath": final_path, "bytes": os.path.getsize(final_path)}
+    except Exception as e:
+        try:
+            if os.path.exists(part_path):
+                os.remove(part_path)
         except Exception:
             pass
         return {"ok": False, "error": str(e)}
@@ -1600,6 +1679,17 @@ def _dispatch_command(message):
         return handle_write_file_binary(
             message.get("path", ""),
             message.get("contentB64", ""),
+        )
+
+    elif cmd == "WRITE_FILE_BINARY_CHUNK":
+        return handle_write_file_binary_chunk(
+            message.get("path", ""),
+            message.get("token", ""),
+            message.get("contentB64", ""),
+            message.get("offset", 0),
+            bool(message.get("done", False)),
+            bool(message.get("unique", False)),
+            bool(message.get("abort", False)),
         )
 
     elif cmd == "SAVE_IMAGE_BASE64":

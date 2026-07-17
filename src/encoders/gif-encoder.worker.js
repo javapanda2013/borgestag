@@ -25,7 +25,8 @@ import { NeuQuant } from "../vendor/neuquant.js";
 const SAMPLE_FAC = 10;
 
 let writer = null;
-let outBuf = null; // GifWriter の出力バッファ（プレーン配列）
+let outBuf = null;  // GifWriter の出力窓（固定長 Uint8Array。書かれた分を都度 chunks へ移す）
+let chunks = null;  // 回収済みバイト列（Blob 構築材料）
 let frameW = 0;
 let frameH = 0;
 
@@ -59,16 +60,44 @@ function quantize(rgba, n) {
   return { indexed, palette };
 }
 
+/**
+ * GROUP-151 v1.49.0：出力を「固定窓 Uint8Array ＋ 毎コマ flush」で回収する。
+ *
+ * 旧実装は GifWriter に**プレーン JS 配列**を渡していた（omggif が "for simplicity" として
+ * 採る形）。SpiderMonkey の packed array は 1 要素あたり数バイトを要するため、n バイトの GIF に
+ * 対して約 8n、さらに `Uint8Array.from` の瞬間に約 9n を確保する。原寸・長尺（GIF が数百 MB）で
+ * 確実に破綻するため、窓をリングとして使い回し、書かれた分だけ都度 slice して chunks へ移す。
+ * これでピークは「窓（1 コマ分）＋ chunks 累積 n ＋ Blob 構築時の一時 n」＝約 2n に収まる。
+ *
+ * 安全性：GifWriter の遡及書込（sub-block 長 `buf[cur_subblock]`）は addFrame 呼び出し内で完結し、
+ * 呼び出しを跨がない。よってコマ間で flush → `setOutputBufferPosition(0)` に戻して問題ない。
+ * Uint8Array は範囲外書込を**黙って捨てる**ため、窓溢れは position で必ず検知する。
+ */
+function _flushOutput() {
+  const p = writer.getOutputBufferPosition();
+  if (p > outBuf.length) {
+    // 黙って切り捨てられた後なので、ここで気付けないと壊れた GIF が「成功」で返る
+    throw new Error(`GIF 出力バッファ溢れ（${p} > ${outBuf.length}）`);
+  }
+  if (p > 0) {
+    chunks.push(outBuf.slice(0, p));
+    writer.setOutputBufferPosition(0);
+  }
+}
+
 self.onmessage = (e) => {
   const msg = e.data;
   try {
     if (msg.type === "INIT") {
       frameW = msg.width;
       frameH = msg.height;
-      outBuf = [];
+      chunks = [];
+      // 1 コマ分の LZW 出力＋ローカルパレット＋ヘッダに十分な窓（非圧縮でも収まる余裕を取る）
+      outBuf = new Uint8Array(frameW * frameH * 2 + (1 << 20));
       writer = new GifWriter(outBuf, frameW, frameH, {
         loop: msg.loop === undefined ? 0 : msg.loop,
       });
+      _flushOutput(); // ヘッダ＋論理画面記述子＋ループ拡張を回収
       return;
     }
 
@@ -81,8 +110,9 @@ self.onmessage = (e) => {
       writer.addFrame(0, 0, w, h, indexed, {
         palette,
         delay: Math.max(0, Math.round((msg.delayMs || 0) / 10)), // ms → centisec
-        disposal: 1, // 残置（うごイラは全面不透明フレーム）
+        disposal: 1, // 残置（全面不透明フレーム）
       });
+      _flushOutput(); // 当該コマ分を回収して窓を再利用
       self.postMessage({ type: "PROGRESS", done: msg.index + 1, total: msg.total });
       return;
     }
@@ -90,11 +120,14 @@ self.onmessage = (e) => {
     if (msg.type === "FINISH") {
       if (!writer) throw new Error("INIT 前に FINISH を受信しました");
       writer.end();
-      const bytes = Uint8Array.from(outBuf);
-      // 出力バッファを解放（Worker は使い捨てだが明示）
+      _flushOutput(); // trailer を回収
+      const blob = new Blob(chunks, { type: "image/gif" });
+      // 出力を解放（Worker は使い捨てだが明示）
+      chunks = null;
       outBuf = null;
       writer = null;
-      self.postMessage({ type: "RESULT", gif: bytes.buffer }, [bytes.buffer]);
+      // Blob は structured clone で実体をコピーしないため、巨大でも安全に渡せる
+      self.postMessage({ type: "RESULT", gif: blob });
       return;
     }
   } catch (err) {

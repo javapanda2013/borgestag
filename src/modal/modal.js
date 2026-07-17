@@ -266,7 +266,8 @@ document.addEventListener("DOMContentLoaded", () => {
 // （saveHistory + globalTags + globalAuthors 等を保持）が累積し、メモリ蔓延（5GB+ 級）を招く。
 // profile.json で `Timeout::SetWhenOrTimeRemaining` 358MB 累積を確認、modal を閉じると解放される現象とも整合。
 // window.location.reload() で JS context を完全 reset、_pendingModal storage は新画像情報を保持済のため
-// 再 init 時に正しく読み出される（__fromConversion の場合も background の stash が初回 CLAIM で消費される）。
+// 再 init 時に正しく読み出される（__fromConversion の場合、background の stash は CLAIM では
+// 消費されず＝連続保存の 2 回目も Blob を取れる／解放は modal 窓の消滅時に一本化。GROUP-151 v1.49.0）。
 browser.runtime.onMessage.addListener((message) => {
   if (message.type === "MODAL_NEW_IMAGE" || message.type === "MODAL_NEW_FROM_CONVERSION") {
     window.location.reload();
@@ -379,6 +380,11 @@ async function initModal() {
   // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換経由の場合は
   // background の _pendingConversionStash から受け取る（storage.local broadcast 回避）。
   let imageUrl, pageUrl, suggestedFilename, associatedAudio;
+  // GROUP-151 v1.49.0：不変条件「巨大 Blob は background だけが持つ。UI はハンドルしか運ばない」。
+  // 変換経路では Blob 本体を受け取らず、プレビュー用 blob URL（previewUrl）とフラグだけ受ける。
+  // 保存時は useStashBlob を payload に載せ、background が stash から Blob を直接取る。
+  // 印は window に置く（保存ハンドラは別スコープでローカル変数が見えないため）。
+  window.__btUseStashBlob = false;
   if (_pendingModal.__fromConversion) {
     const claim = await browser.runtime.sendMessage({ type: "CLAIM_CONVERSION_PAYLOAD" });
     if (!claim || !claim.ok || !claim.payload) {
@@ -386,7 +392,13 @@ async function initModal() {
       window.close();
       return;
     }
-    ({ imageUrl, pageUrl, suggestedFilename, associatedAudio } = claim.payload);
+    ({ pageUrl, suggestedFilename, associatedAudio } = claim.payload);
+    // previewUrl（Blob 経路）優先。旧 dataURL 経路は imageUrl で後方互換
+    imageUrl = claim.payload.previewUrl || claim.payload.imageUrl || null;
+    // 保存 payload と fetchThumbnailInPage の両方がこの印を見る。
+    // fetchThumbnailInPage は URL の形に依存せず「変換経由か」で判定する必要がある
+    // （blob: URL は .gif 判定も data:image/gif 判定もすり抜けるため）
+    window.__btUseStashBlob = !!claim.payload.useStashBlob;
   } else {
     // 通常経路：従来通り storage.local._pendingModal から受け取る
     ({ imageUrl, pageUrl, suggestedFilename } = _pendingModal);
@@ -5549,6 +5561,12 @@ function setupModalEvents(
       // （過去の TODO コメント「変換済み gif はこの関数を bypass」の実装）
       if (/^data:image\/gif[;,]/i.test(url)) return null;
 
+      // GROUP-151 v1.49.0：Blob 運搬化で変換 GIF の URL は `blob:` になり、
+      // 上の 2 判定（.gif 拡張子 / data:image/gif）を**どちらもすり抜ける**。
+      // bypass されないと Canvas→JPEG の静止サムネが採用され、アニメサムネへ退行する。
+      // URL の形に依存せず「変換経由か」で判定する。
+      if (window.__btUseStashBlob) return null;
+
       // ① DOM上の同ホスト <img> を crossOrigin="anonymous" で再ロードしてCanvas描画
       // （crossOriginなしで読み込まれた画像はCanvas汚染でblob取得不可のため再取得）
       let targetImg = null;
@@ -5845,6 +5863,9 @@ function setupModalEvents(
     const jobIdMulti = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const payloadFFMulti = {
       imageUrl, filename,
+      // GROUP-151 v1.49.0：Blob は運ばずハンドルだけ渡す（background が stash から取る）。
+      // initModal のローカル変数はこのスコープから見えないので window の印を参照する
+      useStashBlob: !!window.__btUseStashBlob,
       savePaths: [...selectedPaths], tags: [...selectedTags],
       subTags:   [...selectedSubTags],
       authors: selectedAuthors,
@@ -5949,6 +5970,9 @@ function setupModalEvents(
     const jobId = (crypto?.randomUUID?.() || `job-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const payloadFF = {
       imageUrl, filename, savePath,
+      // GROUP-151 v1.49.0：Blob は運ばずハンドルだけ渡す（background が stash から取る）。
+      // initModal のローカル変数はこのスコープから見えないので window の印を参照する
+      useStashBlob: !!window.__btUseStashBlob,
       tags:    [...selectedTags],
       subTags: [...selectedSubTags],
       authors: selectedAuthors,

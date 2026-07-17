@@ -142,6 +142,9 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 // モーダルウィンドウ管理
 // ----------------------------------------------------------------
 let modalWindowId = null;
+// GROUP-151 v1.49.0：modal タブの生存確認用。windows.onRemoved は「タブが別ウィンドウへ
+// 移動しただけ」でも旧ウィンドウ分が発火するため、ウィンドウ ID だけでは modal の消滅を判定できない。
+let modalTabId = null;
 
 // ----------------------------------------------------------------
 // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換の payload を
@@ -157,6 +160,13 @@ let modalWindowId = null;
 let _pendingConversionStash = null;
 
 function _clearPendingConversionStash() {
+  // GROUP-151 v1.49.0：CLAIM で null 化しなくなった（連続保存の 2 回目を壊さないため）ので、
+  // 解放はここに一本化する。プレビュー用 blob URL は必ず revoke する
+  // （modal.js の「ページ破棄に任せて revoke しない」実装で 100MB 級が滞留する轍を踏まない）。
+  const s = _pendingConversionStash;
+  if (s && s.previewUrl) {
+    try { URL.revokeObjectURL(s.previewUrl); } catch (_) {}
+  }
   _pendingConversionStash = null;
 }
 
@@ -201,16 +211,36 @@ async function openModalWindow(imageUrl, pageUrl) {
     height: h,
   });
   modalWindowId = win.id;
+  modalTabId = win.tabs?.[0]?.id ?? null;
 }
 
 // ウィンドウが閉じられたら ID をリセット
-browser.windows.onRemoved.addListener((windowId) => {
-  if (windowId === modalWindowId) {
-    modalWindowId = null;
-    // v1.31.5：未消費の変換 stash が残っていたらクリア（メモリリーク防止）
-    _clearPendingConversionStash();
-  }
+browser.windows.onRemoved.addListener(async (windowId) => {
   if (windowId === videoConvertWindowId) videoConvertWindowId = null;
+  if (windowId !== modalWindowId) return;
+  // GROUP-151 v1.49.0：解放前に modal タブの生存を確認する。modal タブを別ウィンドウへ
+  // ドラッグアウトすると、空になった旧ウィンドウの onRemoved が先に発火し、tabs.onAttached
+  // （tabs.get を await する分だけ後着）が modalWindowId を貼り直すまでの隙間で
+  // 「modal 生存中に stash 解放」が起き得る。v1.48.0 までは modal が dataURL をローカルに
+  // 握っていたため無害だったが、v1.49.0 で保存が stash 依存になったため
+  // 「保存不能＋previewUrl revoke でプレビュー破損、CLAIM の再取得手段なし」に化ける。
+  // ウィンドウ ID の突合ではなくタブの実在で判定し、生きていれば modalWindowId も温存する
+  //（onAttached が新ウィンドウ ID へ貼り直す）。
+  if (modalTabId !== null) {
+    try {
+      await browser.tabs.get(modalTabId);
+      return; // タブは生きている＝移動しただけ。stash も modalWindowId も保持する
+    } catch (_) { /* 取得不可＝タブ消滅。解放してよい */ }
+  }
+  // GROUP-151 v1.49.0：await をまたぐ間に別 modal が登録され得る（listener は await で中断し、
+  // その隙に OPEN_MODAL_FROM_CONVERSION が新窓 B を作って modalWindowId=B・Stash_B を設定する）。
+  // 入口で見た windowId（＝閉じた窓、不変）が今の modalWindowId と一致しなければ、この onRemoved は
+  // stale＝生きている別 modal を指しているので、その stash/tracking を絶対に触らない。
+  if (windowId !== modalWindowId) return;
+  // v1.31.5：未消費の変換 stash が残っていたらクリア（メモリリーク防止）
+  modalWindowId = null;
+  modalTabId = null;
+  _clearPendingConversionStash();
 });
 
 // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換専用の保存モーダル起動。
@@ -230,6 +260,7 @@ async function openModalFromConversion() {
         await browser.windows.update(modalWindowId, { focused: true });
         const tabs = await browser.tabs.query({ windowId: modalWindowId });
         if (tabs[0]) {
+          modalTabId = tabs[0].id; // GROUP-151 v1.49.0：再利用窓でも解放判定用のタブ ID を確定
           await browser.tabs.update(tabs[0].id, { active: true });
           // 既存 modal に再初期化を依頼
           browser.tabs.sendMessage(tabs[0].id, { type: "MODAL_NEW_FROM_CONVERSION" });
@@ -254,6 +285,7 @@ async function openModalFromConversion() {
     height: h,
   });
   modalWindowId = win.id;
+  modalTabId = win.tabs?.[0]?.id ?? null;
 }
 
 // ----------------------------------------------------------------
@@ -309,6 +341,7 @@ browser.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
     const tab = await browser.tabs.get(tabId);
     if (tab.url && tab.url.includes("/modal/modal.html") && modalWindowId !== newWindowId) {
       modalWindowId = newWindowId;
+      modalTabId = tabId; // GROUP-151 v1.49.0：stash 解放判定に使うタブ ID も貼り直す
     }
   } catch (_) {}
 });
@@ -385,10 +418,16 @@ async function handleAsyncMessage(message, sender) {
 
     // v1.31.5 GROUP-28 mvdl hotfix：動画→GIF 変換 payload の受渡
     case "STASH_CONVERSION_PAYLOAD":
-      // video_convert.js が保存モーダル起動前に大容量 dataURL と関連音声を
-      // ここに保持し、storage.local.broadcast を回避する。
+      // video_convert.js が保存モーダル起動前に大容量データと関連音声をここに保持し、
+      // storage.local.broadcast を回避する。
+      // GROUP-151 v1.49.0：GIF は **Blob** で受ける（imageBlob）。Blob の structured clone は
+      // 実体をコピーしないため巨大でも安全。旧 imageUrl（dataURL）経路も後方互換で残す。
+      // 上書き前に旧 stash を解放する：直接代入だと旧 previewUrl の参照ごと失われ revoke 不能になり、
+      // 数百 MB の Blob が background に恒久滞留する（変換を 2 回続けると再現）。
+      _clearPendingConversionStash();
       _pendingConversionStash = {
-        imageUrl:         message.imageUrl,
+        imageBlob:        message.imageBlob || null,
+        imageUrl:         message.imageUrl || null,
         pageUrl:          message.pageUrl,
         suggestedFilename: message.suggestedFilename,
         associatedAudio:  message.associatedAudio || null,
@@ -396,10 +435,30 @@ async function handleAsyncMessage(message, sender) {
       return { ok: true };
 
     case "CLAIM_CONVERSION_PAYLOAD": {
-      // modal.js initModal が起動時に 1 回だけ取得。取得後は即 null 化。
-      const payload = _pendingConversionStash;
-      _pendingConversionStash = null;
-      return { ok: true, payload };
+      // modal.js initModal が起動時に 1 回だけ取得。
+      // GROUP-151 v1.49.0：不変条件「巨大 Blob は background だけが持つ。UI はハンドルしか運ばない」。
+      // Blob 本体は返さず、プレビュー用の blob URL とメタだけ渡す（保存時は useStashBlob で
+      // background 側が stash から直接取る）。
+      // ⚠ ここで stash を null 化しない：連続保存モードの 2 回目が壊れる（旧実装は modal が
+      //    ローカルに dataURL を握っていたので null 化できた）。解放は windows.onRemoved に一本化。
+      const s = _pendingConversionStash;
+      if (!s) return { ok: true, payload: null };
+      if (s.imageBlob && !s.previewUrl) {
+        s.previewUrl = URL.createObjectURL(s.imageBlob);
+      }
+      return {
+        ok: true,
+        payload: {
+          previewUrl:        s.previewUrl || null,
+          imageUrl:          s.imageBlob ? null : s.imageUrl, // 旧 dataURL 経路の互換
+          // 「stash の Blob を使え」の意。旧 dataURL 経路では false になる必要がある
+          // （無条件 true にすると名前と実態が乖離し、後続の分岐判断を誤らせる）
+          useStashBlob:      !!s.imageBlob,
+          pageUrl:           s.pageUrl,
+          suggestedFilename: s.suggestedFilename,
+          associatedAudio:   s.associatedAudio || null,
+        },
+      };
     }
 
     case "OPEN_MODAL_FROM_CONVERSION":
@@ -781,7 +840,9 @@ function sendNative(payload) {
     // Size check：大容量 string フィールド（content / dataUrl）の length で概算。
     // WRITE_FILE / SAVE_IMAGE_BASE64 / READ_LOCAL_IMAGE_BASE64 は exempt（想定内の大容量）。
     // それ以外のコマンドで想定外の巨大ペイロードが来た場合は早期リジェクト。
-    const exemptCmds = ["WRITE_FILE", "WRITE_FILE_BINARY", "WRITE_FILES_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
+    // GROUP-151 v1.49.0：WRITE_FILE_BINARY_CHUNK を追加。1 メッセージあたり約 5.3MB（生 4MB の base64）
+    // を意図的に送るため 3MB ガードの対象外。※ exempt と LONG_TIMEOUT_CMDS は独立管理なので両方に登録する
+    const exemptCmds = ["WRITE_FILE", "WRITE_FILE_BINARY", "WRITE_FILES_BINARY", "WRITE_FILE_BINARY_CHUNK", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64"];
     if (!exemptCmds.includes(cmdName)) {
       let estimatedSize = 0;
       if (typeof payload.content === "string") estimatedSize += payload.content.length;
@@ -816,7 +877,10 @@ function sendNative(payload) {
         __logPreview = JSON.stringify(payload).slice(0, 200);
       }
     } catch (_) { /* preview 生成失敗は無視 */ }
-    addLog("INFO", `Native送信: ${cmdName}`, __logPreview);
+    // GROUP-151 v1.49.0：分割書込は 200MB で 50 往復＝100 行を吐き、ログ保持上限を押し流して
+    // 診断に必要な履歴を失わせる。中間 chunk だけ黙らせ、開始（offset 0）と完了（done）は残す。
+    const __quietChunk = cmdName === "WRITE_FILE_BINARY_CHUNK" && payload.offset > 0 && !payload.done;
+    if (!__quietChunk) addLog("INFO", `Native送信: ${cmdName}`, __logPreview);
 
     // v1.20.2: コマンド別タイムアウト（v1.20.1 の対象をさらに拡大）。
     // 長時間処理の可能性があるコマンドは 300 秒に延長。瞬時操作は従来どおり 10 秒でハング検知。
@@ -830,6 +894,8 @@ function sendNative(payload) {
     // 既知懸念（04_影響範囲マップ G1「大ファイル書き込みは超過リスク」）の解消。
     const LONG_TIMEOUT_CMDS = [
       "WRITE_FILE", "WRITE_FILE_BINARY", "WRITE_FILES_BINARY", "SAVE_IMAGE_BASE64", "READ_LOCAL_IMAGE_BASE64",
+      // GROUP-151 v1.49.0：巨大 GIF の分割書込（1 chunk = 生 4MB。長尺は数十 chunk＝数十秒かかり得る）
+      "WRITE_FILE_BINARY_CHUNK",
       "SCAN_EXTERNAL_IMAGES", "GENERATE_THUMBS_BATCH", "LIST_SUBFOLDERS",
       "SAVE_IMAGE", "FETCH_PREVIEW", "READ_FILE_BASE64",
       // v1.22.9: 大容量 GIF 分割読み込み関連
@@ -855,9 +921,11 @@ function sendNative(payload) {
       //（サムネ data 等）の時に全 JSON 化して 200 文字だけ取る浪費で、
       // Firefox Profiler 実測で累積 649MB の Native allocation を消費していた。
       // shallow preview で大きいフィールドは長さや型だけ記録する。
-      addLog(response.ok === false ? "WARN" : "INFO",
-        `Native応答: ${cmdName}`,
-        _shallowResponsePreview(response));
+      if (!__quietChunk || response.ok === false) {
+        addLog(response.ok === false ? "WARN" : "INFO",
+          `Native応答: ${cmdName}`,
+          _shallowResponsePreview(response));
+      }
       resolve(response);
     });
 
@@ -952,12 +1020,100 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
 }
 
 // ----------------------------------------------------------------
+// GROUP-151 v1.49.0：巨大 GIF の分割保存
+//
+// 従来は変換 GIF を base64 dataURL 化して SAVE_IMAGE の url に載せていたが、その文字列生成
+// （2byte/char → btoa 1.33n → 連結でピーク約 3.3n）が allocation overflow の発生源だった
+// （GROUP-144）。加えて同じ巨大文字列が structured clone を 4 回通過していた。
+// ここでは Blob のまま受け取り、4MB 刻みで WRITE_FILE_BINARY_CHUNK へ渡す＝
+// 「単一の巨大 base64 を作らない」。1 メッセージあたり base64 約 5.3MB に収まる。
+// chunk を 700KB にすると 200MB で約 292 回の Native プロセス spawn になり、
+// image_saver.py が「per-thumb の connectNative は遅い→batch 化で 1/50 に削減した」と
+// 記録している失敗の再演になるため 4MB を採る（browser→native は 10MB 級の送信実績あり）。
+// ----------------------------------------------------------------
+const NATIVE_WRITE_CHUNK_BYTES = 4 * 1024 * 1024;
+
+/** Uint8Array → base64（0x8000 刻み。巨大配列を一度に apply しない） */
+function _bytesToBase64(bytes) {
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  }
+  const b64 = btoa(binary);
+  binary = null; // 中間文字列を即解放（GROUP-26-mem 規約。_fetchThumbB64FromChunkPath と同型）
+  return b64;
+}
+
+/** Blob を分割して Native へ書き込む。戻り＝実際に保存されたパス（unique 時は連番付与済み） */
+async function saveBlobViaChunks(blob, destPath) {
+  if (!blob || blob.size === 0) throw new Error("保存データが空です");
+  const token = (crypto.randomUUID && crypto.randomUUID()) ||
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const total = blob.size;
+  let offset = 0;
+  let savedPath = null;
+  try {
+    while (offset < total) {
+      const end = Math.min(offset + NATIVE_WRITE_CHUNK_BYTES, total);
+      let buf = await blob.slice(offset, end).arrayBuffer();
+      let b64 = _bytesToBase64(new Uint8Array(buf));
+      buf = null; // 巨大 payload の参照を切る（GROUP-82 規約）
+      const res = await sendNative({
+        cmd: "WRITE_FILE_BINARY_CHUNK",
+        path: destPath, token, contentB64: b64,
+        offset, done: end >= total, unique: true,
+      });
+      b64 = null; // 送信後に null 代入（GROUP-82 規約 / preflight 第 9 gate）
+      if (!res || !res.ok) throw new Error(res?.error || "WRITE_FILE_BINARY_CHUNK 失敗");
+      if (res.savedPath) savedPath = res.savedPath;
+      offset = end;
+    }
+  } catch (err) {
+    // GROUP-151 v1.49.0：中断・失敗時に書きかけの `.part` を残さない。`.part` は宛先と同ボリューム
+    //（＝利用者の保存フォルダ）に置かれるため、放置すると `foo.gif.<token>.part` がゴミになる。
+    // 後始末自体の失敗は握り潰す（本来のエラーを覆い隠さない）。
+    try { await sendNative({ cmd: "WRITE_FILE_BINARY_CHUNK", path: destPath, token, abort: true }); }
+    catch (_) { /* 後始末失敗は無視 */ }
+    throw err;
+  }
+  return savedPath;
+}
+
+/**
+ * Blob を保存し、SAVE_IMAGE と同形の res を返す（savedPath / thumbChunkPath 等）。
+ * これにより handleSave 下流（savedPath 抽出・resolveThumbDataUrlFromNativeRes）は無改修で通る。
+ * chunk 書込コマンドはサムネを返さないので、GIF は書込後に MAKE_GIF_THUMB_FILE で別途生成する
+ * （既存の GIF サムネ経路と同じ maxSize=600。アニメを保持したまま分割取得する既存規約に合わせる）。
+ */
+async function saveGifBlobLikeSaveImage(blob, fullPath, skipThumb) {
+  const savedPath = await saveBlobViaChunks(blob, fullPath);
+  if (!savedPath) throw new Error("保存パスを取得できませんでした");
+  if (skipThumb || !savedPath.toLowerCase().endsWith(".gif")) {
+    return { ok: true, savedPath };
+  }
+  const t = await sendNative({ cmd: "MAKE_GIF_THUMB_FILE", path: savedPath, maxSize: 600 });
+  if (!t || !t.ok || !t.tempPath) {
+    // サムネ生成に失敗しても本体保存は成功扱い（サムネは後から再生成可能）
+    return { ok: true, savedPath, thumbError: t?.error || "GIF サムネ生成失敗" };
+  }
+  return {
+    ok: true, savedPath,
+    thumbChunkPath: t.tempPath, thumbTotalSize: t.totalSize,
+    thumbMime: t.mime || "image/gif", thumbWidth: t.width, thumbHeight: t.height,
+  };
+}
+
+// ----------------------------------------------------------------
 // 保存処理
 // ----------------------------------------------------------------
 // @spec 設計書類/共通/A_データモデル_saveHistory.md
 async function handleSave(payload) {
   // v1.41.8:modal が thumbDataUrl の代わりに thumbBlob を直送（btoa/atob 削減）
   const { imageUrl, filename, tags, subTags, authors, author, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
+  // GROUP-151 v1.49.0：不変条件「巨大 Blob は background だけが持つ。UI はハンドルしか運ばない」。
+  // 変換 GIF は UI 経由で Blob を往復させず、stash から直接取る（modal 経路・即保存経路の共通分岐）。
+  const imageBlob = payload.useStashBlob ? (_pendingConversionStash?.imageBlob || null) : null;
   const savePath = normalizePath(payload.savePath);
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])]; // 履歴・globalTags 用（サブタグ含む。v1.41.6：saveTagRecord 廃止）
   const resolvedAuthors = Array.isArray(authors) ? authors.filter(Boolean) : (author ? [String(author)] : []);
@@ -983,8 +1139,13 @@ async function handleSave(payload) {
   // v1.41.8:modal が thumbDataUrl / thumbBlob 提供済みなら Native の Pillow サムネ生成は破棄されるので skip
   const _skipNativeThumb = !!(thumbDataUrl || thumbBlob);
   try {
-    let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumb });
-    if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
+    // GROUP-151 v1.49.0：変換 GIF（Blob）は SAVE_IMAGE（url=巨大 dataURL）を通さず分割書込へ。
+    // SAVE_IMAGE と同形の res を返すので以降の savedPath / サムネ解決は無改修で通る。
+    let res = imageBlob
+      ? await saveGifBlobLikeSaveImage(imageBlob, fullPath, _skipNativeThumb)
+      : await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumb });
+    // Blob 経路に 403 は起きない（ネットワーク取得ではない）ので従来の URL 経路のみ
+    if (!imageBlob && !res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
       // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
       addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
       const fetched = await fetchImageAsDataUrl(imageUrl);
@@ -1463,7 +1624,11 @@ async function handleInstantSave(imageUrl, pageUrl) {
 // （Q33-5-a 確定）を用い、保存自体は音声・サムネ・履歴を含む正規経路 handleSave に委ねる。
 async function handleInstantSaveConversion() {
   const stash = _pendingConversionStash;
-  if (!stash || !stash.imageUrl) return { success: false, error: "変換データがありません（再変換してください）" };
+  // GROUP-151 v1.49.0：Blob 経路（うごイラ）は imageBlob しか積まないため、
+  // imageUrl だけを見るガードだと即保存が常に失敗する。両形式を受け付ける。
+  if (!stash || (!stash.imageBlob && !stash.imageUrl)) {
+    return { success: false, error: "変換データがありません（再変換してください）" };
+  }
   try {
     const [explorerSettings, stored] = await Promise.all([
       getExplorerSettings(),
@@ -1481,14 +1646,18 @@ async function handleInstantSaveConversion() {
     const subTags = stored.retainSubTag ? (stored.retainedSubTags || []) : [];
     const authors = stored.retainAuthor ? (stored.retainedAuthors || []) : [];
     const result = await handleSave({
-      imageUrl: stash.imageUrl,
+      // GROUP-151 v1.49.0：modal 経路と同一分岐にする（useStashBlob で background が
+      // stash から Blob を直接取る）。ここを別扱いにすると「modal を通らない即保存だけ
+      // 直し忘れる」という定番の漏れが起きるため、入口が違っても分岐は 1 本に揃える。
+      useStashBlob: !!stash.imageBlob,
+      imageUrl: stash.imageUrl, // 旧 dataURL 経路の互換（Blob 時は handleSave 側が Blob を優先）
       filename: stash.suggestedFilename || "video-capture.gif",
       tags, subTags, authors,
       pageUrl: stash.pageUrl || "",
       associatedAudio: stash.associatedAudio || null,
       savePath,
     });
-    if (result && result.success) _pendingConversionStash = null; // 成功時のみ消費（失敗時は再試行用に保持）
+    if (result && result.success) _clearPendingConversionStash(); // 成功時のみ消費（失敗時は再試行用に保持）
     return result;
   } catch (err) {
     addLog("ERROR", `変換結果の即保存失敗: ${err.message}`);
@@ -1785,8 +1954,13 @@ async function readNativeFileChunksB64(path) {
     const chunks = [];
     let offset = 0;
     let totalSize = 0;
-    // 保険: 無限ループを防ぐため十分大きな安全上限（100 チャンク × 800KB = 80MB 程度までを想定）
-    for (let i = 0; i < 256; i++) {
+    // 保険: 無限ループを防ぐための安全上限（256 チャンク × 700KB ≒ 180MB）。
+    // GROUP-151 v1.49.0：以前はこの上限に達しても break するだけで {ok:true} を返していたため、
+    // 180MB を超えるファイルが**末尾切れのまま「成功」**として扱われた（サイレント切り捨て）。
+    // 完了(done)せずに上限へ達した場合は明示エラーにする。
+    const MAX_ITER = 256;
+    let completed = false;
+    for (let i = 0; i < MAX_ITER; i++) {
       const res = await sendNative({
         cmd:      "READ_FILE_CHUNK",
         path,
@@ -1800,9 +1974,22 @@ async function readNativeFileChunksB64(path) {
       if (res.length > 0 && res.bytes) {
         chunks.push(res.bytes);
       }
-      if (res.done) break;
+      if (res.done) { completed = true; break; }
       offset = (res.offset || offset) + (res.length || 0);
-      if (offset >= totalSize && totalSize > 0) break;
+      if (offset >= totalSize && totalSize > 0) { completed = true; break; }
+    }
+    if (!completed) {
+      // GROUP-151 v1.49.0：保存（browser→native、10MB 級送信可）は無制限化したが、
+      // 読込（native→browser）は応答 1MB 制限で 1 往復≒700KB に縛られ、上限は約 180MB のまま。
+      // ここを上げると数百回の逐次 Native spawn で数分ハングするため据え置き、明示エラーにする。
+      // stage-2 TODO：巨大ファイルの原寸プレビューは chunk-temp-file 方式（MAKE_GIF_THUMB_FILE と
+      // 同じく Native 側で一時ファイル化→まとめて読む）へ移すか、viewer 側でストリーム読みにする。
+      const capMB = Math.round(MAX_ITER * 700 / 1024);
+      return {
+        ok: false,
+        error: `このファイルは大きすぎて原寸プレビューを表示できません（約 ${capMB}MB 超）。保存はできており、ファイルは通常のビューアで開けます: ${path}`,
+        tooLargeToPreview: true,
+      };
     }
     return { ok: true, chunksB64: chunks, totalSize };
   } catch (err) {
@@ -2765,6 +2952,9 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 async function handleSaveMulti(payload) {
   // v1.41.8:thumbBlob を直送経路として受取（thumbDataUrl は Native pyThumb 用に保持）
   const { imageUrl, filename, tags, subTags, authors, author, savePaths, pageUrl, thumbBlob, thumbDataUrl, thumbWidth, thumbHeight, skipTagRecord, sessionId, sessionIndex, associatedAudio } = payload;
+  // GROUP-151 v1.49.0：handleSave と同じ不変条件（巨大 Blob は background だけが持つ）。
+  // 一括保存も変換 GIF が通る経路なので同一分岐を持たせる（片方だけ直す漏れを作らない）。
+  const imageBlobMulti = payload.useStashBlob ? (_pendingConversionStash?.imageBlob || null) : null;
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -2799,8 +2989,12 @@ async function handleSaveMulti(payload) {
     try {
       // v1.41.8:modal が thumbDataUrl / thumbBlob 提供済みなら Native の Pillow サムネ生成は破棄されるので skip
       const _skipNativeThumbMulti = !!(thumbDataUrl || thumbBlob);
-      let res = await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumbMulti });
-      if (!res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
+      // GROUP-151 v1.49.0：変換 GIF（Blob）は分割書込へ。SAVE_IMAGE と同形の res を返す
+      let res = imageBlobMulti
+        ? await saveGifBlobLikeSaveImage(imageBlobMulti, fullPath, _skipNativeThumbMulti)
+        : await sendNative({ cmd: "SAVE_IMAGE", url: imageUrl, savePath: fullPath, skipThumb: _skipNativeThumbMulti });
+      // Blob 経路に 403 は起きない（ネットワーク取得ではない）
+      if (!imageBlobMulti && !res.ok && ((res.error || "").includes("403") || (res.error || "").includes("Forbidden"))) {
         // ブラウザで表示済みの画像を既存のログインセッションを使って取得（Fanbox など）
         addLog("INFO", `SAVE_IMAGE 403 → ブラウザ権限でフォールバック: ${imageUrl}`);
         const fetched = await fetchImageAsDataUrl(imageUrl);
@@ -3106,6 +3300,16 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     } catch (err) {
       addLog("WARN", "サムネイル IDB 保存失敗", err.message);
     }
+  } else if (typeof imageUrl !== "string" || !/^https?:/i.test(imageUrl)) {
+    // GROUP-151 v1.49.0：XHR フォールバックは「ブラウザで表示済みの http(s) 画像を
+    // ログインセッション付きで再取得する」ためのもの。変換 GIF は imageUrl が
+    // blob:（modal 経路）または null（即保存経路）なので XHR の対象外。
+    // 特に blob: は background 自身が作った URL のため XHR が成功してしまい、
+    // 数百 MB を丸ごと読み戻して createImageBitmap で原寸デコードする——本リリースで
+    // 断とうとしている巨大割当を、サムネ生成失敗時に限って再現することになる。
+    // ここに来るのは Native の GIF サムネ生成が失敗した時だけで、サムネは後から
+    // 再生成できるため、本体保存を優先してサムネなしで続行する。
+    addLog("WARN", "サムネイル生成を見送り（変換 GIF：Native サムネ生成に失敗）", `filename: ${filename}`);
   } else {
     // フォールバック: Background XHR（Referer + クッキー付き）
     try {
@@ -3148,7 +3352,10 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     // 履歴の表示・lightbox・サムネ再生成は thumbId / savePaths 経由で imageUrl の dataURL を参照しない
     // （外部取込 entry は従来から imageUrl 空文字）。保存処理・サムネ生成は本関数引数の imageUrl を
     // そのまま使うため、entry への格納だけを空にしても保存フローへの影響はない。
-    imageUrl:     (typeof imageUrl === "string" && imageUrl.startsWith("data:")) ? "" : imageUrl,
+    // GROUP-151 v1.49.0：blob: も空文字化する。Blob 運搬化で変換 GIF の imageUrl は
+    // background が作った blob: URL になり、revoke 後・再起動後は二度と解決できない。
+    // 「解決不能な URL を履歴に残さない」という上記 v1.46.43 の意図は dataURL と同一。
+    imageUrl:     (typeof imageUrl === "string" && /^(data|blob):/i.test(imageUrl)) ? "" : imageUrl,
     pageUrl:      pageUrl       || null,
     thumbId,
     thumbWidth,

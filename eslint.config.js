@@ -168,7 +168,7 @@ module.exports = [
     },
   },
   {
-    // vendor / worker / decoders は本リポジトリ管理外コード or 別 module 体系（Web Worker ES modules）、lint 対象外
-    ignores: ["src/vendor/**", "src/worker/**", "src/decoders/**"],
+    // vendor / worker / decoders / encoders は本リポジトリ管理外コード or 別 module 体系（Web Worker ES modules）、lint 対象外
+    ignores: ["src/vendor/**", "src/worker/**", "src/decoders/**", "src/encoders/**"],
   },
 ];

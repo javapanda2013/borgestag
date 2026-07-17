@@ -43,10 +43,6 @@ const PHASE1_PARAMS = {
   // Phase 1.5 GROUP-28 mvdl：音声録音パラメータ
   AUDIO_MIME: "audio/webm; codecs=opus",
   AUDIO_EXT: "webm",
-  // GROUP-150 (v1.47.2)：うごイラ→GIF のメモリ暴走防止ガード。
-  // gifshot の images 経路は全コマの <img> を 1 tick で一斉に原寸デコードするため、
-  // コマ数上限（超過は等間隔間引き）＋入力の事前縮小（下記 initUgoira）で頭打ちにする。
-  UGOIRA_MAX_FRAMES: 300,
 };
 
 // ================================================================
@@ -295,42 +291,93 @@ async function _parseZip(buf) {
 }
 
 /**
- * GROUP-150：コマ数上限を超えるうごイラを等間隔で間引く。
- * 総再生尺を保つため、採用コマの delay を間引き後コマ数で按分し直す
- * （うごイラ変換は元々 delay 平均値で一律近似のため、総尺＝平均×コマ数を維持すれば再生尺は不変）。
+ * GROUP-150 v1.48.0：うごイラを原寸・全コマ・縮小なしでストリーミング GIF エンコードする。
+ * gifshot の images 一括方式（全コマを 1 tick で一斉に原寸デコード＋yield 無し LZW）を廃し、
+ * 使い捨て Module Worker（gif-encoder.worker.js）へ 1 コマずつ ImageData を transfer で渡し、
+ * Worker 側で「量子化(NeuQuant)→GifWriter.addFrame→出力バッファ追記」を逐次実行する。
+ * メイン側は 1 コマデコード→getImageData→送信→Worker の完了(PROGRESS)を待つ（backpressure）。
+ * 保持は「現コマの ImageData＋累積出力バッファ」に有界化＝原寸・全コマでもフリーズしない。
  */
-function _decimateUgoiraFrames(frames, maxN) {
-  if (frames.length <= maxN) return frames;
-  const totalDelay = frames.reduce((a, f) => a + (f.delay || 0), 0);
-  const step = frames.length / maxN;
-  const picked = [];
-  for (let i = 0; i < maxN; i++) picked.push(frames[Math.floor(i * step)]);
-  const evenDelay = Math.max(1, Math.round(totalDelay / picked.length));
-  return picked.map((f) => ({ ...f, delay: evenDelay }));
+function streamEncodeUgoiraGif(frameUrls, delays, onProgress) {
+  let settled = false;
+  let ackResolve = null;
+  let worker = null;
+  const cleanup = () => { try { if (worker) worker.terminate(); } catch (_) {} };
+  // 保留中の backpressure ack を解放して送信ループを解く（settled 後にループが FINISH を送らず抜ける）
+  const releaseAck = () => { if (ackResolve) { const r = ackResolve; ackResolve = null; r(); } };
+
+  let doReject = null, doResolve = null;
+  const promise = new Promise((resolve, reject) => { doResolve = resolve; doReject = reject; });
+  const fail = (err) => { if (!settled) { settled = true; cleanup(); releaseAck(); doReject(err); } };
+  const succeed = (bytes) => { if (!settled) { settled = true; cleanup(); doResolve(bytes); } };
+  // watchdog 等の外部から stuck Worker を terminate して中断する（Worker 累積を防ぐ）
+  const cancel = () => fail(new Error("cancelled"));
+
+  try {
+    worker = new Worker(
+      browser.runtime.getURL("src/encoders/gif-encoder.worker.js"),
+      { type: "module" }
+    );
+  } catch (e) { doReject(e); return { promise, cancel }; }
+
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "PROGRESS") {
+      if (onProgress) onProgress(m.done, m.total);
+      releaseAck();
+    } else if (m.type === "RESULT") {
+      succeed(new Uint8Array(m.gif));
+    } else if (m.type === "ERROR") {
+      fail(new Error(m.message));
+    }
+  };
+  worker.onerror = (e) => fail(new Error((e && e.message) || "encoder worker error"));
+
+  (async () => {
+    try {
+      let size = null;
+      let ctx = null;
+      for (let i = 0; i < frameUrls.length && !settled; i++) {
+        const img = new Image();
+        img.src = frameUrls[i];
+        await img.decode();
+        if (!size) {
+          // 原寸は先頭コマのデコード後の実寸から取る（previewImg 非依存＝未デコード時の縮退競合を排除）。
+          size = { w: img.naturalWidth || 1, h: img.naturalHeight || 1 };
+          const canvas = document.createElement("canvas");
+          canvas.width = size.w;
+          canvas.height = size.h;
+          ctx = canvas.getContext("2d", { willReadFrequently: true });
+          worker.postMessage({ type: "INIT", width: size.w, height: size.h, loop: 0 });
+        }
+        ctx.clearRect(0, 0, size.w, size.h);
+        ctx.drawImage(img, 0, 0, size.w, size.h);
+        const imgData = ctx.getImageData(0, 0, size.w, size.h);
+        const buf = imgData.data.buffer;
+        const acked = new Promise((r) => { ackResolve = r; });
+        worker.postMessage({
+          type: "FRAME", index: i, total: frameUrls.length,
+          rgba: buf, width: size.w, height: size.h, delayMs: delays[i],
+        }, [buf]);
+        await acked; // backpressure：Worker が当該コマを処理し終えるまで次を送らない
+      }
+      if (!settled) worker.postMessage({ type: "FINISH" });
+    } catch (err) {
+      fail(err);
+    }
+  })();
+
+  return { promise, cancel };
 }
 
-/**
- * GROUP-150：1 コマ分の原寸バイト列を、出力サイズ（computeGifSize）まで縮小した
- * JPEG blob URL に変換する。原寸画像はこの関数内で 1 枚だけ生成→即 revoke するため、
- * 全コマを原寸で同時保持する gifshot の暴走（支配項 B）を上流で断つ。
- * 縮小に失敗した場合は null を返し、呼び出し側が原寸へ退避する。
- */
-async function _downscaleFrameToUrl(data, mime, targetW, targetH) {
-  const srcUrl = URL.createObjectURL(new Blob([data], { type: mime }));
-  try {
-    const img = new Image();
-    img.src = srcUrl;
-    await img.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = targetW;
-    canvas.height = targetH;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, targetW, targetH);
-    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
-    return blob ? URL.createObjectURL(blob) : null;
-  } finally {
-    URL.revokeObjectURL(srcUrl);
+/** GROUP-150 v1.48.0：GIF バイト列を base64 dataURL 化。巨大時は文字列上限で throw（呼出側で明示エラー） */
+function _gifBytesToDataUrl(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
+  return "data:image/gif;base64," + btoa(binary);
 }
 
 /** うごイラ：frames（{file, delay} 列）と ZIP からフレーム blob URL 列を構築して変換フローを設定 */
@@ -351,50 +398,17 @@ async function initUgoira(cap, pageUrl) {
   }
   cap.buffer = null; // 巨大 payload null 代入（展開後、GROUP-82 規約）
 
-  // GROUP-150：コマ数上限（超過は等間隔間引き）＋各コマを出力サイズへ事前縮小してから blob 化。
-  // 先頭コマの原寸から出力サイズを確定し、以降のコマを同サイズへ逐次縮小する。原寸画像は
-  // _downscaleFrameToUrl 内で 1 枚ずつ生成→即 revoke するため、全コマ原寸同時保持を上流で断つ。
-  const workFrames = _decimateUgoiraFrames(frames, PHASE1_PARAMS.UGOIRA_MAX_FRAMES);
-  if (workFrames.length < frames.length) {
-    log(`コマ数が多いため ${frames.length} → ${workFrames.length} コマへ間引きます（再生尺は維持）。`);
-  }
+  // GROUP-150 v1.48.0：うごイラは原寸・全コマ・縮小/再エンコードなし。各コマは ZIP 内の
+  // 原寸バイトをそのまま blob URL 化する（圧縮 JPEG のまま保持＝メモリはコマ数×圧縮JPEG に有界）。
+  // 原寸 RGBA への展開はエンコード時に 1 コマずつ行い（streamEncodeUgoiraGif の backpressure）、
+  // 全コマを原寸で同時保持しない。間引き・出力縮小は行わない（サイズ・解像度を落とさない）。
   const frameUrls = [];
   const delays = [];
-  let targetSize = null;
-  let prepared = 0;
-  for (const f of workFrames) {
+  for (const f of frames) {
     const data = entries[f.file];
     if (!data) continue;
-    if (!targetSize) {
-      // 先頭コマだけ原寸をデコードして出力サイズ（computeGifSize）を確定
-      const probe = URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" }));
-      try {
-        const probeImg = new Image();
-        probeImg.src = probe;
-        await probeImg.decode();
-        targetSize = computeGifSize(probeImg.naturalWidth || 480, probeImg.naturalHeight || 360);
-      } catch (_) {
-        targetSize = computeGifSize(480, 360);
-      } finally {
-        URL.revokeObjectURL(probe);
-      }
-    }
-    let url = null;
-    try {
-      url = await _downscaleFrameToUrl(data, cap.frameMime || "image/jpeg", targetSize.w, targetSize.h);
-    } catch (_) {
-      url = null;
-    }
-    if (!url) {
-      // 縮小失敗時は原寸で退避（極稀）
-      url = URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" }));
-    }
-    frameUrls.push(url);
+    frameUrls.push(URL.createObjectURL(new Blob([data], { type: cap.frameMime || "image/jpeg" })));
     delays.push(f.delay || 100);
-    prepared++;
-    if (prepared % 20 === 0 || prepared === workFrames.length) {
-      log(`コマを準備中… ${prepared}/${workFrames.length}`);
-    }
   }
   entries = null;
   if (!frameUrls.length) {
@@ -427,13 +441,8 @@ async function initUgoira(cap, pageUrl) {
   pimg.style.borderRadius = "6px";
   video.parentNode.insertBefore(pimg, video);
 
-  if (typeof gifshot === "undefined") {
-    log("gifshot ライブラリの読込に失敗しました。", "error");
-    document.getElementById("convert-btn").disabled = true;
-    return;
-  }
   document.getElementById("convert-btn").addEventListener("click", () => {
-    runUgoiraConversion(frameUrls, avgMs, pageUrl, pimg);
+    runUgoiraConversion(frameUrls, delays, pageUrl);
   });
   document.getElementById("cancel-btn").addEventListener("click", () => {
     window.close();
@@ -441,33 +450,34 @@ async function initUgoira(cap, pageUrl) {
   log(`うごイラを受領しました（${frameUrls.length} コマ）。「GIF に変換」で開始します。`);
 }
 
-/** うごイラ：コマ列 → GIF 変換（コマ間隔は平均値で一律近似） */
-function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
+/** うごイラ：コマ列 → GIF 変換（原寸・全コマ・per-frame delay、ストリーミングエンコード） */
+function runUgoiraConversion(frameUrls, delays, pageUrl) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
   updateProgress(0);
-  const w = previewImg.naturalWidth || 480;
-  const h = previewImg.naturalHeight || 360;
-  const size = computeGifSize(w, h);
   const startTime = Date.now();
 
-  // GROUP-150：変換完了/失敗時にフレーム blob を逐次解放（unload 依存の常駐を解消）
+  // 変換完了/失敗時にフレーム blob を解放（成功終端のみ。失敗時は「再試行」のため保持し unload に委ねる）
   const cleanupFrames = () => {
     try { frameUrls.forEach((u) => URL.revokeObjectURL(u)); } catch (_) {}
   };
 
-  // GROUP-150：進捗停止検知ウォッチドッグ（動画パス runVideoConversion 相当をうごイラにも）。
-  // Worker 停止など「進捗が止まったまま」を検知し、強制終了以外の回復手段（再試行）を与える。
+  // 進捗停止検知ウォッチドッグ（Worker 停止などを検知し、強制終了以外の回復手段＝再試行を与える）。
+  // PROGRESS は 1 コマごとに来るため、単一コマが STALL_MS 以上進まなければタイムアウトとみなす。
+  // 発火時は enc.cancel() で stuck Worker を terminate する（再試行での Worker 累積を防ぐ）。
+  let enc = null;
+  const STALL_MS = 60_000;
   let lastProgressAt = Date.now();
-  let reached100 = false;
-  const encodeTimeoutMs = Math.max(60_000, frameUrls.length * 250);
+  let watchdogFired = false;
   const encodeTimeout = setInterval(() => {
-    if (reached100 && Date.now() - lastProgressAt > encodeTimeoutMs) {
+    if (Date.now() - lastProgressAt > STALL_MS) {
       clearInterval(encodeTimeout);
+      watchdogFired = true;
+      if (enc) enc.cancel();
       log(
-        `⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
-        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認してください。",
+        `⚠ エンコードが ${Math.round(STALL_MS / 1000)} 秒進捗しませんでした。` +
+        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認のうえ再試行してください。",
         "error"
       );
       btn.disabled = false;
@@ -475,42 +485,41 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
     }
   }, 5_000);
 
-  gifshot.createGIF({
-    images: frameUrls,
-    gifWidth: size.w,
-    gifHeight: size.h,
-    interval: Math.max(0.02, avgDelayMs / 1000),
-    numWorkers: PHASE1_PARAMS.NUM_WORKERS,
-    progressCallback: (p) => {
-      updateProgress(p);
-      lastProgressAt = Date.now();
-      if (p >= 1.0 && !reached100) {
-        reached100 = true;
-        log("キャプチャ完了、GIF エンコード中…");
-      } else {
-        log(`変換中… ${Math.round(p * 100)}%`);
-      }
-    },
-  }, async (obj) => {
+  enc = streamEncodeUgoiraGif(frameUrls, delays, (done, total) => {
+    lastProgressAt = Date.now();
+    updateProgress(done / total);
+    log(`変換中… ${done}/${total} コマ`);
+  });
+  enc.promise.then(async (gifBytes) => {
     clearInterval(encodeTimeout);
-    if (obj.error) {
-      // 失敗時は frameUrls を解放しない（「再試行」が同じ frameUrls を再利用するため）。
-      // 最終的な解放は unload ハンドラに委ねる。
-      log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
+    if (watchdogFired) return; // タイムアウト表示後に遅れて完了しても二重処理しない
+
+    // Uint8Array → base64 dataURL（既存の保存経路に載せる）。巨大出力は文字列上限で throw ＝
+    // 明示エラーで受ける（サイズ低下はしない。真の巨大対応＝chunk/binary は GROUP-144 で本対応）。
+    let dataUrl;
+    try {
+      dataUrl = _gifBytesToDataUrl(gifBytes);
+    } catch (_convErr) {
+      log(
+        `GIF が大きすぎて保存用データに変換できません（約 ${(gifBytes.length / 1024 / 1024).toFixed(1)} MB）。` +
+        "コマ数の少ないうごイラでお試しください（巨大 GIF の保存は今後対応予定）。",
+        "error"
+      );
       btn.disabled = false;
       btn.textContent = "再試行";
       hideProgress();
       return;
     }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const approxSize = (obj.image.length * 0.75 / 1024 / 1024).toFixed(1);
+    const approxSize = (gifBytes.length / 1024 / 1024).toFixed(1);
     log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。保存モーダルを起動しています…`, "success");
     updateProgress(1);
     try {
       const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
       await browser.runtime.sendMessage({
         type: "STASH_CONVERSION_PAYLOAD",
-        imageUrl: obj.image,
+        imageUrl: dataUrl,
         pageUrl: pageUrl || "",
         suggestedFilename: `ugoira-${ts}.gif`,
         associatedAudio: null,
@@ -523,6 +532,14 @@ function runUgoiraConversion(frameUrls, avgDelayMs, pageUrl, previewImg) {
       btn.disabled = false;
       btn.textContent = "再試行";
     }
+  }).catch((err) => {
+    clearInterval(encodeTimeout);
+    if (watchdogFired) return;
+    // 失敗時は frameUrls を解放しない（「再試行」で再利用するため）。解放は unload に委ねる。
+    log(`変換失敗: ${(err && err.message) || err}`, "error");
+    btn.disabled = false;
+    btn.textContent = "再試行";
+    hideProgress();
   });
 }
 

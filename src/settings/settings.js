@@ -6715,7 +6715,7 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
   if (existing) existing.remove();
 
   let currentIdx = startIndex;
-  const total = dataUrls.length;
+  let total = dataUrls.length; // 全体ナビで単独 entry 表示に切替えた際は 1 に更新（updateView が counter/nav に使用）
 
   // 読み進める方向設定を取得（デフォルト: rtl = 右→左 = ◀で次ページ）
   browser.storage.local.get("groupReadDirection").then(({ groupReadDirection }) => {
@@ -6767,7 +6767,8 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     // ボタンへ伝播しない）。entry 切替・クローズで player/音声とも破棄する。
     let lbPlayer = null;
     let lbAudio = null; // { audio, blobUrl, entryId }
-    let lbGen = 0;      // updateView 世代（entry 切替後に届く stale onError/fallback を無害化）
+    let lbGen = 0;      // 表示世代（entry 切替・クローズ後に届く stale 応答を無害化）
+    let lbClosed = false; // closeLb 済みフラグ（音声読込 await 中に閉じた場合の孤児再生防止）
     function _lbDestroyPlayer() {
       if (lbPlayer) { try { lbPlayer.destroy(); } catch (_) {} lbPlayer = null; }
     }
@@ -6821,26 +6822,16 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     function openGlobalEntry(gIdx) {
       const entry = _globalData[gIdx];
       if (!entry) return;
-      // GROUP-15 ライトボックス連動（レビュー指摘 B-2）：全体ナビ ▲▼ でも suspend を新 entry へ差し替え
-      // （前の entry 分はヘルパー内で先に再開される）
-      _lbSuspendEntryTile(entry);
-      if (entry.thumbId) {
-        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-          .then(r => {
-            const url = r?.dataUrl || "";
-            img.src = url;
-            img.alt = entry.filename || "";
-            counter.textContent = "1 / 1";
-            filenameEl.textContent = entry.filename || "";
-            updateGlobalLabel();
-            setFixedNavPositions();
-          }).catch(() => {});
-      } else {
-        img.src = ""; img.alt = entry.filename || "";
-        counter.textContent = "1 / 1";
-        filenameEl.textContent = entry.filename || "";
-        updateGlobalLabel();
-      }
+      // v1.50.0 UAT NG 対応：従来は img 直更新のみで updateView を迂回していたため、
+      // ①旧 LB player / LB 音声が破棄されず（音声が鳴り続ける）②GIF の canvas 表示に切替わらず
+      // ③items 未差替でナビ後の音声ボタンが別 entry の音声を鳴らす、の 3 点が壊れていた。
+      // items/dataUrls を単独 entry（1/1 表示）に差し替えて updateView へ一元化する
+      // （破棄・GIF canvas 化・音声ボタン更新・suspend 差し替えはすべて updateView 内で行われる）。
+      // 呼出元の配列を汚さないよう再代入（updateView は closure 変数経由で参照するため追従する）。
+      items = [entry];
+      dataUrls = [null];
+      total = 1;
+      updateView(0);
     }
 
     upBtn.addEventListener("click", (e) => { e.stopPropagation(); goGlobalPrev(); });
@@ -6891,6 +6882,8 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
           browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
             .then(r => { if (r?.dataUrl && gen === lbGen) { img.src = r.dataUrl; dataUrls[idx] = r.dataUrl; } })
             .catch(() => {});
+        } else {
+          img.src = ""; // dataUrl もサムネも無い entry：前の画像を残さない（全体ナビの旧挙動と同じ明示クリア）
         }
       };
       if (entry && entry.thumbId && _isGifEntry(entry) && window.BTGifAudio) {
@@ -6931,6 +6924,9 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         audioBtn.style.display = "";
         audioBtn.dataset.muted = "1";
         audioBtn.textContent = "🔇";
+        // 読込 await 中に切替えると handler 側の disabled=false がスキップされるため、ここで確実に解除
+        //（解除しないと切替先のボタンが disabled のまま固着しクリック不能になる）
+        audioBtn.disabled = false;
         audioBtn.title = `音声再生: ${entry.audioFilename}`;
       } else {
         audioBtn.style.display = "none";
@@ -6962,6 +6958,11 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         setTimeout(() => { try { audioBtn.textContent = t0; } catch (_) {} }, 900);
         return;
       }
+      // 音声読込〜再生は await を跨ぐ。この間に閉じる/entry 切替が起きると、閉じた後にロード完了→
+      // 再生開始して止める手段がなくなる（v1.50.0 UAT NG：閉じてもプレビュー音声が鳴り続ける）。
+      // 世代を取り、各 await 後に「閉じていない・同じ表示のまま」を確認してから進める。
+      const gen0 = lbGen;
+      const aborted = () => lbClosed || gen0 !== lbGen;
       if (!lbAudio || lbAudio.entryId !== entry.id) {
         _lbAudioStop();
         audioBtn.disabled = true;
@@ -6976,6 +6977,7 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         }
         const audioFilePath = primary.replace(/[\\/]+$/, "") + "\\" + entry.audioFilename;
         const blob = await BTFiles.readFileChunksBlob(audioFilePath, entry.audioMimeType || "audio/webm");
+        if (aborted()) return; // 読込中に閉じた/切替えた＝音声を作らない（孤児再生防止）
         if (!blob) {
           console.warn("[lb-audio] 音声読込失敗", { path: audioFilePath });
           audioBtn.textContent = t0; audioBtn.disabled = false;
@@ -6989,9 +6991,13 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         audioBtn.disabled = false;
       }
       try {
-        await lbAudio.audio.play();
+        // play 解決前に閉じた/切替えた場合に止めるのは「この呼び出しが再生した音声」だけにする
+        //（極端な順序で後続クリックの新音声を誤停止しないよう、await 前に自分の対象を捕まえる）
+        const myAudio = lbAudio;
+        await myAudio.audio.play();
+        if (aborted()) { try { myAudio.audio.pause(); } catch (_) {} return; }
         // GIF なら追従駆動へ（逆算・協調ループ・停止検知はコアが担う）
-        if (lbPlayer) lbPlayer.followAudio(lbAudio.audio, "lb-" + entry.id);
+        if (lbPlayer) lbPlayer.followAudio(myAudio.audio, "lb-" + entry.id);
         audioBtn.dataset.muted = "0";
         audioBtn.textContent = "🔊";
       } catch (err) {
@@ -7015,6 +7021,8 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     // 矢印キーで updateView→suspend が発火し、タイルが停止されたまま復帰不能になる）
     // GROUP-142 Stage 5：LB player / LB 音声もクローズで必ず破棄（Worker session・Blob URL の leak 防止）
     const closeLb = () => {
+      lbClosed = true; // 音声読込 await 中に閉じた場合、読込完了側が再生を開始しない（孤児再生防止）
+      lbGen++;
       overlay.remove();
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", onResize);

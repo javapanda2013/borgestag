@@ -796,6 +796,63 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
     }
   }, 5_000);
 
+  // ----------------------------------------------------------------
+  // GROUP-152：gifshot の単位変換バグ対策（GIF の時間情報 delay=0 の正書き）
+  //
+  // gifshot は下の interval（秒、0.1）を内部でミリ秒扱いの delay オプションへ流し、さらに
+  // ×0.1 の単位変換を掛けるため 0.1→0.01 となり、GIF 書込のビット演算で整数 0 に切り捨てられる
+  // ＝**全コマ GCE delay=0**（時間情報なし）の GIF が生成される。0 を「最速」と解釈する再生系
+  // （多くの外部アプリ・一部のブラウザ内 img 表示）では早送りになり、音声と乖離する（UAT 実害）。
+  // vendored minified を触らず、生成直後にブロック構造を正しく歩いて delay を 10cs=100ms に
+  // 正書きする（バイトパターンの盲目置換は LZW 圧縮データ中の偶然一致を誤爆し得るため不可）。
+  // 恒久解＝動画も自前ストリーミングエンコーダへ移行（gifshot 撤去）は別途の大型対応で行う。
+  // ----------------------------------------------------------------
+  function _rewriteGifDelays(bytes, csWhenZero) {
+    if (bytes.length < 13 || bytes[0] !== 0x47 || bytes[1] !== 0x49 || bytes[2] !== 0x46) {
+      throw new Error("GIF ヘッダではありません");
+    }
+    let p = 6;
+    p += 4; // LSD: width(2) + height(2)
+    const packed = bytes[p]; p += 3; // packed, bgColor, aspect
+    if (packed & 0x80) p += 3 * (2 << (packed & 0x07)); // Global Color Table
+    let rewritten = 0;
+    const skipSubBlocks = () => {
+      while (p < bytes.length && bytes[p] !== 0) p += 1 + bytes[p];
+      p += 1; // block terminator
+    };
+    while (p < bytes.length) {
+      const b = bytes[p];
+      if (b === 0x3B) break; // trailer
+      if (b === 0x21) { // extension
+        const label = bytes[p + 1];
+        p += 2;
+        if (label === 0xF9) {
+          // GCE: size(=4), packed, delay_lo, delay_hi, transparentIdx, terminator
+          const size = bytes[p];
+          const delay = bytes[p + 2] | (bytes[p + 3] << 8);
+          if (delay === 0) {
+            bytes[p + 2] = csWhenZero & 0xFF;
+            bytes[p + 3] = (csWhenZero >> 8) & 0xFF;
+            rewritten++;
+          }
+          p += 1 + size;
+          skipSubBlocks();
+        } else {
+          skipSubBlocks();
+        }
+      } else if (b === 0x2C) { // image descriptor
+        p += 9; // separator(1) + left/top/w/h(8)
+        const ip = bytes[p]; p += 1;
+        if (ip & 0x80) p += 3 * (2 << (ip & 0x07)); // Local Color Table
+        p += 1; // LZW min code size
+        skipSubBlocks();
+      } else {
+        throw new Error(`未知の GIF ブロック 0x${b.toString(16)} @${p}`);
+      }
+    }
+    return rewritten;
+  }
+
   gifshot.createGIF({
     video: [videoUrl],
     gifWidth: size.w,
@@ -827,7 +884,34 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const approxSize = (obj.image.length * 0.75 / 1024 / 1024).toFixed(1);
+
+    // GROUP-152：gifshot の dataURL をバイト列に戻し、GCE delay=0 を 10cs（100ms）へ正書きして
+    // Blob 化する。以降は Blob 運搬（うごイラと同じ stage1 基盤＝巨大 dataURL の再送を避ける）。
+    // 書換に失敗しても変換自体は無駄にしない（従来どおり delay=0 のまま進める＝現状より悪化しない）。
+    let gifBlob = null;
+    try {
+      // fetch は data: URL を直接 ArrayBuffer 化できる。slice+atob 方式だと dataURL 複製＋中間
+      // binary 文字列で 126MB GIF 時に瞬間 ~1GB 併存するため採らない（独立レビュー P1 反映）。
+      const buf = await (await fetch(obj.image)).arrayBuffer();
+      obj.image = null; // 巨大 dataURL の参照を即切る（GROUP-82 規約）
+      const bytes = new Uint8Array(buf);
+      try {
+        // 書込値は centisec。100/FPS（FPS=10 なら 10cs=100ms）＝numFrames=実尺×FPS の前提と
+        // 自己整合させる（FPS 定数を変えても不整合にならない。レビュー P2 反映）
+        const n = _rewriteGifDelays(bytes, Math.round(100 / PHASE1_PARAMS.FPS));
+        log(`GIF の時間情報を正書きしました（${n} コマ、${Math.round(1000 / PHASE1_PARAMS.FPS)}ms/コマ）`);
+      } catch (rwErr) {
+        console.warn("[video_convert] GIF delay 正書き失敗（無変換で続行）", rwErr);
+      }
+      gifBlob = new Blob([bytes], { type: "image/gif" });
+    } catch (decErr) {
+      log(`変換結果の後処理に失敗しました: ${decErr.message}`, "error");
+      btn.disabled = false;
+      btn.textContent = "再試行";
+      hideProgress();
+      return;
+    }
+    const approxSize = (gifBlob.size / 1024 / 1024).toFixed(1);
 
     // Phase 1.5 GROUP-28 mvdl：音声録音完了を待つ
     log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。音声録音完了待ち…`, "success");
@@ -885,17 +969,18 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
         }
       }
 
-      // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload（imageUrl 10MB + audio 5MB）を
-      // storage.local._pendingModal に入れると Firefox の onChanged broadcast で
-      // 全 extension context にクローンされ 8GB 級メモリ膨張でタブクラッシュしていた。
-      // → background.js のメモリに stash し、_pendingModal はフラグだけにする。
+      // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload を storage.local._pendingModal に入れると
+      // onChanged broadcast で全 context にクローンされ 8GB 級膨張していた → background メモリへ stash。
+      // GROUP-152：GIF は **Blob** で渡す（delay 正書き済み）。Blob の structured clone は実体を
+      // コピーしないため、巨大 dataURL の再送・保存時の overflow 系リスクもうごイラ同様に解消される。
       await browser.runtime.sendMessage({
         type: "STASH_CONVERSION_PAYLOAD",
-        imageUrl: obj.image,
+        imageBlob: gifBlob,
         pageUrl: pageUrl || "",
         suggestedFilename,
         associatedAudio,
       });
+      gifBlob = null; // 送信後に参照を切る（GROUP-82 規約。Blob 実体は background 側が保持）
 
       // GROUP-33-T1 (v1.46.51)：自動遷移 ON は保存ウィンドウへ、OFF はボタン表示
       await _routeAfterConvert();

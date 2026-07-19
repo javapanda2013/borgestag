@@ -2604,6 +2604,10 @@ async function deleteThumbFromIDB(thumbId) {
       const store = tx.objectStore(IDB_STORE);
       store.delete(thumbId);
       tx.oncomplete = () => resolve();
+      // GROUP-153 v1.50.4：tx が error/abort で終わると oncomplete が発火せず await が永久停止し
+      // 呼出元（サムネ生成ループ等）が固まる。削除失敗は孤児 blob 許容なので resolve で流す
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
     });
   } catch { /* 無視 */ }
   // v1.35.0：IDB から消したのでキャッシュも整合
@@ -2823,6 +2827,7 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 
   let generated = 0, skipped = 0, failed = 0;
   let changed = false;
+  const changedIds = new Set(); // GROUP-153：実際にサムネを更新した entry のみ書き戻す
 
   for (const entry of targets) {
     const paths = Array.isArray(entry.savePaths)
@@ -2834,11 +2839,10 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
     if (!filePath) { skipped++; continue; }
 
     try {
-      // 上書きモードで既存サムネイルがある場合は先に削除
-      if (overwrite && entry.thumbId) {
-        await deleteThumbFromIDB(entry.thumbId);
-        entry.thumbId = null;
-      }
+      // GROUP-153 v1.50.4：上書きモードの旧サムネ削除は「新サムネ生成成功後」に行う。
+      // 旧実装は先に削除していたため、生成失敗（ファイル移動・読込失敗等）でその entry の
+      // サムネだけ失われ復元されなかった。旧 ID を控えて成功時にのみ削除する。
+      const oldThumbId = (overwrite && entry.thumbId) ? entry.thumbId : null;
 
       // v1.22.9: GIF はアニメーションを保持したまま分割取得する別経路を使う。
       // 1. Python 側 MAKE_GIF_THUMB_FILE で縮小 GIF を一時ファイルへ書き出す
@@ -2862,11 +2866,16 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
         }
         const gifBlob = _assembleBlobFromChunksB64(chunkRes.chunksB64, thumbRes.mime || "image/gif");
         const thumbId = await saveThumbToIDB(gifBlob);
+        // 新サムネ確定後に旧サムネを削除（GROUP-153。削除失敗は孤児 blob が残るだけなので警告のみ）
+        if (oldThumbId && oldThumbId !== thumbId) {
+          try { await deleteThumbFromIDB(oldThumbId); } catch (e) { addLog("WARN", "旧サムネイル削除失敗", e.message); }
+        }
         entry.thumbId     = thumbId;
         entry.thumbWidth  = thumbRes.width  || null;
         entry.thumbHeight = thumbRes.height || null;
         generated++;
         changed = true;
+        changedIds.add(entry.id);
         addLog("INFO", `GIF サムネイル生成: ${entry.filename}`, `size=${gifBlob.size} ${thumbRes.width || "?"}x${thumbRes.height || "?"}`);
         continue;
       }
@@ -2905,11 +2914,16 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
 
       const thumbId = await saveThumbToIDB(thumbBlob);
       thumbBlob = null; // IDB put 完了後、外側参照不要
+      // 新サムネ確定後に旧サムネを削除（GROUP-153）
+      if (oldThumbId && oldThumbId !== thumbId) {
+        try { await deleteThumbFromIDB(oldThumbId); } catch (e) { addLog("WARN", "旧サムネイル削除失敗", e.message); }
+      }
       entry.thumbId     = thumbId;
       entry.thumbWidth  = tw;
       entry.thumbHeight = th;
       generated++;
       changed = true;
+      changedIds.add(entry.id);
       addLog("INFO", `サムネイル生成: ${entry.filename}`);
     } catch (err) {
       // v1.22.8: エラー型・メッセージ・スタック・対象パスを明記して原因特定を容易にする
@@ -2923,9 +2937,12 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
     // v1.46.11 GROUP-69：mutex 内で fresh saveHistory を再 read し、本ループで更新した
     // entry の thumbId / thumbWidth / thumbHeight だけを id 一致で merge して書き戻す。
     // 並列保存で entry が増えていても fresh を base にするので保存履歴は失われない。
+    // GROUP-153 v1.50.4：merge 対象を実際に更新した entry（changedIds）に限定。旧実装は全 entry を
+    // 書き戻していたため、意図（コメント記載）と乖離し、他 context の同時 thumb 更新を古い snapshot で
+    // 巻き戻すリスクと大量履歴での無駄 put があった。
     const updates = new Map();
     for (const e of history) {
-      if (e && e.id) {
+      if (e && e.id && changedIds.has(e.id)) {
         updates.set(e.id, { thumbId: e.thumbId, thumbWidth: e.thumbWidth, thumbHeight: e.thumbHeight });
       }
     }

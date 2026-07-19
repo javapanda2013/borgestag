@@ -163,6 +163,11 @@ async function _patchSaveHistory(patch = {}) {
   const putEntries = Array.isArray(patch.put) ? patch.put.filter(e => e && e.id) : [];
   const removeIds  = Array.isArray(patch.delete) ? patch.delete.filter(Boolean) : [];
   if (putEntries.length === 0 && removeIds.length === 0) return;
+  // GROUP-142 音声残留対策：entry の「データ削除」を知る唯一の choke point で音声を葬る。
+  // 単体削除・一括削除・期間削除・インポート取り消しの全ローカル削除がここを通る。
+  // （DOM 破棄点＝_destroyGifSessionsInTree に置かないこと：フィルタ・ページ送りでも発火し、
+  //   表示外の継続再生仕様と衝突する。データ削除点に置くのが正解）
+  for (const id of removeIds) _releaseHistAudio(id);
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -2414,6 +2419,9 @@ function _phaseC3SetHistoryData(fresh) {
 function _phaseC3PatchHistoryData(upsertEntries, removeIds) {
   const byId = new Map((_historyData || []).filter(e => e && e.id).map(e => [e.id, e]));
   for (const e of (upsertEntries || [])) if (e && e.id) byId.set(e.id, e);
+  // GROUP-142 音声残留対策：クロスコンテキスト削除（別画面で削除→本画面へ通知）は
+  // _patchSaveHistory を通らずここへ来る。データ削除のもう一つの choke point として音声を葬る
+  for (const id of (removeIds || [])) _releaseHistAudio(id);
   for (const id of (removeIds || [])) byId.delete(id);
   const arr = Array.from(byId.values());
   arr.sort((a, b) => {
@@ -5147,6 +5155,32 @@ function _updateHistCount() {
 // ================================================================
 const _histAudioCache = new Map();   // entry.id → {audio: HTMLAudioElement, blobUrl: string}
 const _histAudioPlayingIds = new Set(); // 現在再生中の entry.id の集合（複数同時 OK）
+
+// GROUP-142 音声残留対策（v1.50.2）：entry の「データ削除」時に音声資源を完全に葬る一元ヘルパー。
+// 呼出点＝_patchSaveHistory（ローカル削除の choke point）と _phaseC3PatchHistoryData（クロス
+// コンテキスト削除）。音声残留 2 回目の再発（削除後も鳴り続ける）を受けた全数調査で、削除系
+// 6 経路すべてが音声 4 要素（pause / cache / blobUrl / playingIds）を放置していたことが判明。
+// 表示から消えただけ（フィルタ・ページ送り）は従来仕様どおり継続再生＝ここでは呼ばない。
+function _releaseHistAudio(entryId) {
+  if (!entryId) return;
+  const cached = _histAudioCache.get(entryId);
+  if (cached) {
+    try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+    try { if (cached.blobUrl) URL.revokeObjectURL(cached.blobUrl); } catch (_) {}
+    _histAudioCache.delete(entryId);
+  }
+  _histAudioPlayingIds.delete(entryId);
+  // コアの追従は pause 検知で自己停止するが、明示解除で確実化（rAF を即座に畳む）。
+  // token=entryId 指定で「この entry が駆動中の時だけ」解除（同一サムネ共有タイルで別 entry が
+  // 後勝ち駆動中の場合、生存側の追従を誤って止めない。レビュー P2 対応）
+  for (const tile of _gifSessions.values()) {
+    if (tile.entryId === entryId && tile.player && tile.player.unfollow) {
+      try { tile.player.unfollow(entryId); } catch (_) {}
+    }
+  }
+  // クロスコンテキスト削除では DOM 除去が別経路のため、残存ボタンの表示も戻す
+  _updateAudioButtonsForEntry(entryId, false);
+}
 
 function _updateAudioButtonsForEntry(entryId, playing) {
   // DOM 上の該当エントリの🔇/🔊ボタン（複数箇所：hist-card / Lightbox）を一括更新

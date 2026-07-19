@@ -296,7 +296,12 @@
       },
       resume: () => { p.suspended = false; p.paused = true; _resumeIfNeeded(p); },
       followAudio: (audio, token) => _followAudio(p, audio, token),
-      unfollow: () => _followStop(p),
+      // token 指定時は「その token が駆動中の時だけ」解除（同一サムネ共有で別 entry が後勝ち駆動中に、
+      // 削除された entry の解放が生存側の追従を誤って止めないため）。無指定は従来どおり無条件解除。
+      unfollow: (token) => {
+        if (token !== undefined && p.audioToken !== token) return;
+        _followStop(p);
+      },
       // rebind：dormant（canvas=null）→ 別 canvas へ貼り直して描画継続（pool の再表示）。
       rebind: (newCanvas) => {
         if (p.timerId) { try { clearTimeout(p.timerId); } catch (_) {} p.timerId = null; }

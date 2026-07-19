@@ -99,6 +99,11 @@ async function _patchSaveHistory(patch = {}) {
   const putEntries = Array.isArray(patch.put) ? patch.put.filter(e => e && e.id) : [];
   const removeIds  = Array.isArray(patch.delete) ? patch.delete.filter(Boolean) : [];
   if (putEntries.length === 0 && removeIds.length === 0) return;
+  // GROUP-142 音声残留対策：データ削除の choke point（settings 側と対称）。modal は現状ローカル削除
+  // UI を持たないが、将来の削除経路が生まれてもここで音声が葬られる（closure 外のため window 経由）
+  if (typeof window.__modalReleaseAudio === "function") {
+    for (const id of removeIds) window.__modalReleaseAudio(id);
+  }
   const status = await browser.storage.local.get("saveHistoryMigrationStatus");
   const migrated = status.saveHistoryMigrationStatus === "migrated";
   if (migrated) {
@@ -180,6 +185,12 @@ function _phaseC3ScheduleHistoryRefresh(targetId, kind) {
       // v1.46.16 GROUP-73 Phase C-3-fix：saveHistory / renderHistory は setupModalEvents の
       // closure のため、expose された window アクセサ経由で更新＋再描画する。
       if (typeof window.__modalSetSaveHistory !== "function" || typeof window.__modalRenderHistory !== "function") return;
+      // GROUP-142 音声残留対策（v1.50.2）：クロスコンテキスト削除（settings 側で削除→本窓へ通知）で
+      // entry がデータから消える唯一の集中点。full 経路／差分経路の両分岐が使う removeIds をここで
+      // 一括処理し、消える entry の音声（cache・blobUrl・playingIds・コア追従）を葬る。
+      if (typeof window.__modalReleaseAudio === "function") {
+        for (const id of removeIds) window.__modalReleaseAudio(id);
+      }
       const status   = await browser.storage.local.get("saveHistoryMigrationStatus");
       const migrated = status.saveHistoryMigrationStatus === "migrated";
       // full 信号 or 未移送：全件 GET（従来挙動）
@@ -2290,6 +2301,25 @@ function setupModalEvents(
       btn.textContent = playing ? "🔊" : "🔇";
     });
   }
+
+  // GROUP-142 音声残留対策（v1.50.2、settings._releaseHistAudio と対称）：entry の「データ削除」時に
+  // 音声資源を完全に葬る一元ヘルパー。modal は自ら削除しないため、呼出点はクロスコンテキスト削除の
+  // 集中点 _phaseC3ScheduleHistoryRefresh（top-level のため window 経由で公開）。
+  function _releaseModalAudio(entryId) {
+    if (!entryId) return;
+    const cached = _modalAudioCache.get(entryId);
+    if (cached) {
+      try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+      try { if (cached.blobUrl) URL.revokeObjectURL(cached.blobUrl); } catch (_) {}
+      _modalAudioCache.delete(entryId);
+    }
+    _modalAudioPlayingIds.delete(entryId);
+    const pl = _modalGifPlayers.get(entryId);
+    // token=entryId 指定で「この entry が駆動中の時だけ」解除（コア側の token 一致ガードと対）
+    if (pl && pl.unfollow) { try { pl.unfollow(entryId); } catch (_) {} }
+    _modalUpdateAudioButtonsForEntry(entryId, false);
+  }
+  window.__modalReleaseAudio = _releaseModalAudio;
 
   async function _modalToggleAudio(entry, btn) {
     const existing = _modalAudioCache.get(entry.id);

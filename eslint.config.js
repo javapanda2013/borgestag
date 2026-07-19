@@ -127,6 +127,9 @@ const browserGlobals = {
   // Vendor libraries（src/vendor/ で読込済の global 名）
   JSZip:             "readonly",
   gifshot:           "readonly",
+  // 共有部品（GROUP-142 派生・共有部品化。src/io / src/players で読込済の global 名）
+  BTFiles:           "readonly",
+  BTGifAudio:        "readonly",
   // プロジェクト固有 helpers（settings.js setupHistoryTab 内 local 関数を window 経由で expose、
   // modal.js でも top-level に同名関数を定義）。"writable" にすることで複数ファイルでの
   // 局所定義（redeclare）を許容しつつ、未定義参照（no-undef）は引き続き検出する設定。
@@ -134,8 +137,6 @@ const browserGlobals = {
   hideBusyModal:        "writable",
   completeBusyModal:    "writable",
   updateBusyMessage:    "writable",
-  _histAudioPlayingId:  "writable",
-  _histAudioStopCurrent: "writable",
 };
 
 module.exports = [

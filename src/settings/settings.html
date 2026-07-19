@@ -860,6 +860,12 @@
       border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6);
       object-fit: contain; cursor: default;
     }
+    /* GROUP-142 Stage 5：GIF は canvas 描画（コア追従・音声同期）。img と同じ収まり方 */
+    .lightbox-overlay canvas.lb-canvas {
+      max-width: 90vw; max-height: 90vh;
+      border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+      object-fit: contain; cursor: default;
+    }
     .lightbox-overlay .lb-close {
       position: fixed; top: 18px; right: 22px;
       background: rgba(255,255,255,.15); border: none; color: #fff;
@@ -1877,6 +1883,8 @@
 
   <!-- JSZip v3.10.1（MIT、GROUP-26-unzip / v1.30.0）: zip インポート展開用 -->
   <script src="../vendor/jszip.min.js"></script>
+  <script src="../io/ext-files.js"></script>
+  <script src="../players/gif-audio-player.js"></script>
   <script src="settings.js"></script>
 </body>
 </html>

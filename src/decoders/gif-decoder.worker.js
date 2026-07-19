@@ -22,11 +22,17 @@
 //
 // 注意：本ファイルは Phase 1 スケルトン。Phase 2 以降で：
 //   - decompressFrame の合成（disposal method）を main thread と分担する設計検討
-//   - LRU 上限（メモリ予算）の管理を追加
 //   - 複数 GIF 同時 decode のキューイング
+// LRU 上限（メモリ予算）は GROUP-142 派生・共有部品化 Stage 2（v1.50.0）で実装済み（下記 _decodeFrame）。
 // =============================================================================
 
 import { parseGIF, decompressFrame } from "../vendor/gifuct/index.js";
+
+// 1 セッションあたりの decode 済フレーム patch の合計バイト上限（LRU 退避の予算）。
+// うごイラ原寸化（v1.48.0）で 1 フレーム patch が数 MB になり、無制限だと全フレーム分（GB 級）を
+// 抱えてメモリ逼迫する。素朴レンダラは各フレームを独立 patch として描く（フレーム間 decode 依存なし）
+// ため、退避したフレームは後で再 decode すればビット単位で同一＝LRU 退避は無損失。
+const DECODE_CACHE_BUDGET_BYTES = 64 * 1024 * 1024;
 
 // ---- セッション状態 ---------------------------------------------------------
 // id（タイル単位の識別子）→ セッション
@@ -81,7 +87,8 @@ async function handleInit({ id, gifBuffer }) {
   _sessions.set(id, {
     gif,                  // parse 済（gct 参照・オンデマンド decode に使用）
     rawFrames,            // 未 decode のフレーム記述子（index 空間 = 旧 frames と同一）
-    decoded: new Map(),   // index → decompressFrame 結果（patch/dims）。オンデマンドで充填
+    decoded: new Map(),   // index → decompressFrame 結果（patch/dims）。オンデマンドで充填＋LRU 退避
+    decodedBytes: 0,      // decoded の patch 合計バイト（LRU 予算管理）
     delays,
     totalDelayMs,
     loopCount,
@@ -104,12 +111,30 @@ async function handleInit({ id, gifBuffer }) {
 
 // 指定 index のフレームをオンデマンド decode（cache 済ならそれを返す）。
 // GROUP-56：patch 生成後に pixels（中間 JS Array）を null 化して SpiderMonkey の retain を回避。
+// GROUP-142 派生・共有部品化 Stage 2：Map の挿入順を LRU として使う（cache hit で最後尾へ付け直し、
+// 予算超過時は先頭＝最古を退避）。予算内なら最低 1 枚（今回 decode した現フレーム）は必ず残す。
+function _framePatchBytes(fr) {
+  return (fr && fr.dims) ? (fr.dims.width * fr.dims.height * 4) : 0;
+}
 function _decodeFrame(sess, index) {
-  let fr = sess.decoded.get(index);
-  if (!fr) {
-    fr = decompressFrame(sess.rawFrames[index], sess.gif.gct, /* buildImagePatch */ true);
-    if (fr) fr.pixels = null;
-    sess.decoded.set(index, fr);
+  const hit = sess.decoded.get(index);
+  if (hit) {
+    // LRU touch：最後尾（最新）へ付け直す
+    sess.decoded.delete(index);
+    sess.decoded.set(index, hit);
+    return hit;
+  }
+  const fr = decompressFrame(sess.rawFrames[index], sess.gif.gct, /* buildImagePatch */ true);
+  if (fr) fr.pixels = null;
+  sess.decoded.set(index, fr); // 最後尾＝最新
+  sess.decodedBytes += _framePatchBytes(fr);
+  // 予算超過分を最古（先頭）から退避。現フレームは最後尾なので保持され、size>1 の間だけ退避する
+  //（＝どんなに巨大でも現フレーム 1 枚は必ず残す）。
+  while (sess.decodedBytes > DECODE_CACHE_BUDGET_BYTES && sess.decoded.size > 1) {
+    const oldestKey = sess.decoded.keys().next().value;
+    const oldest = sess.decoded.get(oldestKey);
+    sess.decoded.delete(oldestKey);
+    sess.decodedBytes -= _framePatchBytes(oldest);
   }
   return fr;
 }

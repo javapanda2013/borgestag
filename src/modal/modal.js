@@ -2276,6 +2276,10 @@ function setupModalEvents(
   // （settings.js 側の _histAudioCache と同等、modal ウィンドウごとに独立）
   const _modalAudioCache = new Map(); // entry.id → {audio, blobUrl}
   const _modalAudioPlayingIds = new Set();
+  // GROUP-142 Stage 6：履歴タブ GIF サムネの共有コア player（entry.id → player handle）。
+  // 再描画時は同 entry の旧 player を差し替え時に destroy、ページ送り等で DOM から外れた分は
+  // renderHistory 冒頭の sweep で destroy（Worker session / RAF の leak 防止）。
+  const _modalGifPlayers = new Map();
 
   // v1.33.0 GROUP-32-b：保存ウィンドウ側の選択状態管理（音声一括トグル用）
   const _modalHistSelected = new Set(); // 選択されている entry.id の集合
@@ -2289,10 +2293,23 @@ function setupModalEvents(
 
   async function _modalToggleAudio(entry, btn) {
     const existing = _modalAudioCache.get(entry.id);
-    if (existing && existing.audio && !existing.audio.paused) {
+    // GROUP-142 Stage 6：追従駆動中（協調ループの GIF master 待機＝audio.paused && ended）も
+    // 「再生中」として停止対象にする（paused だけ見ると待機中に停止できない）
+    const pl = _modalGifPlayers.get(entry.id);
+    const following = !!(pl && pl.isFollowing && pl.isFollowing());
+    if ((existing && existing.audio && !existing.audio.paused) || following) {
       try { existing.audio.pause(); existing.audio.currentTime = 0; } catch (_) {}
+      if (pl && pl.unfollow) pl.unfollow();
       _modalAudioPlayingIds.delete(entry.id);
       _modalUpdateAudioButtonsForEntry(entry.id, false);
+      return;
+    }
+
+    // GROUP-28（settings と同じガード）：GIF のアニメ準備（ready）前は音声を開始しない
+    if (pl && !pl.isReady()) {
+      const t0 = btn.textContent;
+      btn.textContent = "⏳";
+      setTimeout(() => { try { btn.textContent = t0; } catch (_) {} }, 900);
       return;
     }
 
@@ -2310,25 +2327,22 @@ function setupModalEvents(
     try {
       let cached = _modalAudioCache.get(entry.id);
       if (!cached) {
-        const res = await browser.runtime.sendMessage({ type: "READ_FILE_CHUNKS_B64", path: audioPath });
-        if (!res || !res.ok || !Array.isArray(res.chunksB64)) {
-          console.warn(`[modal-hist-audio] 音声読込失敗`, res?.error, { path: audioPath });
+        // 共有部品化 Stage 1：chunk 組立を BTFiles に一本化（挙動不変）
+        const blob = await BTFiles.readFileChunksBlob(audioPath, entry.audioMimeType || "audio/webm");
+        if (!blob) {
+          console.warn(`[modal-hist-audio] 音声読込失敗`, { path: audioPath });
           btn.textContent = originalText;
           btn.disabled = false;
           return;
         }
-        const arrays = [];
-        for (const b64 of res.chunksB64) {
-          const bin = atob(b64);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          arrays.push(arr);
-        }
-        const blob = new Blob(arrays, { type: entry.audioMimeType || "audio/webm" });
         const blobUrl = URL.createObjectURL(blob);
         const audio = new Audio(blobUrl);
-        audio.loop = true;
+        audio.loop = true; // 非 GIF 用既定。GIF 追従時はコアが協調制御で上書き
         audio.onpause = () => {
+          // GROUP-142 Stage 6（settings F1 と同型の予防）：協調ループは GIF>音声で loop=false にし
+          // 音声を毎サイクル鳴り切らせて再起動する。その「自然 end の pause」を停止と誤認しない。
+          const t = _modalGifPlayers.get(entry.id);
+          if (t && t.isFollowing && t.isFollowing()) return;
           if (audio.ended || audio.currentTime === 0) {
             _modalAudioPlayingIds.delete(entry.id);
             _modalUpdateAudioButtonsForEntry(entry.id, false);
@@ -2338,6 +2352,9 @@ function setupModalEvents(
         _modalAudioCache.set(entry.id, cached);
       }
       await cached.audio.play();
+      // GROUP-142 Stage 6：GIF サムネがあれば追従駆動へ（逆算・協調ループ・停止検知はコア）
+      const plNow = _modalGifPlayers.get(entry.id);
+      if (plNow) plNow.followAudio(cached.audio, entry.id);
       _modalAudioPlayingIds.add(entry.id);
       _modalUpdateAudioButtonsForEntry(entry.id, true);
     } catch (err) {
@@ -2380,10 +2397,15 @@ function setupModalEvents(
     showBusyModal(shouldStop ? "音声停止中…" : "音声再生開始中…", `${targets.length} 件`, historyData);
     try {
       if (shouldStop) {
+        // GROUP-142 Stage 6 追補（P1-B）：協調ループの GIF master 待機フェーズ（paused && ended・
+        // 追従中）も停止対象にする（!paused だけだとスキップされ停止できない）
         for (const entry of targets) {
           const cached = _modalAudioCache.get(entry.id);
-          if (cached && cached.audio && !cached.audio.paused) {
+          const pl = _modalGifPlayers.get(entry.id);
+          const following = !!(pl && pl.isFollowing && pl.isFollowing());
+          if ((cached && cached.audio && !cached.audio.paused) || following) {
             try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+            if (pl && pl.unfollow) pl.unfollow();
             _modalAudioPlayingIds.delete(entry.id);
             _modalUpdateAudioButtonsForEntry(entry.id, false);
           }
@@ -2989,6 +3011,15 @@ function setupModalEvents(
   function renderHistory() {
     const gen = ++_historyRenderGen; // この呼び出しの世代番号を確保
     const list = document.getElementById("history-list");
+    // GROUP-142 Stage 6：前回描画で DOM から外れた GIF サムネ player を破棄
+    //（Worker session / RAF の leak 防止。接続中＝smart reuse で残る canvas はそのまま）
+    for (const [eid, pl] of Array.from(_modalGifPlayers)) {
+      const cv = pl.getCanvas && pl.getCanvas();
+      if (!cv || !cv.isConnected) {
+        try { pl.destroy(); } catch (_) {}
+        _modalGifPlayers.delete(eid);
+      }
+    }
     // v1.46.15 GROUP-72 Phase C-3-opt：smart reuse モード判定。
     // v1.46.17 GROUP-74 fix：sync 部での src="" / innerHTML="" 切替えを廃止し、
     // mode 判定（async）後に branch 別に clear するよう移動。
@@ -3580,19 +3611,47 @@ function setupModalEvents(
       // v1.46.0 GROUP-57 案 a: GIF entries は Blob URL 経由（dataUrl の N コピー retain 回避）。
       // 非 GIF は従来 dataUrl 経路を維持（小サイズ、cache 互換性のため）。
       if (entry.thumbId) {
-        if (_isGifEntry(entry)) {
-          _loadThumbAsBlobUrl(entry.thumbId, "image/gif").then(blobUrl => {
-            if (!blobUrl) return;
-            const img = document.createElement("img");
-            img.className = "history-thumb";
-            img.alt   = entry.filename;
-            img.title = "クリックでプレビュー";
-            img.style.cursor = "zoom-in";
-            img.addEventListener("click", openPreview);
-            _attachBlobUrlToImg(img, blobUrl);
-            item.insertBefore(img, thumbEl);
-            thumbEl.style.display = "none";
-          }).catch(() => {});
+        if (_isGifEntry(entry) && window.BTGifAudio) {
+          // GROUP-142 Stage 6：GIF サムネは共有コアの canvas 再生（音声再生時に追従＝ずれ非累積、
+          // 協調ループ）。従来の img + Blob URL（ネイティブ再生・同期不可）を置換。
+          const canvas = document.createElement("canvas");
+          canvas.className = "history-thumb";
+          canvas.title = "クリックでプレビュー";
+          canvas.style.cursor = "zoom-in";
+          canvas.addEventListener("click", openPreview);
+          const prev = _modalGifPlayers.get(entry.id);
+          if (prev) { try { prev.destroy(); } catch (_) {} _modalGifPlayers.delete(entry.id); }
+          const player = BTGifAudio.createGifPlayer({
+            canvas,
+            getBuffer: async () => {
+              const r = await browser.runtime.sendMessage({ type: "GET_THUMB_BINARY", thumbId: entry.thumbId });
+              return (r?.ok && r.buffer) ? r.buffer : null;
+            },
+            onReady: () => {
+              // 音声再生継続中の再描画でも追従を自動再接続（settings M2 と同等）
+              const c = _modalAudioCache.get(entry.id);
+              // 再接続条件：鳴っている or 協調ループの待機フェーズ（paused && ended）
+              if (c && c.audio && (!c.audio.paused || c.audio.ended)) player.followAudio(c.audio, entry.id);
+            },
+            onError: () => {
+              // fallback：従来の img + Blob URL 経路（アニメは <img> のネイティブ再生・追従なし）
+              _modalGifPlayers.delete(entry.id);
+              _loadThumbAsBlobUrl(entry.thumbId, "image/gif").then(blobUrl => {
+                if (!blobUrl || !canvas.parentNode) return;
+                const img = document.createElement("img");
+                img.className = "history-thumb";
+                img.alt   = entry.filename;
+                img.title = "クリックでプレビュー";
+                img.style.cursor = "zoom-in";
+                img.addEventListener("click", openPreview);
+                _attachBlobUrlToImg(img, blobUrl);
+                canvas.replaceWith(img);
+              }).catch(() => {});
+            },
+          });
+          _modalGifPlayers.set(entry.id, player);
+          item.insertBefore(canvas, thumbEl);
+          thumbEl.style.display = "none";
         } else {
           browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", id: entry.thumbId })
             .then(({ dataUrl }) => {
@@ -3664,7 +3723,14 @@ function setupModalEvents(
         if (!p || !entry.filename) { showToast(shadow, "⚠️ 保存先情報が取得できません", true); return; }
         const filePath = p.replace(/[\\/]+$/, "") + "\\" + entry.filename;
         // v1.22.9: 拡張ページ viewer.html 経由で表示し、大容量 GIF も chunksB64 で描画する。
-        const viewerUrl = browser.runtime.getURL("src/viewer/viewer.html") + "?path=" + encodeURIComponent(filePath);
+        // GROUP-142 Stage 4：settings 側と同じく関連音声も query で渡す（従来は modal 経由の viewer
+        // だけ audioPath が渡らず、音声ボタン・同期が settings 経由と非対称だった＝双子経路の非対称）。
+        let viewerUrl = browser.runtime.getURL("src/viewer/viewer.html") + "?path=" + encodeURIComponent(filePath);
+        if (entry.audioFilename) {
+          const audioFilePath = p.replace(/[\\/]+$/, "") + "\\" + entry.audioFilename;
+          viewerUrl += "&audioPath=" + encodeURIComponent(audioFilePath);
+          viewerUrl += "&audioMime=" + encodeURIComponent(entry.audioMimeType || "audio/webm");
+        }
         window.open(viewerUrl, "_blank");
       });
       item.querySelector(".history-btn-nav").addEventListener("click", (e) => {

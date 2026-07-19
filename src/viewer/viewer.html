@@ -14,6 +14,8 @@
     }
     #img { max-width: 100%; max-height: 100vh; object-fit: contain; }
     #img.loading { opacity: .4; }
+    /* GROUP-142 Stage 4：GIF は canvas 描画（コア追従・音声同期）。img と同じ収まり方にする */
+    #canvas { max-width: 100%; max-height: 100vh; object-fit: contain; display: none; }
     .error {
       color: #ff8b78; padding: 24px; font: 14px/1.6 -apple-system, "Segoe UI", sans-serif;
       background: #222; border-radius: 8px; border: 1px solid #533;
@@ -42,7 +44,10 @@
 <body>
   <div id="status"></div>
   <img id="img" alt="" />
+  <canvas id="canvas"></canvas>
   <button id="audio-btn" data-muted="1" title="音声再生">🔇</button>
+  <script src="../io/ext-files.js"></script>
+  <script src="../players/gif-audio-player.js"></script>
   <script src="viewer.js"></script>
 </body>
 </html>

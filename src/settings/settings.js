@@ -4548,12 +4548,9 @@ function _buildGroupWrapperElement(group) {
         showGroupLightbox(allDataUrls, 0, orderedItemsForLb, { startEntryIndex: gIdx });
       });
       placeholder.replaceWith(canvas);
-      _initGifTile(canvas, first).then(sessId => {
-        if (!sessId) {
-          // fallback：dataUrl 経路へ
-          _fallbackCanvasToImg(canvas, first, null);
-        }
-      }).catch(() => {});
+      // GROUP-142 Stage 3：INIT 失敗は onFallback で dataUrl 経路へ（代表サムネの fallback）。
+      _initGifTile(canvas, first, () => _fallbackCanvasToImg(canvas, first, null))
+        .catch(() => _fallbackCanvasToImg(canvas, first, null));
     } else {
       // GROUP-133 B：非GIF 代表サムネを binary（Blob URL）化。lightbox は allDataUrls[0]=null（初期値）
       // のままにして updateView が都度 GET_THUMB_DATA_URL で取り直す（card 用 Blob URL は load 後 revoke）。
@@ -5160,10 +5157,15 @@ function _updateAudioButtonsForEntry(entryId, playing) {
 }
 
 async function _toggleHistAudio(entry, btn) {
-  // 既にこのエントリが再生中なら停止
+  // 既にこのエントリが再生中なら停止。
+  // GROUP-142 Stage 3 追補（P1-B）：協調ループの GIF master 待機フェーズは audio.paused && ended の
+  // まま追従が生きている＝「再生中」。!paused だけで判定すると待機中に停止できず再生し直してしまう。
   const existing = _histAudioCache.get(entry.id);
-  if (existing && existing.audio && !existing.audio.paused) {
+  const _gtile0 = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+  const _following0 = !!(_gtile0 && _gtile0.player && _gtile0.player.isFollowing && _gtile0.player.isFollowing());
+  if ((existing && existing.audio && !existing.audio.paused) || _following0) {
     try { existing.audio.pause(); existing.audio.currentTime = 0; } catch (_) {}
+    if (_gtile0 && _gtile0.player && _gtile0.player.unfollow) _gtile0.player.unfollow();
     _histAudioPlayingIds.delete(entry.id);
     _updateAudioButtonsForEntry(entry.id, false);
     return;
@@ -5173,8 +5175,8 @@ async function _toggleHistAudio(entry, btn) {
   // 後から始まる GIF アニメと音声がズレる report 由来）。ready 前のアニメセッションがある
   // 時だけブロックし、静止画 fallback（セッション無し）・非 GIF は素通りさせる（永久ブロック防止）。
   {
-    const gsess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
-    if (gsess && !gsess.ready) {
+    const gtile = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+    if (gtile && gtile.player && !gtile.player.isReady()) {
       const t0 = btn.textContent;
       btn.textContent = "⏳";
       setTimeout(() => { try { btn.textContent = t0; } catch (_) {} }, 900);
@@ -5203,32 +5205,17 @@ async function _toggleHistAudio(entry, btn) {
       // v1.31.9：FETCH_FILE_AS_DATAURL は内部で Python の READ_FILE_BASE64 を呼び出し
       // 非 GIF ファイルは PIL で画像として開こうとして UnidentifiedImageError になる。
       // 音声 (.webm / .mp3 等) は READ_FILE_CHUNKS_B64 を直接使って PIL を迂回する。
-      const res = await browser.runtime.sendMessage({
-        type: "READ_FILE_CHUNKS_B64",
-        path: audioPath,
-      });
-      if (!res || !res.ok || !Array.isArray(res.chunksB64)) {
-        console.warn(`[hist-audio] 音声読込失敗`, res?.error || "不明", { path: audioPath });
+      // 共有部品化 Stage 1：READ_FILE_CHUNKS_B64 → Blob の組立を BTFiles に一本化（挙動不変）
+      const blob = await BTFiles.readFileChunksBlob(audioPath, entry.audioMimeType || "audio/webm");
+      if (!blob) {
+        console.warn(`[hist-audio] 音声読込失敗`, { path: audioPath });
         btn.disabled = false;
         btn.textContent = originalText;
         return;
       }
-      // chunk 配列 → Blob
-      const arrays = [];
-      for (const b64 of res.chunksB64) {
-        const bin = atob(b64);
-        const arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        arrays.push(arr);
-      }
-      const blob = new Blob(arrays, { type: entry.audioMimeType || "audio/webm" });
       const blobUrl = URL.createObjectURL(blob);
       const audio = new Audio(blobUrl);
       audio.loop = true; // GIF は自動ループなのでそれに合わせる
-      audio.addEventListener("ended", () => {
-        // loop=true なので基本 ended は発火しないが保険で
-        if (_histAudioPlayingId === entry.id) _histAudioStopCurrent();
-      });
       cached = { audio, blobUrl };
       _histAudioCache.set(entry.id, cached);
     }
@@ -5237,9 +5224,13 @@ async function _toggleHistAudio(entry, btn) {
     // GROUP-142 案 B：GIF タイル（ready・delay 表あり）があれば音声追従駆動へ切替。
     // 対象外（非 GIF・静止画 fallback 等）は何も起きず従来どおり独立再生。
     _gifAudioFollowStart(entry, cached.audio);
-    _histAudioPlayingId = entry.id;
-    // v1.32.0：再生終了時（audio 側が loop=true だが何らかで pause 状態に）も UI を戻す
+    // v1.32.0：再生終了時（何らかで pause 状態に）も UI を戻す。
+    // GROUP-142 Stage 3：協調ループは GIF>音声のとき audio.loop=false にして音声を
+    // 毎サイクル鳴り切らせ audio.play() で再起動する。この「自然 end の pause」を停止と誤認すると
+    // _histAudioPlayingIds から entry が抜けボタンが🔇化する（F1）。追従駆動中は停止扱いにしない。
     cached.audio.onpause = () => {
+      const t = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+      if (t && t.player && t.player.isFollowing && t.player.isFollowing()) return;
       if (cached.audio.ended || cached.audio.currentTime === 0) {
         _histAudioPlayingIds.delete(entry.id);
         _updateAudioButtonsForEntry(entry.id, false);
@@ -5302,11 +5293,16 @@ async function _toggleAudioSelected() {
   showBusyModal(shouldStop ? "音声停止中…" : "音声再生開始中…", `${targets.length} 件`);
   try {
     if (shouldStop) {
-      // 再生中のものを一括停止
+      // 再生中のものを一括停止。
+      // GROUP-142 Stage 3 追補（P1-B）：協調ループの GIF master 待機フェーズ（paused && ended・追従中）
+      // も停止対象にする（!paused だけだとスキップされ停止できない）
       for (const entry of targets) {
         const cached = _histAudioCache.get(entry.id);
-        if (cached && cached.audio && !cached.audio.paused) {
+        const gtile = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+        const following = !!(gtile && gtile.player && gtile.player.isFollowing && gtile.player.isFollowing());
+        if ((cached && cached.audio && !cached.audio.paused) || following) {
           try { cached.audio.pause(); cached.audio.currentTime = 0; } catch (_) {}
+          if (gtile && gtile.player && gtile.player.unfollow) gtile.player.unfollow();
           _histAudioPlayingIds.delete(entry.id);
           _updateAudioButtonsForEntry(entry.id, false);
         }
@@ -5596,22 +5592,20 @@ function _unobserveThumbsInTree(rootEl) {
 // - 失敗時は <img> + dataUrl にフォールバック（既存経路保持）
 // - tile DOM 削除前に _destroyGifSession でクリーンアップ
 // =============================================================================
-let _gifWorker = null;
+// GROUP-142 派生・共有部品化 Stage 3：再生（Worker/INIT/READY/FRAME 描画・自走・追従・協調ループ）は
+// 共有コア window.BTGifAudio に委譲し、settings は「タイル record（DOM canvas・可視域 visible・lb 連動
+// lbSuspended・entry/thumb 対応）＋プール LRU＋IntersectionObserver＋ライトボックス連動」だけを残す。
+// tile = { id, player(コア handle), canvas, entryId, thumbId, visible, lbSuspended }
 let _gifSessionSeq = 0;
 const _gifSessions = new Map();
 
 // v1.46.42 GROUP-118：GIF タイルの viewport gate。画面外のタイルは再生を止め、
 // 表示中のタイルだけ再生して継続 churn（RefreshDriver/Paint/decode）を削減する。
 // pool の dormant(canvas=null)/rebind/eviction には干渉せず、再生スケジュールのみを gate。
-function _gifResumeIfNeeded(sess) {
-  if (!sess || !sess.paused || !sess.ready || !sess.canvas) return;
-  // GROUP-15 ライトボックス連動：一時停止中は再開しない（クローズ時に解除）
-  if (sess.lbSuspended) return;
-  // GROUP-142：音声追従駆動中は自走の REQ_FRAME を発行しない（追従ループが描画を駆動、二重要求防止）
-  if (sess.driveMode === "audio") return;
-  if ((typeof document !== "undefined" && document.hidden) || sess.visible === false) return;
-  sess.paused = false;
-  if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: sess.currentIndex || 0 });
+function _gifResumeIfNeeded(tile) {
+  // 再生可否（ready/canvas/hidden/可視域/lb/追従中）の判定はコアの resume() に委譲。
+  // settings の可視域 visible・lb 連動 lbSuspended はコア生成時の isDrawable クロージャが読む。
+  if (tile && tile.player) tile.player.resume();
 }
 let _gifVisibilityObserver = null;
 function _getGifVisibilityObserver() {
@@ -5620,10 +5614,10 @@ function _getGifVisibilityObserver() {
     for (const e of entries) {
       const sid = e.target && e.target.dataset ? e.target.dataset.gifSessionId : null;
       if (!sid) continue;
-      const sess = _gifSessions.get(Number(sid));
-      if (!sess) continue;
-      sess.visible = !!e.isIntersecting;
-      if (sess.visible) _gifResumeIfNeeded(sess);
+      const tile = _gifSessions.get(Number(sid));
+      if (!tile) continue;
+      tile.visible = !!e.isIntersecting;
+      if (tile.visible) _gifResumeIfNeeded(tile);
     }
   }, { root: null, rootMargin: "150px" });
   return _gifVisibilityObserver;
@@ -5638,7 +5632,7 @@ function _unobserveGifCanvas(canvas) {
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
-    for (const sess of _gifSessions.values()) _gifResumeIfNeeded(sess);
+    for (const tile of _gifSessions.values()) _gifResumeIfNeeded(tile);
   });
 }
 // session = { id, canvas, ctx, ready, frameCount, dims, currentIndex, timerId, entryId, thumbId }
@@ -5683,177 +5677,61 @@ function _gifThumbCacheEvict() {
   // active のみで上限超過の場合は何もしない（DOM タイル数依存・通常起こらない）
 }
 
-function _getGifWorker() {
-  if (_gifWorker) return _gifWorker;
-  try {
-    _gifWorker = new Worker(
-      browser.runtime.getURL("src/decoders/gif-decoder.worker.js"),
-      { type: "module" }
-    );
-    _gifWorker.onmessage = _onGifWorkerMessage;
-    _gifWorker.onerror = (err) => {
-      console.warn("[gif-worker] error", err);
-    };
-  } catch (err) {
-    console.warn("[gif-worker] 起動失敗", err);
-    _gifWorker = null;
-  }
-  return _gifWorker;
-}
-
-function _onGifWorkerMessage(e) {
-  const msg = e.data || {};
-  const sess = _gifSessions.get(msg.id);
-  if (!sess) {
-    if (msg.bitmap?.close) try { msg.bitmap.close(); } catch (_) {}
-    return;
-  }
-  if (msg.type === "READY") {
-    sess.ready = true;
-    sess.frameCount = msg.frameCount || 1;
-    sess.dims = msg.dims;
-    // GROUP-142：音声追従駆動用の delay 表と総尺を保持（無ければ追従対象外＝従来自走のみ）
-    sess.delays = Array.isArray(msg.delays) ? msg.delays : null;
-    sess.totalDelayMs = msg.totalDelayMs || 0;
-    // v1.41.3：dormant 中（canvas == null）に READY が来た場合、dims のみ記録して REQ_FRAME 送信は skip
-    if (msg.dims && sess.canvas) {
-      sess.canvas.width  = msg.dims.width;
-      sess.canvas.height = msg.dims.height;
-    }
-    sess.currentIndex = 0;
-    if (sess.canvas && _gifWorker) {
-      _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: 0 });
-    }
-    // GROUP-142(M2)：音声再生継続中に session が作り直された場合（LRU 破棄後の再 INIT 等）、
-    // READY 到達時点で追従を自動再接続する（従来は無音で自走に戻っていた）
-    if (sess.entryId && _histAudioPlayingIds.has(sess.entryId)) {
-      const c = _histAudioCache.get(sess.entryId);
-      if (c && c.audio && !c.audio.paused) {
-        _gifAudioFollowStart({ id: sess.entryId, thumbId: sess.thumbId }, c.audio);
-      }
-    }
-  } else if (msg.type === "FRAME") {
-    // v1.41.3：dormant 中（canvas == null）は drawImage skip ＋ setTimeout 組まない（無駄な再 REQ 抑制）
-    if (sess.canvas && msg.bitmap) {
-      try {
-        sess.ctx.drawImage(msg.bitmap, 0, 0);
-      } catch (err) {
-        console.warn("[gif-worker] drawImage 失敗", err);
-      }
-    }
-    if (msg.bitmap?.close) try { msg.bitmap.close(); } catch (_) {}
-    // GROUP-142：音声追従駆動中は自走の再スケジュールを組まない（フレーム要求は追従ループが
-    // audio.currentTime から逆算して発行する）。currentIndex も「次」でなく描画した現在値を保持。
-    if (sess.driveMode === "audio") {
-      sess.currentIndex = msg.index;
-      return;
-    }
-    const nextIndex = (msg.index + 1) % (sess.frameCount || 1);
-    sess.currentIndex = nextIndex;
-    if (sess.canvas) {
-      // v1.46.42 GROUP-118：画面外（IntersectionObserver で visible=false）/ タブ非表示は
-      // 次フレームを要求せず一時停止（paused）。継続的な decode/drawImage/repaint churn を削減。
-      // GROUP-15 ライトボックス連動：一時停止中も同様（in-flight FRAME 着弾時の再開防止）。
-      if (sess.visible === false || sess.lbSuspended || (typeof document !== "undefined" && document.hidden)) {
-        sess.paused = true;
-      } else {
-        sess.paused = false;
-        // GROUP-142(M1)：音声停止直後の in-flight FRAME が self で着弾した際などに
-        // 既存タイマーへ上書きしてチェーンが多重化する race の防止（rebind 経路の同族も収束）
-        if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} }
-        sess.timerId = setTimeout(() => {
-          if (!_gifSessions.has(sess.id)) return;
-          if (sess.canvas == null) return; // dormant 化されたら停止
-          if (sess.visible === false || (typeof document !== "undefined" && document.hidden)) { sess.paused = true; return; }
-          if (_gifWorker) _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: nextIndex });
-        }, msg.delay || 100);
-      }
-    }
-  } else if (msg.type === "ERROR") {
-    console.warn("[gif-worker] session error", msg.id, msg.message);
-    _destroyGifSession(sess.id);
-  }
-}
-
 // @spec 設計書類/画面別/01_設定画面_保存履歴タブ_詳細.md
-async function _initGifTile(canvas, entry) {
+// GROUP-142 派生・共有部品化 Stage 3：再生はコア(BTGifAudio)へ委譲。settings はタイル record と
+// プール/可視域/lb 連動だけを持つ。onFallback は INIT 失敗時に呼び出し側の img fallback を起動する。
+async function _initGifTile(canvas, entry, onFallback) {
   // v1.41.3 GROUP-43 Phase 2-pool：thumbId pool check
-  // 既存 session が dormant or active のいずれでも canvas を rebind して再開
+  // 既存 tile が dormant or active のいずれでも canvas を rebind して再開（Worker INIT を skip）
   const cached = _gifThumbCacheGet(entry.thumbId);
   if (cached) {
-    if (cached.timerId) {
-      try { clearTimeout(cached.timerId); } catch (_) {}
-      cached.timerId = null;
-    }
     cached.canvas = canvas;
-    cached.ctx = canvas.getContext("2d");
     cached.entryId = entry.id; // entry id は変わる可能性あり（同じ thumbId を別 entry が参照）
     canvas.dataset.gifSessionId = String(cached.id);
     // v1.46.42 GROUP-118：再表示時は再生可能状態に戻し、新 canvas を viewport 監視へ登録
-    cached.visible = true; cached.paused = false;
+    cached.visible = true; cached.lbSuspended = false;
     _observeGifCanvas(canvas);
-    if (cached.dims) {
-      canvas.width  = cached.dims.width;
-      canvas.height = cached.dims.height;
-    }
-    // INIT 中（!ready）なら READY 受信時に自動で REQ_FRAME される（既存ロジック）
-    if (_gifWorker && cached.ready) {
-      _gifWorker.postMessage({ type: "REQ_FRAME", id: cached.id, index: cached.currentIndex });
-    }
+    if (cached.player) cached.player.rebind(canvas);
     // GROUP-142(M2)：音声再生継続中の dormant→rebind（ページ送り→戻る等）でも追従を自動再接続
-    if (cached.ready && _histAudioPlayingIds.has(entry.id)) {
+    if (cached.player && cached.player.isReady() && _histAudioPlayingIds.has(entry.id)) {
       const c = _histAudioCache.get(entry.id);
-      if (c && c.audio && !c.audio.paused) {
-        _gifAudioFollowStart(entry, c.audio);
-      }
+      // 再接続条件：鳴っている or 協調ループの待機フェーズ（paused && ended）。ユーザー停止は
+      // currentTime=0 で ended が解除されるため誤接続しない
+      if (c && c.audio && (!c.audio.paused || c.audio.ended)) cached.player.followAudio(c.audio, entry.id);
     }
     return cached.id;
   }
-  // 新規 session
-  const id = ++_gifSessionSeq;
-  const ctx = canvas.getContext("2d");
-  const sess = {
-    id, canvas, ctx,
-    ready: false, frameCount: 0, dims: null,
-    currentIndex: 0, timerId: null,
-    entryId: entry.id,
-    thumbId: entry.thumbId, // v1.41.3：pool eviction で同 sess を _gifSessionsByThumbId からも消すため
-    // v1.46.42 GROUP-118：viewport/visibility gate。画面外・タブ非表示では次フレーム要求を止め
-    // （paused=true）、再表示時に resume。pool の dormant(canvas=null)/rebind には非干渉。
-    visible: true, paused: false,
-    // GROUP-142：駆動モード（self=従来の setTimeout 自走 ／ audio=音声追従）。
-    // delays/totalDelayMs は READY で充填。audioEntryId は駆動権を持つ entry（後勝ち規約）。
-    driveMode: "self", delays: null, totalDelayMs: 0, audioEntryId: null, followRafId: null,
-  };
-  _gifSessions.set(id, sess);
-  _gifThumbCachePut(entry.thumbId, sess);
-  canvas.dataset.gifSessionId = String(id);
-  _observeGifCanvas(canvas); // v1.46.42 GROUP-118：viewport 監視へ登録
-  // GROUP-133 A：GIF binary も IDB 直読み。Blob→ArrayBuffer は tx 外で変換（tx 寿命ルール）し Worker へ transfer。
+  // GROUP-133 A：GIF binary は IDB 直読み。Blob→ArrayBuffer は tx 外で変換（tx 寿命ルール）。
+  // 取得失敗はここで null 返し＝呼び出し側の img fallback（従来の .then(sessId) 経路の等価）。
   let gifBuffer;
   try {
     const r = await _getThumbBlob(entry.thumbId);
-    if (!r.ok || !r.blob) { _destroyGifSession(id); return null; }
+    if (!r.ok || !r.blob) { if (onFallback) onFallback(); return null; }
     gifBuffer = await r.blob.arrayBuffer();
-  } catch (err) {
-    _destroyGifSession(id);
+  } catch (_) {
+    if (onFallback) onFallback();
     return null;
   }
-  const w = _getGifWorker();
-  if (!w) {
-    _destroyGifSession(id);
-    return null;
-  }
-  try {
-    w.postMessage(
-      { type: "INIT", id, gifBuffer },
-      [gifBuffer]
-    );
-  } catch (err) {
-    console.warn("[gif-worker] INIT postMessage 失敗", err);
-    _destroyGifSession(id);
-    return null;
-  }
+  // 新規 tile ＋ コア player。isDrawable にタイルの可視域/lb 状態を注入（コアはそれらを知らない）。
+  const id = ++_gifSessionSeq;
+  const tile = { id, player: null, canvas, entryId: entry.id, thumbId: entry.thumbId, visible: true, lbSuspended: false };
+  _gifSessions.set(id, tile);
+  _gifThumbCachePut(entry.thumbId, tile);
+  canvas.dataset.gifSessionId = String(id);
+  _observeGifCanvas(canvas); // v1.46.42 GROUP-118：viewport 監視へ登録
+  tile.player = BTGifAudio.createGifPlayer({
+    canvas,
+    getBuffer: async () => gifBuffer, // 事前取得済（transfer は一度きり）
+    isDrawable: () => tile.visible !== false && !tile.lbSuspended,
+    onReady: () => {
+      // GROUP-142(M2)：READY 時点で音声再生中なら追従を自動再接続（従来は無音で自走に戻っていた）
+      if (tile.entryId && _histAudioPlayingIds.has(tile.entryId)) {
+        const c = _histAudioCache.get(tile.entryId);
+        if (c && c.audio && (!c.audio.paused || c.audio.ended)) tile.player.followAudio(c.audio, tile.entryId);
+      }
+    },
+    onError: () => { _destroyGifSession(id); if (onFallback) onFallback(); },
+  });
   return id;
 }
 
@@ -5869,37 +5747,11 @@ async function _initGifTile(canvas, entry) {
 //   鳴り続ける既存仕様に合わせる）。再表示時は次 tick で正位置から自然復帰。
 // - 後勝ち規約：同じサムネを共有する別 entry の音声が駆動中でも、新しい再生が駆動権を取る。
 // =============================================================================
+// 追従開始はコアへ委譲。token=entry.id（後勝ち：同サムネ共有の別 entry が再生を始めると駆動権が移る）。
+// 逆算・協調ループ・可視域 gate はコアが担う。
 function _gifAudioFollowStart(entry, audio) {
-  const sess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
-  if (!sess || !sess.ready || !Array.isArray(sess.delays) || !(sess.totalDelayMs > 0)) return;
-  if (sess.followRafId) { try { cancelAnimationFrame(sess.followRafId); } catch (_) {} sess.followRafId = null; }
-  sess.audioEntryId = entry.id;
-  sess.driveMode = "audio";
-  if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} sess.timerId = null; }
-  const tick = () => {
-    // 駆動権・セッション生存の確認（destroy／別 entry の後勝ち／自走復帰済みなら終了）
-    if (_gifSessions.get(sess.id) !== sess) return;
-    if (sess.driveMode !== "audio" || sess.audioEntryId !== entry.id) return;
-    if (audio.paused || audio.ended) { _gifAudioFollowStop(sess); return; }
-    const drawable = sess.canvas && sess.visible !== false && !sess.lbSuspended &&
-      !(typeof document !== "undefined" && document.hidden);
-    if (drawable) {
-      const tMs = (audio.currentTime * 1000) % sess.totalDelayMs;
-      let acc = 0, idx = sess.delays.length - 1;
-      for (let i = 0; i < sess.delays.length; i++) {
-        acc += (sess.delays[i] || 100);
-        if (tMs < acc) { idx = i; break; }
-      }
-      if (idx !== sess.currentIndex) {
-        sess.currentIndex = idx;
-        if (_gifWorker) {
-          try { _gifWorker.postMessage({ type: "REQ_FRAME", id: sess.id, index: idx }); } catch (_) {}
-        }
-      }
-    }
-    sess.followRafId = requestAnimationFrame(tick);
-  };
-  sess.followRafId = requestAnimationFrame(tick);
+  const tile = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+  if (tile && tile.player) tile.player.followAudio(audio, entry.id);
 }
 
 // =============================================================================
@@ -5920,11 +5772,10 @@ function _lbSuspendEntryTile(entry) {
     st.audioWasPlaying = true;
     try { cached.audio.pause(); } catch (_) {}
   }
-  const sess = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
-  if (sess) {
-    sess.lbSuspended = true;
-    if (sess.timerId) { try { clearTimeout(sess.timerId); } catch (_) {} sess.timerId = null; }
-    sess.paused = true;
+  const tile = entry.thumbId ? _gifSessionsByThumbId.get(entry.thumbId) : null;
+  if (tile) {
+    tile.lbSuspended = true;
+    if (tile.player) tile.player.pause(); // 追従/自走とも停止（lbSuspended は isDrawable でも効く）
   }
   _lbSuspendedTile = st;
 }
@@ -5933,11 +5784,10 @@ function _lbResumeEntryTile() {
   const st = _lbSuspendedTile;
   if (!st) return;
   _lbSuspendedTile = null;
-  const sess = st.thumbId ? _gifSessionsByThumbId.get(st.thumbId) : null;
-  if (sess) {
-    sess.lbSuspended = false;
-    sess.paused = true;
-    _gifResumeIfNeeded(sess); // 自走再開（ready/canvas/visible/hidden の条件は既存経路に委譲）
+  const tile = st.thumbId ? _gifSessionsByThumbId.get(st.thumbId) : null;
+  if (tile) {
+    tile.lbSuspended = false;
+    if (tile.player) tile.player.resume(); // 自走再開（ready/canvas/visible/hidden はコアが判定）
   }
   // レビュー指摘(B-3)：suspend 中にユーザーが Lightbox の音声ボタンで明示停止した場合は
   // 再開しない（明示停止は _histAudioPlayingIds から外れるため、Set 残存＝一時停止のみ再開）
@@ -5952,40 +5802,20 @@ function _lbResumeEntryTile() {
   }
 }
 
-function _gifAudioFollowStop(sess) {
-  if (!sess) return;
-  if (sess.followRafId) { try { cancelAnimationFrame(sess.followRafId); } catch (_) {} sess.followRafId = null; }
-  if (sess.driveMode !== "audio") return;
-  sess.driveMode = "self";
-  sess.audioEntryId = null;
-  // 自走復帰：paused 扱いにして既存 resume 経路（ready/canvas/visible/hidden の全チェック）へ委譲
-  sess.paused = true;
-  _gifResumeIfNeeded(sess);
-}
+// 追従停止はコアが担う（追従 tick 内で audio.paused を検知して self 復帰）。settings 側の停止関数は撤去。
 
 function _destroyGifSession(id) {
-  const sess = _gifSessions.get(id);
-  if (!sess) return;
-  if (sess.timerId) {
-    try { clearTimeout(sess.timerId); } catch (_) {}
-    sess.timerId = null;
-  }
-  // GROUP-142：追従ループが残っていれば解除（RAF leak 防止）
-  if (sess.followRafId) {
-    try { cancelAnimationFrame(sess.followRafId); } catch (_) {}
-    sess.followRafId = null;
-  }
-  if (sess.canvas) _unobserveGifCanvas(sess.canvas); // v1.46.42 GROUP-118：viewport 監視解除
+  const tile = _gifSessions.get(id);
+  if (!tile) return;
+  if (tile.canvas) _unobserveGifCanvas(tile.canvas); // v1.46.42 GROUP-118：viewport 監視解除
+  if (tile.player) tile.player.destroy();            // コアが timer/RAF/Worker DESTROY を解放
   _gifSessions.delete(id);
   // v1.41.3：thumbId secondary index からも削除
-  if (sess.thumbId && _gifSessionsByThumbId.get(sess.thumbId) === sess) {
-    _gifSessionsByThumbId.delete(sess.thumbId);
+  if (tile.thumbId && _gifSessionsByThumbId.get(tile.thumbId) === tile) {
+    _gifSessionsByThumbId.delete(tile.thumbId);
   }
-  if (_gifWorker) {
-    try { _gifWorker.postMessage({ type: "DESTROY", id }); } catch (_) {}
-  }
-  if (sess.canvas) {
-    try { delete sess.canvas.dataset.gifSessionId; } catch (_) {}
+  if (tile.canvas) {
+    try { delete tile.canvas.dataset.gifSessionId; } catch (_) {}
   }
 }
 
@@ -6007,24 +5837,20 @@ function _destroyGifSessionsInTree(rootEl) {
   for (const cv of canvases) {
     const id = parseInt(cv.dataset.gifSessionId, 10);
     if (!id) continue;
-    const sess = _gifSessions.get(id);
-    if (!sess) continue;
-    // v1.45.3 GROUP-49 fix：別 canvas に rebind 済みなら dormant 化 skip。
-    // partial refresh で _initGifTile が rebind した後に本関数が走ると
-    // sess.canvas を null 化してしまい代表サムネが描画されなくなる事象（v1.36.0 以来 pre-existing）。
-    // sess.canvas === cv（このループで走査中の旧 canvas そのものが現在の binding）の時のみ unbind。
-    if (sess.canvas !== cv) {
+    const tile = _gifSessions.get(id);
+    if (!tile) continue;
+    // v1.45.3 GROUP-49 fix：別 canvas に rebind 済みなら dormant 化 skip（07 §9 代表サムネ欠落の防壁）。
+    // partial refresh で _initGifTile が rebind した後に本関数が走ると、走査中の旧 canvas を基準に
+    // unbind して代表サムネが描画されなくなる。コアの getCanvas()（＝現在の binding）が cv と一致する
+    // 時のみ unbind する（従来 sess.canvas === cv だった判定を player.getCanvas() へ置換・ロジック不変）。
+    if (!tile.player || tile.player.getCanvas() !== cv) {
       try { delete cv.dataset.gifSessionId; } catch (_) {}
       continue;
     }
-    if (sess.timerId) {
-      try { clearTimeout(sess.timerId); } catch (_) {}
-      sess.timerId = null;
-    }
     _unobserveGifCanvas(cv); // v1.46.42 GROUP-118：dormant 化する旧 canvas を viewport 監視から外す
-    sess.canvas = null;
-    sess.ctx = null;
-    sess.paused = true; // dormant 中は再生停止扱い（rebind 時に visible/paused をリセット）
+    tile.player.unbind();    // コアで canvas=null・自走停止（Worker session は保持＝再表示で rebind）
+    tile.canvas = null;
+    tile.visible = false;    // dormant 中（rebind 時に visible/lbSuspended をリセット）
     try { delete cv.dataset.gifSessionId; } catch (_) {}
   }
 }
@@ -6064,14 +5890,9 @@ function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
     }
   });
   placeholder.replaceWith(canvas);
-  _initGifTile(canvas, entry).then(sessId => {
-    if (!sessId) {
-      // fallback：canvas を img + dataUrl 経路に置換
-      _fallbackCanvasToImg(canvas, entry, onThumbClick);
-    }
-  }).catch(() => {
-    _fallbackCanvasToImg(canvas, entry, onThumbClick);
-  });
+  // GROUP-142 Stage 3：INIT 失敗（buffer 取得不可・decode error）は onFallback で img + dataUrl 経路へ。
+  _initGifTile(canvas, entry, () => _fallbackCanvasToImg(canvas, entry, onThumbClick))
+    .catch(() => _fallbackCanvasToImg(canvas, entry, onThumbClick));
 }
 
 function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
@@ -6929,6 +6750,7 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
         align-items:center;justify-content:center;transition:background .15s;
         bottom:60px;">&#8964;</button>
       <img class="lb-img" src="" alt="" />
+      <canvas class="lb-canvas" style="display:none;"></canvas>
       <div class="lb-info" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center;">
         <span class="lb-label-group" style="font-size:10px;color:rgba(255,255,255,.6);white-space:nowrap;">グループ内</span>
         <span class="lb-counter"></span>
@@ -6939,6 +6761,23 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     `;
 
     const img = overlay.querySelector(".lb-img");
+    const lbCanvas = overlay.querySelector(".lb-canvas");
+    // GROUP-142 Stage 5：ライトボックスの GIF はコアの canvas 描画＋追従。
+    // 音声は LB 専用インスタンス（背景タイルの _histAudioCache・ボタン状態とは独立＝押下が背景側の
+    // ボタンへ伝播しない）。entry 切替・クローズで player/音声とも破棄する。
+    let lbPlayer = null;
+    let lbAudio = null; // { audio, blobUrl, entryId }
+    let lbGen = 0;      // updateView 世代（entry 切替後に届く stale onError/fallback を無害化）
+    function _lbDestroyPlayer() {
+      if (lbPlayer) { try { lbPlayer.destroy(); } catch (_) {} lbPlayer = null; }
+    }
+    function _lbAudioStop() {
+      if (lbAudio) {
+        try { lbAudio.audio.pause(); } catch (_) {}
+        try { URL.revokeObjectURL(lbAudio.blobUrl); } catch (_) {}
+        lbAudio = null;
+      }
+    }
     const counter = overlay.querySelector(".lb-counter");
     const filenameEl = overlay.querySelector(".lb-filename");
     const labelAll   = overlay.querySelector(".lb-label-all");
@@ -7036,13 +6875,43 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
       currentIdx = idx;
       const entry = items[idx];
       const url = dataUrls[idx];
-      if (url) {
-        img.src = url;
-      } else if (entry?.thumbId) {
-        img.src = "";
-        browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
-          .then(r => { if (r?.dataUrl) { img.src = r.dataUrl; dataUrls[idx] = r.dataUrl; } })
-          .catch(() => {});
+      // GROUP-142 Stage 5：entry 切替時は前の LB player / LB 音声を破棄（表示中の 1 枚だけが再生される）
+      const gen = ++lbGen;
+      _lbDestroyPlayer();
+      _lbAudioStop();
+      // 従来の img + dataUrl 経路（非 GIF、および GIF の decode 失敗 fallback）
+      const showAsImg = () => {
+        lbCanvas.style.display = "none";
+        img.style.display = "";
+        const u = dataUrls[idx];
+        if (u) {
+          img.src = u;
+        } else if (entry?.thumbId) {
+          img.src = "";
+          browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
+            .then(r => { if (r?.dataUrl && gen === lbGen) { img.src = r.dataUrl; dataUrls[idx] = r.dataUrl; } })
+            .catch(() => {});
+        }
+      };
+      if (entry && entry.thumbId && _isGifEntry(entry) && window.BTGifAudio) {
+        // GIF：コアの canvas 描画（音声なしでも自走。音声再生時は追従＝ずれ非累積・協調ループ）
+        img.style.display = "none";
+        lbCanvas.style.display = "";
+        lbPlayer = BTGifAudio.createGifPlayer({
+          canvas: lbCanvas,
+          getBuffer: async () => {
+            const r = await _getThumbBlob(entry.thumbId);
+            if (!r.ok || !r.blob) return null;
+            return await r.blob.arrayBuffer();
+          },
+          onError: () => {
+            if (gen !== lbGen) return; // 既に別 entry へ切替済み（stale）
+            lbPlayer = null;
+            showAsImg();
+          },
+        });
+      } else {
+        showAsImg();
       }
       img.alt = entry?.filename || "";
       // 表示番号は UI 表示用：rtlなら「新しい順 (total-idx)」、ltrなら「古い順 (idx+1)」
@@ -7055,27 +6924,79 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
       setFixedNavPositions();
 
       // v1.32.0：現在エントリに音声ファイルがあれば Lightbox の音声ボタンを表示
+      // GROUP-142 Stage 5：ボタン状態は LB ローカル。data-audio-entry-id を付けない
+      //（付けると _updateAudioButtonsForEntry の一括更新に巻き込まれ、背景タイルのボタンと相互反応する）。
+      // entry 切替直後は必ず停止状態（上で _lbAudioStop 済み）。
       if (entry && entry.audioFilename) {
-        const playing = _histAudioPlayingIds.has(entry.id);
         audioBtn.style.display = "";
-        audioBtn.dataset.muted = playing ? "0" : "1";
-        audioBtn.dataset.audioEntryId = entry.id;
-        audioBtn.textContent = playing ? "🔊" : "🔇";
+        audioBtn.dataset.muted = "1";
+        audioBtn.textContent = "🔇";
         audioBtn.title = `音声再生: ${entry.audioFilename}`;
       } else {
         audioBtn.style.display = "none";
-        audioBtn.removeAttribute("data-audio-entry-id");
       }
       // GROUP-15 ライトボックス連動：今見ている entry の元タイル（GIF アニメ＋音声）を一時停止
       // （前の entry 分はヘルパー内で先に再開される。クローズ時は _lbResumeEntryTile）
       _lbSuspendEntryTile(entry);
     }
 
-    audioBtn.addEventListener("click", (e) => {
+    audioBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const entry = items[currentIdx];
       if (!entry || !entry.audioFilename) return;
-      _toggleHistAudio(entry, audioBtn);
+      // GROUP-142 Stage 5：LB 専用の音声インスタンスで再生/停止。
+      // 背景タイルの _histAudioCache・_histAudioPlayingIds・ボタン状態には一切触れない。
+      const playing = lbPlayer ? (lbPlayer.isFollowing && lbPlayer.isFollowing())
+                               : (lbAudio && !lbAudio.audio.paused);
+      if (playing) {
+        try { lbAudio.audio.pause(); lbAudio.audio.currentTime = 0; } catch (_) {}
+        if (lbPlayer) lbPlayer.unfollow();
+        audioBtn.dataset.muted = "1";
+        audioBtn.textContent = "🔇";
+        return;
+      }
+      // GROUP-28：GIF のアニメ準備（ready）前は音声を開始しない（後から始まる GIF とのズレ防止）
+      if (lbPlayer && !lbPlayer.isReady()) {
+        const t0 = audioBtn.textContent;
+        audioBtn.textContent = "⏳";
+        setTimeout(() => { try { audioBtn.textContent = t0; } catch (_) {} }, 900);
+        return;
+      }
+      if (!lbAudio || lbAudio.entryId !== entry.id) {
+        _lbAudioStop();
+        audioBtn.disabled = true;
+        const t0 = audioBtn.textContent;
+        audioBtn.textContent = "⏳";
+        const paths = Array.isArray(entry.savePaths) ? entry.savePaths : (entry.savePath ? [entry.savePath] : []);
+        const primary = paths[0];
+        if (!primary) {
+          console.warn("[lb-audio] パス情報がありません", { entry });
+          audioBtn.textContent = t0; audioBtn.disabled = false;
+          return;
+        }
+        const audioFilePath = primary.replace(/[\\/]+$/, "") + "\\" + entry.audioFilename;
+        const blob = await BTFiles.readFileChunksBlob(audioFilePath, entry.audioMimeType || "audio/webm");
+        if (!blob) {
+          console.warn("[lb-audio] 音声読込失敗", { path: audioFilePath });
+          audioBtn.textContent = t0; audioBtn.disabled = false;
+          return;
+        }
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+        audio.loop = true; // 非 GIF 用既定。GIF 追従時はコアが協調制御で上書き
+        lbAudio = { audio, blobUrl, entryId: entry.id };
+        audioBtn.textContent = t0;
+        audioBtn.disabled = false;
+      }
+      try {
+        await lbAudio.audio.play();
+        // GIF なら追従駆動へ（逆算・協調ループ・停止検知はコアが担う）
+        if (lbPlayer) lbPlayer.followAudio(lbAudio.audio, "lb-" + entry.id);
+        audioBtn.dataset.muted = "0";
+        audioBtn.textContent = "🔊";
+      } catch (err) {
+        console.warn("[lb-audio] 再生エラー", err);
+      }
     });
 
     if (rtl) {
@@ -7092,12 +7013,21 @@ function showGroupLightbox(dataUrls, startIndex, items, globalCtx) {
     // GROUP-15 ライトボックス連動：クローズ 3 経路（背景クリック／✕／Escape）で元タイルを再開。
     // レビュー指摘(B-1)：背景クリック・✕ でも keydown リスナを解除（未解除だとクローズ後の
     // 矢印キーで updateView→suspend が発火し、タイルが停止されたまま復帰不能になる）
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); } });
-    overlay.querySelector(".lb-close").addEventListener("click", () => { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); });
+    // GROUP-142 Stage 5：LB player / LB 音声もクローズで必ず破棄（Worker session・Blob URL の leak 防止）
+    const closeLb = () => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+      _lbDestroyPlayer();
+      _lbAudioStop();
+      _lbResumeEntryTile();
+    };
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeLb(); });
+    overlay.querySelector(".lb-close").addEventListener("click", closeLb);
 
     const onKey = (e) => {
       if (["Escape","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)) e.preventDefault();
-      if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("resize", onResize); _lbResumeEntryTile(); }
+      if (e.key === "Escape") { closeLb(); }
       else if (e.key === "ArrowLeft")  { rtl ? goPrev() : goNext(); }
       else if (e.key === "ArrowRight") { rtl ? goNext() : goPrev(); }
       else if (e.key === "ArrowUp")    { goGlobalPrev(); }

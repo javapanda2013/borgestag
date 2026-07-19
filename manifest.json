@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "BorgesTag",
-  "version": "1.49.0",
+  "version": "1.50.0",
   "description": "右クリックから画像をタグ付きで保存する拡張機能",
   "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'self';",
   "permissions": [
@@ -31,7 +31,9 @@
     "src/decoders/gif-decoder.worker.js",
     "src/encoders/gif-encoder.worker.js",
     "src/vendor/omggif.js",
-    "src/vendor/neuquant.js"
+    "src/vendor/neuquant.js",
+    "src/io/ext-files.js",
+    "src/players/gif-audio-player.js"
   ],
   "background": {
     "scripts": [

@@ -751,30 +751,48 @@ function buildModalHTML(defaultFilename) {
     .btn-nav:hover:not(:disabled) { color: #4a90e2; background: #eef3ff; border-color: #b0c8f0; }
     .btn-nav:disabled { color: #ddd; cursor: default; }
 
-    /* ブックマーク追加ボタン（現在のフォルダを即登録） */
-    .btn-bookmark-add {
-      background: none; border: 1px solid transparent;
-      border-radius: 4px; cursor: pointer;
-      padding: 2px 6px; font-size: 13px; line-height: 1;
-      color: #ccc; transition: color .1s, background .1s, border-color .1s;
+    /* ================================================================
+       GROUP-155：ヘッダのプルダウン（現在フォルダ操作 / 表示形式）
+       狭幅でボタンが横幅を食い入力欄が潰れる問題への対応。トリガーは 1 つ分の幅で、
+       中身は絵文字＋文字ラベルなので「アイコンだけで意味が分からない」問題も同時に解消する。
+       ================================================================ */
+    .hdr-menu { position: relative; flex-shrink: 0; }
+    .hdr-menu-btn {
+      display: flex; align-items: center; gap: 1px;
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      cursor: pointer; padding: 2px 4px; font-size: 12px; line-height: 1;
+      color: #666; font-family: inherit; white-space: nowrap;
+      transition: background .1s, border-color .1s;
     }
-    .btn-bookmark-add:hover:not(.bookmarked) { color: #e8a000; background: #fff8e0; border-color: #f5d080; }
-    /* ブックマーク済み：金色背景で強調 */
-    .btn-bookmark-add.bookmarked {
-      color: #e8a000; background: #fff8e0; border-color: #f5d080;
+    .hdr-menu-btn:hover { background: #f0f4fb; border-color: #cfdcf0; }
+    .hdr-menu.open .hdr-menu-btn { background: #eef3ff; border-color: #b0c8f0; }
+    .hdr-menu-badge { font-size: 13px; line-height: 1; }
+    /* トリガー上のバッジ色＝現在の状態（ブックマーク済み/候補登録済み）を畳んでいても示す */
+    .hdr-menu-badge.is-bookmarked { color: #e8a000; }
+    .hdr-menu-badge.is-registered { color: #e67e22; }
+    .hdr-menu-list {
+      display: none; position: absolute; top: calc(100% + 3px); left: 0; z-index: 50;
+      min-width: 190px; background: #fff; border: 1px solid #dde;
+      border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.13); padding: 3px;
     }
-    .btn-bookmark-add:disabled { color: #e0e0e0; cursor: default; }
-
-    /* 候補追加ボタン */
-    .btn-add-candidate {
-      background: none; border: 1px solid transparent;
-      border-radius: 4px; cursor: pointer;
-      padding: 2px 7px; font-size: 11px; font-weight: 600;
-      color: #4a90e2; transition: color .1s, background .1s, border-color .1s;
-      flex-shrink: 0; white-space: nowrap;
+    .hdr-menu.open .hdr-menu-list { display: block; }
+    /* メニュー項目は後方にある .view-btn / .btn-open-explorer の base 定義（同詳細度）に
+       ソース順で負けるため、親セレクタを重ねて詳細度を上げて確実に勝たせる。
+       （.btn-open-explorer はメニュー外でも再利用されるので :not() で潰さない） */
+    .hdr-menu-list .hdr-menu-item {
+      display: flex; align-items: center; gap: 7px; width: 100%;
+      background: none; border: none; border-radius: 4px; cursor: pointer;
+      padding: 5px 8px; font-size: 11px; color: #333; font-family: inherit;
+      text-align: left; white-space: nowrap;
     }
-    .btn-add-candidate:hover:not(:disabled) { background: #eef3ff; border-color: #b0c8f0; }
-    .btn-add-candidate:disabled { color: #ccc; cursor: default; }
+    .hdr-menu-list .hdr-menu-item:hover:not(:disabled) { background: #f0f4fb; }
+    .hdr-menu-list .hdr-menu-item:disabled { color: #bbb; cursor: default; }
+    .hdr-menu-ico { width: 16px; text-align: center; font-size: 13px; line-height: 1; flex-shrink: 0; }
+    /* 選択中の表示形式を明示（表示形式メニュー用） */
+    .hdr-menu-list .hdr-menu-item.view-btn.active { background: #eef3ff; color: #2c5aaa; font-weight: 600; }
+    /* 状態色（メニュー内でも登録済みが分かるように） */
+    .btn-bookmark-add.bookmarked .hdr-menu-ico { color: #e8a000; }
+    .btn-add-candidate.is-registered .hdr-menu-ico { color: #e67e22; }
 
     /* タグ絞込ボタン */
     .btn-tag-filter {
@@ -809,15 +827,17 @@ function buildModalHTML(defaultFilename) {
     .breadcrumb-item.current { color: #333; font-weight: 700; cursor: default; }
     .breadcrumb-item.current:hover { background: none; }
 
-    .view-switcher { display: flex; gap: 2px; flex-shrink: 0; }
+    /* GROUP-155：表示形式は .hdr-menu へ移設済み。以下は横並びボタンとして使われた場合の
+       base 定義（メニュー内では上方の .hdr-menu-list .hdr-menu-item が詳細度で勝つ）。
+       .view-switcher は現在 DOM 上に存在しないが、.view-btn 単体での再利用に備えて残置。 */
     .view-btn {
       background: none; border: 1px solid transparent;
       border-radius: 4px; cursor: pointer; padding: 2px 5px;
       font-size: 12px; color: #888; line-height: 1;
       transition: background .1s, border-color .1s;
     }
-    .view-btn:hover { background: #e0e8ff; border-color: #b0c8f0; }
-    .view-btn.active { background: #ddeaff; border-color: #4a90e2; color: #1a56db; }
+    .view-btn:hover:not(.hdr-menu-item) { background: #e0e8ff; border-color: #b0c8f0; }
+    .view-btn.active:not(.hdr-menu-item) { background: #ddeaff; border-color: #4a90e2; color: #1a56db; }
 
     /* コンテンツエリア（スクロール） */
     .tree-view {
@@ -885,15 +905,19 @@ function buildModalHTML(defaultFilename) {
       display: flex; align-items: center; gap: 6px;
       padding: 6px 10px; border-top: 1px solid #e0e0e0; background: #fff; flex-shrink: 0;
     }
+    /* GROUP-155：狭幅でも入力できるよう縮小可＋下限を持たせる（従来は flex:1 のみで 0 まで潰れた） */
     .new-folder-input {
-      flex: 1; border: 1px solid #d0d0d0; border-radius: 5px;
+      flex: 1 1 90px; min-width: 70px;
+      border: 1px solid #d0d0d0; border-radius: 5px;
       padding: 4px 8px; font-size: 11px; outline: none; font-family: inherit;
     }
     .new-folder-input:focus { border-color: #4a90e2; }
+    /* ＋📁＝入力名でフォルダ新規作成（アイコン化して横幅を入力欄へ譲る。意味は title で補完） */
     .new-folder-btn {
       background: #4a90e2; color: #fff; border: none;
-      border-radius: 5px; padding: 4px 10px;
+      border-radius: 5px; padding: 4px 8px;
       font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap;
+      flex-shrink: 0;
     }
     .new-folder-btn:hover { background: #3a7fd5; }
     .new-folder-tag-btn {
@@ -1898,19 +1922,48 @@ function buildModalHTML(defaultFilename) {
             <!-- フォルダエクスプローラー（フォルダタブ選択時 or タグなし時に全体表示） -->
             <div id="explorer-wrapper" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
               <div class="right-header">
-                <button class="btn-bookmark-add" id="btn-bookmark-add"
-                  title="現在のフォルダをブックマークに追加">⭐</button>
-                <button class="btn-add-candidate" id="btn-add-candidate"
-                  title="現在のフォルダを保存先候補に追加" disabled>保存先候補に追加</button>
-                
+                <!-- GROUP-155：狭幅対策。現在フォルダ操作（⭐/＋/📂）と表示形式（☰≡⊞）を
+                     それぞれ独立したプルダウンへ集約し、バーの横幅を入力欄へ譲る。
+                     メニュー内は絵文字＋文字ラベルでアイコンのみの分かりにくさを解消する。
+                     戻る/進むは連続操作するためアイコンのまま、並び順は独立設定なので統合しない。 -->
+                <div class="hdr-menu" id="menu-folder-ops">
+                  <button class="hdr-menu-btn" id="menu-folder-ops-btn" type="button"
+                    title="現在のフォルダに対する操作" aria-haspopup="menu" aria-expanded="false">
+                    <span class="hdr-menu-badge" id="menu-folder-ops-badge">📁</span>▾
+                  </button>
+                  <div class="hdr-menu-list" id="menu-folder-ops-list">
+                    <button class="btn-bookmark-add hdr-menu-item" id="btn-bookmark-add"
+                      title="現在のフォルダをブックマークに追加">
+                      <span class="hdr-menu-ico" id="btn-bookmark-add-ico">☆</span><span class="hdr-menu-label" id="btn-bookmark-add-label">ブックマークに追加</span>
+                    </button>
+                    <button class="btn-add-candidate hdr-menu-item" id="btn-add-candidate"
+                      title="現在のフォルダを保存先候補に追加" disabled>
+                      <span class="hdr-menu-ico" id="btn-add-candidate-ico">＋</span><span class="hdr-menu-label" id="btn-add-candidate-label">保存先候補に追加</span>
+                    </button>
+                    <button class="btn-open-explorer hdr-menu-item" id="btn-open-current"
+                      title="現在のフォルダをエクスプローラーで開く">
+                      <span class="hdr-menu-ico">📂</span><span class="hdr-menu-label">エクスプローラーで開く</span>
+                    </button>
+                  </div>
+                </div>
                 <button class="btn-nav" id="btn-nav-back"  title="戻る"  disabled>◀</button>
                 <button class="btn-nav" id="btn-nav-fwd"   title="進む"  disabled>▶</button>
-                <button class="btn-open-explorer" id="btn-open-current"
-                  title="現在のフォルダをエクスプローラーで開く">📂</button>
-                <div class="view-switcher">
-                  <button class="view-btn active" id="vbtn-list"   title="リスト表示">☰</button>
-                  <button class="view-btn"        id="vbtn-detail" title="詳細表示">≡</button>
-                  <button class="view-btn"        id="vbtn-tile"   title="タイル表示">⊞</button>
+                <div class="hdr-menu" id="menu-view">
+                  <button class="hdr-menu-btn" id="menu-view-btn" type="button"
+                    title="フォルダの表示形式" aria-haspopup="menu" aria-expanded="false">
+                    <span class="hdr-menu-badge" id="menu-view-badge">☰</span>▾
+                  </button>
+                  <div class="hdr-menu-list" id="menu-view-list">
+                    <button class="view-btn hdr-menu-item active" id="vbtn-list" title="リスト表示">
+                      <span class="hdr-menu-ico">☰</span><span class="hdr-menu-label">リスト表示</span>
+                    </button>
+                    <button class="view-btn hdr-menu-item" id="vbtn-detail" title="詳細表示">
+                      <span class="hdr-menu-ico">≡</span><span class="hdr-menu-label">詳細表示</span>
+                    </button>
+                    <button class="view-btn hdr-menu-item" id="vbtn-tile" title="タイル表示">
+                      <span class="hdr-menu-ico">⊞</span><span class="hdr-menu-label">タイル表示</span>
+                    </button>
+                  </div>
                 </div>
                 <select id="folder-sort-select" title="フォルダの並び順" style="
                   font-size:11px;padding:2px 4px;border:1px solid #dde;border-radius:4px;
@@ -1920,16 +1973,19 @@ function buildModalHTML(defaultFilename) {
                   <option value="created-asc">作成日 ↑</option>
                   <option value="created-desc">作成日 ↓</option>
                 </select>
-                <div style="display:flex;align-items:center;gap:3px;">
+                <!-- GROUP-155：狭幅では絞り込み欄・新規作成欄が縮んで両立するようにする
+                     （固定 width をやめ flex 縮小＋min-width 下限。ボタン側は縮まない） -->
+                <div style="display:flex;align-items:center;gap:3px;flex:1;min-width:0;">
                   <input type="text" id="folder-kw-input" placeholder="🔍 フォルダを絞り込み"
-                    autocomplete="off" style="width:160px;border:1px solid #d0d0d0;
+                    autocomplete="off" style="flex:1 1 90px;min-width:70px;border:1px solid #d0d0d0;
                     border-radius:4px;padding:2px 7px;font-size:11px;outline:none;font-family:inherit;" />
                   <button id="folder-kw-clear" title="クリア" style="
                     background:none;border:none;cursor:pointer;color:#aaa;font-size:13px;
-                    padding:0 2px;display:none;line-height:1;">✕</button>
+                    padding:0 2px;display:none;line-height:1;flex-shrink:0;">✕</button>
                   <input type="text" class="new-folder-input" id="new-folder-input"
                     placeholder="新しいフォルダ名" />
-                  <button class="new-folder-btn" id="new-folder-btn">＋ 作成</button>
+                  <button class="new-folder-btn" id="new-folder-btn"
+                    title="入力した名前でフォルダを新規作成">＋📁</button>
                 </div>
               </div>
               <div class="explorer">
@@ -2130,6 +2186,47 @@ function setupModalEvents(
 
   updatePathDisplay(selectedPath);
 
+  // ---- GROUP-155：ヘッダのプルダウン開閉（現在フォルダ操作 / 表示形式） ----
+  // 狭幅対策でボタン群を畳んだもの。項目クリック・外側クリック・Esc で閉じる。
+  // 各項目の click ハンドラは従来のまま（id 不変）なので、開閉はここだけで完結する。
+  const _hdrMenus = ["menu-folder-ops", "menu-view"]
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+  function _closeHdrMenus(except) {
+    for (const m of _hdrMenus) {
+      if (m === except) continue;
+      m.classList.remove("open");
+      const b = m.querySelector(".hdr-menu-btn");
+      if (b) b.setAttribute("aria-expanded", "false");
+    }
+  }
+  for (const menu of _hdrMenus) {
+    const trigger = menu.querySelector(".hdr-menu-btn");
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = !menu.classList.contains("open");
+      _closeHdrMenus(menu);
+      menu.classList.toggle("open", willOpen);
+      trigger.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    });
+    // メニューの余白（padding 部分）クリックでは閉じない（document ハンドラへ伝播させない）
+    const list = menu.querySelector(".hdr-menu-list");
+    if (list) list.addEventListener("click", (e) => e.stopPropagation());
+    // 項目を選んだら閉じる（disabled 項目のクリックは発火しないので誤閉じしない）
+    menu.querySelectorAll(".hdr-menu-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        menu.classList.remove("open");
+        trigger.setAttribute("aria-expanded", "false");
+      });
+    });
+  }
+  if (_hdrMenus.length) {
+    document.addEventListener("click", () => _closeHdrMenus(null));
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") _closeHdrMenus(null);
+    });
+  }
+
   // ---- 表示切り替えボタン（①前回の表示形式を反映） ----
   const viewButtons = {
     list:   document.getElementById("vbtn-list"),
@@ -2137,10 +2234,18 @@ function setupModalEvents(
     tile:   document.getElementById("vbtn-tile"),
   };
 
+  // GROUP-155：表示形式はプルダウン化したため、トリガーのバッジに現在の形式を映す
+  const VIEW_BADGE = { list: "☰", detail: "≡", tile: "⊞" };
+  const menuViewBadge = document.getElementById("menu-view-badge");
+  function _syncViewBadge() {
+    if (menuViewBadge) menuViewBadge.textContent = VIEW_BADGE[viewMode] || "☰";
+  }
+
   // 初期アクティブ状態を savedViewMode に合わせる
   Object.entries(viewButtons).forEach(([mode, btn]) => {
     btn.classList.toggle("active", mode === viewMode);
   });
+  _syncViewBadge();
 
   Object.entries(viewButtons).forEach(([mode, btn]) => {
     btn.addEventListener("click", () => {
@@ -2148,6 +2253,7 @@ function setupModalEvents(
       viewMode = mode;
       Object.values(viewButtons).forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
+      _syncViewBadge();
       // ①変更を storage に保存
       browser.runtime.sendMessage({ type: "SET_EXPLORER_VIEW_MODE", mode });
       const view = document.getElementById("tree-view");
@@ -4326,12 +4432,30 @@ function setupModalEvents(
   });
 
   /** ボタンの状態（現在のフォルダが登録済みか）を更新 */
+  // GROUP-155：プルダウン化に伴い、メニュー内の文字ラベルとトリガーのバッジ色にも状態を反映する
+  //（畳んだ状態でも「ブックマーク済み」が分かるようにするため）。
+  const bookmarkLabelEl = document.getElementById("btn-bookmark-add-label");
+  const bookmarkIcoEl   = document.getElementById("btn-bookmark-add-ico");
+  const folderOpsBadge  = document.getElementById("menu-folder-ops-badge");
+  function _syncFolderOpsBadge() {
+    if (!folderOpsBadge) return;
+    const bookmarked = btnBookmarkAdd.classList.contains("bookmarked");
+    // btnAddCandidate は後方で const 宣言されるため、TDZ を避けて DOM から都度引く
+    const candEl = document.getElementById("btn-add-candidate");
+    const registered = !!(candEl && candEl.classList.contains("is-registered"));
+    folderOpsBadge.classList.toggle("is-bookmarked", bookmarked && !registered);
+    folderOpsBadge.classList.toggle("is-registered", registered);
+    folderOpsBadge.textContent = registered ? "＋" : (bookmarked ? "⭐" : "📁");
+  }
   function updateBookmarkBtn() {
     if (!currentPath) {
       // ドライブ一覧表示中はブックマーク対象なし
       btnBookmarkAdd.classList.remove("bookmarked");
       btnBookmarkAdd.title = "フォルダを開くとブックマークできます";
       btnBookmarkAdd.disabled = true;
+      if (bookmarkLabelEl) bookmarkLabelEl.textContent = "ブックマークに追加";
+      if (bookmarkIcoEl)   bookmarkIcoEl.textContent   = "☆";
+      _syncFolderOpsBadge();
       return;
     }
     btnBookmarkAdd.disabled = false;
@@ -4340,6 +4464,12 @@ function setupModalEvents(
     btnBookmarkAdd.title = already
       ? `「${currentPath}」はブックマーク済みです`
       : `「${currentPath}」をブックマークに追加`;
+    // メニュー項目は「押すと何が起きるか」で書く（このボタンはトグルで、登録済みなら解除する）。
+    // 状態表現（「ブックマーク済み」）だと解除操作であることが伝わらないため動作表現に統一。
+    // アイコンも ⭐(登録済み＝押すと解除) / ☆(未登録＝押すと追加) で候補側の ＋/− と揃える。
+    if (bookmarkLabelEl) bookmarkLabelEl.textContent = already ? "ブックマークを解除" : "ブックマークに追加";
+    if (bookmarkIcoEl)   bookmarkIcoEl.textContent   = already ? "⭐" : "☆";
+    _syncFolderOpsBadge();
   }
 
   btnBookmarkAdd.disabled = true; // 初期はドライブ一覧のため無効
@@ -4369,12 +4499,20 @@ function setupModalEvents(
 
   /** 候補追加/解除ボタンの状態を更新 */
   async function updateAddCandidateBtn() {
+    // GROUP-155：プルダウン化に伴い、アイコンと文字ラベルは子 span を書き換える
+    //（button に textContent を代入すると子 span ごと消えてしまうため直接代入しない）。
+    // 追加可＝＋ ／ 解除可＝− の 2 状態で、色（CSS の .is-registered）も切り替える。
+    const candIco   = document.getElementById("btn-add-candidate-ico");
+    const candLabel = document.getElementById("btn-add-candidate-label");
     if (!currentPath || selectedTags.length === 0) {
       btnAddCandidate.disabled = true;
-      btnAddCandidate.textContent = "保存先候補に追加";
+      if (candIco)   candIco.textContent = "＋";
+      if (candLabel) candLabel.textContent = "保存先候補に追加";
+      btnAddCandidate.classList.remove("is-registered");
       btnAddCandidate.title = selectedTags.length === 0
-        ? "タグを選択すると候補に追加できます"
-        : "フォルダを開くと候補に追加できます";
+        ? "タグを選択すると、表示中のフォルダを保存先候補に追加できます"
+        : "フォルダを開くと、そのフォルダを保存先候補に追加できます";
+      _syncFolderOpsBadge();
       return;
     }
     btnAddCandidate.disabled = false;
@@ -4385,12 +4523,17 @@ function setupModalEvents(
       (tagDest[tag] || []).some(d => d.path === currentPath)
     );
     if (allRegistered) {
-      btnAddCandidate.textContent = "保存先候補から解除";
-      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補から解除`;
+      if (candIco)   candIco.textContent = "−";
+      if (candLabel) candLabel.textContent = "保存先候補から解除";
+      btnAddCandidate.classList.add("is-registered");
+      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補から外す`;
     } else {
-      btnAddCandidate.textContent = "保存先候補に追加";
-      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補に追加`;
+      if (candIco)   candIco.textContent = "＋";
+      if (candLabel) candLabel.textContent = "保存先候補に追加";
+      btnAddCandidate.classList.remove("is-registered");
+      btnAddCandidate.title = `「${currentPath}」を選択中タグの候補に登録`;
     }
+    _syncFolderOpsBadge();
   }
 
   btnAddCandidate.addEventListener("click", async () => {

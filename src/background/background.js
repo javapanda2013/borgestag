@@ -456,7 +456,10 @@ async function handleAsyncMessage(message, sender) {
           useStashBlob:      !!s.imageBlob,
           pageUrl:           s.pageUrl,
           suggestedFilename: s.suggestedFilename,
-          associatedAudio:   s.associatedAudio || null,
+          // GROUP-157：音声も GIF と同じ不変条件に揃える。Blob 本体は返さず、UI にはメタだけ渡す
+          // （旧実装は base64 dataURL を modal へ丸ごと渡していた＝context 間で実体が複製されていた）。
+          // 保存時は useStashAudio で background 側が stash から直接取る。
+          associatedAudio:   _audioMetaForUi(s.associatedAudio),
         },
       };
     }
@@ -1081,6 +1084,38 @@ async function saveBlobViaChunks(blob, destPath) {
 }
 
 /**
+ * GROUP-157：音声 Blob を分割書込で保存し、SAVE_IMAGE と同形の res を返す。
+ * saveBlobViaChunks は Native が savedPath を返さなかった場合に null を返し得る。素で
+ * `{ ok: true, savedPath: await saveBlobViaChunks(...) }` と書くと savedPath が falsy でも
+ * ok:true が確定し、呼び出し側の `audioRes.savedPath || audioFullPath` により **実在しない
+ * ファイル名を履歴へ記録**し得る。GIF 側 saveGifBlobLikeSaveImage と同じく null を失敗として
+ * 弾き、両者の規律を揃える（独立レビュー指摘）。
+ */
+async function saveAudioBlobLikeSaveImage(blob, destPath) {
+  const savedPath = await saveBlobViaChunks(blob, destPath);
+  if (!savedPath) throw new Error("音声の保存パスを取得できませんでした");
+  return { ok: true, savedPath };
+}
+
+/**
+ * GROUP-157：UI（modal）へ渡す音声メタを作る。Blob 本体は background に残し、UI にはハンドルだけ渡す
+ * （GIF の useStashBlob と同じ不変条件。旧実装は base64 dataURL を modal へ丸ごと渡していた）。
+ * 旧 dataURL 形式の stash が残っている場合はそのまま通して互換を保つ。
+ */
+function _audioMetaForUi(a) {
+  if (!a) return null;
+  if (a.blob) {
+    return {
+      useStashAudio: true,
+      mimeType:    a.mimeType || "audio/webm",
+      extension:   a.extension,
+      durationSec: a.durationSec || null,
+    };
+  }
+  return a; // 旧 dataURL 経路
+}
+
+/**
  * Blob を保存し、SAVE_IMAGE と同形の res を返す（savedPath / thumbChunkPath 等）。
  * これにより handleSave 下流（savedPath 抽出・resolveThumbDataUrlFromNativeRes）は無改修で通る。
  * chunk 書込コマンドはサムネを返さないので、GIF は書込後に MAKE_GIF_THUMB_FILE で別途生成する
@@ -1129,8 +1164,22 @@ async function handleSave(payload) {
 
   const fullPath = `${savePath}\\${effectiveFilename}`;
 
+  // GROUP-157：音声も GIF と同じく「実体は background の stash、UI はハンドルのみ」に揃える。
+  // 即保存経路は stash の音声オブジェクトをそのまま渡すので blob を直接持つ。modal 経路は
+  // useStashAudio フラグ付きのメタだけを往復するので、ここで stash から実体を引く。
+  const audioBlob = (associatedAudio && associatedAudio.blob)
+    || (associatedAudio && associatedAudio.useStashAudio
+      ? (_pendingConversionStash?.associatedAudio?.blob || null)
+      : null);
+  // GROUP-157：stash が既に解放済みだと音声だけが無言で消える（下の分岐が丸ごと成立しなく
+  // なるため、他の音声失敗経路と違って WARN すら残らない）。ここで必ず記録する。
+  if (associatedAudio && associatedAudio.useStashAudio && !audioBlob) {
+    addLog("WARN", "関連音声を保存できません（変換データの一時保持が既に解放されています）",
+      `filename=${filename}`);
+  }
+
   // v1.31.4 GROUP-28 mvdl：関連音声ファイル名（GIF と同じ basename + .webm 等）
-  const audioFilename = (associatedAudio && associatedAudio.dataUrl && associatedAudio.extension)
+  const audioFilename = (associatedAudio && (audioBlob || associatedAudio.dataUrl) && associatedAudio.extension)
     ? effectiveFilename.replace(/\.[^.]*$/, "") + "." + associatedAudio.extension
     : null;
 
@@ -1171,18 +1220,22 @@ async function handleSave(payload) {
     // v1.31.10：GIF が Native 側でリネームされた場合、音声側も同じベース名に合わせる
     //（GIF "xxx (1).gif" + 音声 "xxx.webm" だと対応がずれるため）
     let actualAudioFilename = null;
-    if (audioFilename && associatedAudio && associatedAudio.dataUrl) {
+    if (audioFilename && associatedAudio && (audioBlob || associatedAudio.dataUrl)) {
       // GIF の実ファイル名のステム（拡張子なし）に音声拡張子を付ける
       const savedStem = actualSavedFilename.replace(/\.[^.]*$/, "");
       const syncedAudioFilename = `${savedStem}.${associatedAudio.extension}`;
       const audioFullPath = `${savePath}\\${syncedAudioFilename}`;
       try {
-        const audioRes = await sendNative({
-          cmd: "SAVE_IMAGE_BASE64",
-          dataUrl: associatedAudio.dataUrl,
-          savePath: audioFullPath,
-          skipThumb: true, // v1.41.8:音声に Pillow サムネは不要
-        });
+        // GROUP-157：Blob があれば分割書込（base64 化しない）。旧 dataURL 形式の stash が
+        // 残っている場合のみ従来の SAVE_IMAGE_BASE64 へ落とす。
+        const audioRes = audioBlob
+          ? await saveAudioBlobLikeSaveImage(audioBlob, audioFullPath)
+          : await sendNative({
+            cmd: "SAVE_IMAGE_BASE64",
+            dataUrl: associatedAudio.dataUrl,
+            savePath: audioFullPath,
+            skipThumb: true, // v1.41.8:音声に Pillow サムネは不要
+          });
         if (audioRes.ok) {
           // 音声側も Native で独自に unique_path が走る場合がある
           const audioActualPath = audioRes.savedPath || audioFullPath;
@@ -2972,6 +3025,17 @@ async function handleSaveMulti(payload) {
   // GROUP-151 v1.49.0：handleSave と同じ不変条件（巨大 Blob は background だけが持つ）。
   // 一括保存も変換 GIF が通る経路なので同一分岐を持たせる（片方だけ直す漏れを作らない）。
   const imageBlobMulti = payload.useStashBlob ? (_pendingConversionStash?.imageBlob || null) : null;
+  // GROUP-157：音声も handleSave と同じ解決規則に揃える（片方だけ直す漏れを作らない）。
+  const audioBlobMulti = (associatedAudio && associatedAudio.blob)
+    || (associatedAudio && associatedAudio.useStashAudio
+      ? (_pendingConversionStash?.associatedAudio?.blob || null)
+      : null);
+  // GROUP-157：handleSave と同じく、stash が既に解放済みだと下の音声分岐が丸ごと成立せず
+  // 音声だけが無言で消える（他の音声失敗経路は必ず WARN を出すのでここだけ無音になる）。
+  if (associatedAudio && associatedAudio.useStashAudio && !audioBlobMulti) {
+    addLog("WARN", "関連音声を保存できません（変換データの一時保持が既に解放されています）",
+      `filename=${filename}`);
+  }
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
     return { success: false, error: "savePaths が空です" };
@@ -2988,7 +3052,7 @@ async function handleSaveMulti(payload) {
   });
 
   // v1.31.4 GROUP-28 mvdl：関連音声ファイル名（GIF と同じ basename + .webm 等）
-  const audioFilenameMulti = (associatedAudio && associatedAudio.dataUrl && associatedAudio.extension)
+  const audioFilenameMulti = (associatedAudio && (audioBlobMulti || associatedAudio.dataUrl) && associatedAudio.extension)
     ? effectiveFilenameMulti.replace(/\.[^.]*$/, "") + "." + associatedAudio.extension
     : null;
 
@@ -3046,17 +3110,20 @@ async function handleSaveMulti(payload) {
 
       // v1.31.4 GROUP-28 mvdl：関連音声ファイルをこの保存先にも書き出す
       // v1.31.10：GIF の実ファイル名のステム（拡張子なし）に合わせる
-      if (audioFilenameMulti && associatedAudio && associatedAudio.dataUrl) {
+      if (audioFilenameMulti && associatedAudio && (audioBlobMulti || associatedAudio.dataUrl)) {
         const savedStem = actualSavedFilename.replace(/\.[^.]*$/, "");
         const syncedAudioFilename = `${savedStem}.${associatedAudio.extension}`;
         const audioFullPath = `${savePath}\\${syncedAudioFilename}`;
         try {
-          const audioRes = await sendNative({
-            cmd: "SAVE_IMAGE_BASE64",
-            dataUrl: associatedAudio.dataUrl,
-            savePath: audioFullPath,
-            skipThumb: true, // v1.41.8:音声に Pillow サムネは不要
-          });
+          // GROUP-157：Blob があれば分割書込（base64 化しない）。保存先ごとに同じ Blob を書く。
+          const audioRes = audioBlobMulti
+            ? await saveAudioBlobLikeSaveImage(audioBlobMulti, audioFullPath)
+            : await sendNative({
+              cmd: "SAVE_IMAGE_BASE64",
+              dataUrl: associatedAudio.dataUrl,
+              savePath: audioFullPath,
+              skipThumb: true, // v1.41.8:音声に Pillow サムネは不要
+            });
           if (audioRes.ok) {
             const audioActualPath = audioRes.savedPath || audioFullPath;
             const audioActualFilename = audioActualPath.replace(/^.*[\\/]/, "");

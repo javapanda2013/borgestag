@@ -13,7 +13,8 @@ version: 1.11.8
   {"cmd": "MKDIR_EXPORT_TMP", "parentPath": null}  # v1.11.0 GROUP-26-split
   {"cmd": "ZIP_DIRECTORY",   "srcDir": "...", "dstZipPath": "...", "deleteSrc": true}  # v1.11.0 GROUP-26-split
   {"cmd": "WRITE_FILE_BINARY_CHUNK", "path": "...", "token": "...", "contentB64": "...",
-   "offset": 0, "done": false, "unique": true, "abort": false}  # v1.11.8 GROUP-151：巨大 GIF の分割書込
+   "offset": 0, "done": false, "unique": true, "abort": false}  # v1.11.8 GROUP-151：巨大バイナリの分割書込
+                                                                # （GIF 本体のほか、v1.50.6 GROUP-157 で関連音声もこの経路を通る）
 """
 
 import sys

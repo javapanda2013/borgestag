@@ -147,6 +147,8 @@ async function recordAudio(previewVideo, durationSec) {
 
     let recorder = null;
     let resolved = false;
+    let hardTimer = null;
+    let chunks = [];
     const originalMuted  = previewVideo.muted;
     const originalVolume = previewVideo.volume;
     const originalTime   = previewVideo.currentTime;
@@ -154,12 +156,31 @@ async function recordAudio(previewVideo, durationSec) {
     const resolveOnce = (value) => {
       if (resolved) return;
       resolved = true;
+      if (hardTimer !== null) { clearTimeout(hardTimer); hardTimer = null; }
       try { previewVideo.pause(); } catch (_) {}
       try { previewVideo.muted  = originalMuted; } catch (_) {}
       try { previewVideo.volume = originalVolume; } catch (_) {}
       try { previewVideo.currentTime = originalTime; } catch (_) {}
       resolve(value);
     };
+
+    // GROUP-157 R2：**無条件**の打切り期限。この Promise は変換完了後に await されるが、その時点では
+    // 変換側の停滞検知（settle() で clearInterval 済み）はもう動いていない＝どの監視下にもない。
+    // 従来は「readyState<3 のときだけ 15 秒フォールバック」で、readyState>=3 で入った場合は
+    // 期限が一切無く、停止タイマーも `state === "recording"` 条件付きのため、トラック終了などで
+    // onstop が来ないと Promise が永久 pending になり「変換中…」のまま無言ハングし得た。
+    // 期限到達時は録音の取り込みを試みてから（chunks があれば救済）、無ければ null で確定する。
+    const HARD_TIMEOUT_MS = Math.round(Math.max(1, durationSec || 0) * 1000) + 30_000;
+    hardTimer = setTimeout(() => {
+      console.warn(`[video_convert] audio recording hard timeout (${HARD_TIMEOUT_MS}ms)`);
+      try { if (recorder && recorder.state === "recording") recorder.stop(); } catch (_) {}
+      // stop() 後に onstop が来れば通常経路で resolve される。来なければ猶予後にここで確定する。
+      setTimeout(() => {
+        if (resolved) return;
+        const salvaged = chunks.length ? new Blob(chunks, { type: "audio/webm" }) : null;
+        resolveOnce(salvaged && salvaged.size > 0 ? salvaged : null);
+      }, 1_000);
+    }, HARD_TIMEOUT_MS);
 
     const startRecording = async () => {
       try {
@@ -188,7 +209,7 @@ async function recordAudio(previewVideo, durationSec) {
 
         const audioStream = new MediaStream(audioTracks);
         recorder = new MediaRecorder(audioStream, { mimeType: PHASE1_PARAMS.AUDIO_MIME });
-        const chunks = [];
+        chunks = []; // 打切り期限のハンドラからも参照するため外側スコープで保持
         recorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
         };
@@ -233,14 +254,8 @@ async function recordAudio(previewVideo, durationSec) {
   });
 }
 
-async function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error("FileReader error"));
-    reader.readAsDataURL(blob);
-  });
-}
+// GROUP-157：blobToDataUrl は音声の Blob 運搬化により未使用となったため削除。
+// 音声は録音した Blob のまま stash → 保存時に分割書込へ渡す（base64 化しない）。
 
 // ================================================================
 // GROUP-15 scope2 (v1.46.49)：うごイラ（pixiv）解析サポート
@@ -486,8 +501,94 @@ async function initUgoira(cap, pageUrl) {
   log(`うごイラを受領しました（${frameUrls.length} コマ）。「GIF に変換」で開始します。`);
 }
 
+// ================================================================
+// GROUP-157：変換の多重起動ガード＋終端一本化（動画経路・うごイラ経路の共通機構）
+// ================================================================
+// ウォッチドッグ発火などでボタンが「再試行」に戻った後、前の変換がまだ走っているのに 2 本目を
+// 開始できてしまうと、STASH_CONVERSION_PAYLOAD が後着で上書きされ先着の成果物が失われる。
+// 両経路とも同じ stash を叩くため、フラグはモジュールスコープで 1 本だけ持つ。
+//
+// 【方式選択】クリックハンドラ側へ set/clear を引き上げる案は採らない。ハンドラは経路ごとに
+// 別々（initUgoira 側と init 側の 2 箇所）で「共通の入口」にならず、しかも clear は非同期な
+// 変換の終端でしか打てないため set と clear が別ファイル位置に離れる＝対で守りにくい。
+// 代わりに「取得できたら { settle, fail, abort } を返すファクトリ」を 1 つ用意し、
+// フラグの set と clear をこの関数の内側だけに閉じ込める（呼び出し側は clear を書けない）。
+let _conversionActive = false;
+
+/**
+ * 変換の開始権を取る。既に変換中なら null（呼び出し側は即 return）。
+ * 返り値の settle() は「この変換の決着を宣言」する。初回のみ true を返し、フラグ解除と
+ * 監視タイマー停止を行う。2 回目以降＝遅れて到達した経路なので false を返す。
+ */
+function beginConversion() {
+  if (_conversionActive) {
+    log("変換を実行中です。完了までお待ちください。");
+    return null;
+  }
+  _conversionActive = true;
+
+  const btn = document.getElementById("convert-btn");
+  let settled = false;
+  let watchTimer = null;
+
+  const settle = () => {
+    if (settled) return false;
+    settled = true;
+    _conversionActive = false;
+    if (watchTimer !== null) { clearInterval(watchTimer); watchTimer = null; }
+    return true;
+  };
+  /** 停滞検知タイマーを預ける（settle で必ず止める＝止め忘れを構造的に無くす） */
+  const watch = (timerId) => { watchTimer = timerId; };
+  /** 回復可能な失敗：再試行を許す。決着済みなら何もせず false を返す */
+  const fail = (message) => {
+    if (!settle()) return false;
+    log(message, "error");
+    hideProgress();
+    if (btn) { btn.disabled = false; btn.textContent = "再試行"; }
+    return true;
+  };
+  /** 回復不能な失敗：再試行を許さず「ウィンドウを閉じる」へ導線を差し替える */
+  const abort = (message) => {
+    if (!settle()) return false;
+    log(message, "error");
+    hideProgress();
+    _showCloseOnlyAction();
+    return true;
+  };
+  return { settle, fail, abort, watch };
+}
+
+/**
+ * GROUP-157：停滞して中断できない変換が裏で生き続けている状態では、再試行を許すと
+ * 同一プレビュー要素を共有する録音などが二重に走って壊れる。変換ボタンを消し、
+ * 「ウィンドウを閉じる」だけを残す（案内文と UI の矛盾を無くす）。
+ */
+function _showCloseOnlyAction() {
+  const btn = document.getElementById("convert-btn");
+  if (btn) { btn.disabled = true; btn.style.display = "none"; }
+  const cancel = document.getElementById("cancel-btn");
+  if (cancel) {
+    cancel.disabled = false;
+    cancel.style.display = "";
+    cancel.textContent = "ウィンドウを閉じる";
+  }
+}
+
 /** うごイラ：コマ列 → GIF 変換（原寸・全コマ・per-frame delay、ストリーミングエンコード） */
 function runUgoiraConversion(frameUrls, delays, pageUrl) {
+  const guard = beginConversion();
+  if (!guard) return;
+  // GROUP-157：起動処理中（監視タイマー確立前）に例外が飛ぶとフラグが立ったまま解除されず、
+  // 以後一切変換できなくなる。同期例外は必ずここで受けて guard を解放する。
+  try {
+    _runUgoiraConversionBody(guard, frameUrls, delays, pageUrl);
+  } catch (err) {
+    guard.fail(`変換の開始に失敗しました: ${(err && err.message) || err}`);
+  }
+}
+
+function _runUgoiraConversionBody(guard, frameUrls, delays, pageUrl) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
@@ -502,24 +603,19 @@ function runUgoiraConversion(frameUrls, delays, pageUrl) {
   // 進捗停止検知ウォッチドッグ（Worker 停止などを検知し、強制終了以外の回復手段＝再試行を与える）。
   // PROGRESS は 1 コマごとに来るため、単一コマが STALL_MS 以上進まなければタイムアウトとみなす。
   // 発火時は enc.cancel() で stuck Worker を terminate する（再試行での Worker 累積を防ぐ）。
+  // 動画経路（gifshot）と違い、こちらは cancel() で本当に止められるので再試行を許してよい。
   let enc = null;
   const STALL_MS = 60_000;
   let lastProgressAt = Date.now();
-  let watchdogFired = false;
-  const encodeTimeout = setInterval(() => {
+  guard.watch(setInterval(() => {
     if (Date.now() - lastProgressAt > STALL_MS) {
-      clearInterval(encodeTimeout);
-      watchdogFired = true;
       if (enc) enc.cancel();
-      log(
+      guard.fail(
         `⚠ エンコードが ${Math.round(STALL_MS / 1000)} 秒進捗しませんでした。` +
-        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認のうえ再試行してください。",
-        "error"
+        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認のうえ再試行してください。"
       );
-      btn.disabled = false;
-      btn.textContent = "再試行";
     }
-  }, 5_000);
+  }, 5_000));
 
   enc = streamEncodeGif(makeUgoiraFrameSource(frameUrls, delays), (done, total) => {
     lastProgressAt = Date.now();
@@ -527,8 +623,8 @@ function runUgoiraConversion(frameUrls, delays, pageUrl) {
     log(`変換中… ${done}/${total} コマ`);
   });
   enc.promise.then(async (gifBlob) => {
-    clearInterval(encodeTimeout);
-    if (watchdogFired) return; // タイムアウト表示後に遅れて完了しても二重処理しない
+    // ウォッチドッグ発火後に遅れて完了しても二重処理しない（settle が false を返す）。
+    if (!guard.settle()) return;
 
     // GROUP-151 v1.49.0：GIF は **Blob のまま** background へ渡す。
     // 旧実装は base64 dataURL 化していたが、それが allocation overflow の発生源だった
@@ -556,13 +652,11 @@ function runUgoiraConversion(frameUrls, delays, pageUrl) {
       btn.textContent = "再試行";
     }
   }).catch((err) => {
-    clearInterval(encodeTimeout);
-    if (watchdogFired) return;
     // 失敗時は frameUrls を解放しない（「再試行」で再利用するため）。解放は unload に委ねる。
-    log(`変換失敗: ${(err && err.message) || err}`, "error");
-    btn.disabled = false;
-    btn.textContent = "再試行";
-    hideProgress();
+    // ウォッチドッグ発火後・決着後に遅れて届いた例外は fail が false を返して何もしない。
+    if (!guard.fail(`変換失敗: ${(err && err.message) || err}`)) {
+      console.warn("[video_convert] 決着後に到達した例外（無視）:", err);
+    }
   });
 }
 
@@ -743,6 +837,18 @@ function escapeHtml(s) {
 // 変換実行
 // ================================================================
 function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, capSec) {
+  const guard = beginConversion();
+  if (!guard) return;
+  // GROUP-157：起動処理中（settle 定義・監視タイマー確立前）に例外が飛ぶとフラグが立ったまま
+  // 解除されず、以後一切変換できなくなる。同期例外は必ずここで受けて guard を解放する。
+  try {
+    _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hintDuration, capSec);
+  } catch (err) {
+    guard.fail(`変換の開始に失敗しました: ${(err && err.message) || err}`);
+  }
+}
+
+function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hintDuration, capSec) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
@@ -769,6 +875,8 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
   const startTime = Date.now();
   let lastProgressAt = Date.now();
   let reached100 = false;
+  // GROUP-157：初回 progressCallback に到達したか（読込フェーズと抽出フェーズの境目）。
+  let sawProgress = false;
 
   // Phase 1.5 GROUP-28 mvdl：音声録音を並列開始
   // gifshot は独自 video を内部生成するが、録音は既存 preview video を流用する。
@@ -776,25 +884,40 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
   // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
   const audioPromise = recordAudio(previewVideo, actualDur);
 
-  // v1.31.1 診断：100% に達してからのタイムアウト（GIF エンコードが無限に待たないよう）。
-  // gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その後の
-  // GIF エンコード段階（Web Worker）は進捗が取れない。Worker で詰まっている場合の
-  // 検知のため、100% 到達後 60 秒で強制エラー表示。
-  // 診断タイムアウトをコマ数連動に（実尺化後の長尺で完了前に誤発火するため）。
-  // 短尺は従来どおり 60 秒、長尺はコマ数に比例して伸ばす。Worker 停止の真の検知は維持。
-  const encodeTimeoutMs = Math.max(60_000, numFrames * 250);
-  const encodeTimeout = setInterval(() => {
-    if (reached100 && Date.now() - lastProgressAt > encodeTimeoutMs) {
-      clearInterval(encodeTimeout);
-      log(
-        `⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
-        "ブラウザコンソール（F12）で CSP 違反や Worker エラーが出ていないか確認してください。",
-        "error"
-      );
-      btn.disabled = false;
-      btn.textContent = "再試行";
+  // 停滞検知。gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その前後の
+  // フェーズは進捗が取れないため、3 つの閾値を使い分ける（GROUP-157）。
+  //   読込中：gifshot が内部生成する video が読み込まれるまで progressCallback は 1 度も来ない。
+  //           60 秒で切ると低速回線の正常な変換を停止扱いにするため、別枠で長めに取る。
+  //   抽出中：進捗は 100ms 程度ごとに来るので、60 秒無進捗なら明らかに停止している。
+  //   符号化中：進捗が来ないのが正常なので、コマ数比例の総予算で判定する。
+  // 従来は `reached100 &&` で gate されており、**抽出が一度も始まらない失敗（CORS 非対応の
+  // サーバーで内部 video の読込に失敗する等）では永久に発火せず無言ハングしていた**（GROUP-157）。
+  const LOAD_STALL_MS    = 180_000; // 読込フェーズ（初回 progressCallback 到達まで）
+  const CAPTURE_STALL_MS = 60_000;  // 抽出フェーズ（progressCallback 到達後の無進捗）
+  const encodeTimeoutMs  = Math.max(60_000, numFrames * 250);
+  guard.watch(setInterval(() => {
+    const idleMs = Date.now() - lastProgressAt;
+    // 停滞した変換そのものを中断する手段は現状ない（gifshot に cancel API が無く、内部で生成した
+    // video 要素と Worker を止められない）。1 本目が生きたまま再試行すると 2 本の recordAudio が
+    // 同一プレビュー要素を共有し、1 本目の後始末が 2 本目の録音を潰す。よって再試行は許さず、
+    // abort() でボタンを「ウィンドウを閉じる」へ差し替える（案内文と UI の矛盾を無くす）。
+    const REOPEN = "このウィンドウを閉じて開き直してください（停止した処理は中断できないため、再試行は行えません）。";
+    if (reached100) {
+      if (idleMs > encodeTimeoutMs) {
+        guard.abort(`⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
+          "ブラウザコンソール（F12）で CSP 違反や Worker エラーが出ていないか確認してください。" + REOPEN);
+      }
+    } else if (sawProgress) {
+      if (idleMs > CAPTURE_STALL_MS) {
+        guard.abort(`⚠ フレーム抽出が ${Math.round(CAPTURE_STALL_MS / 1000)} 秒間まったく進みませんでした。` +
+          "ブラウザコンソール（F12）のエラーもご確認ください。" + REOPEN);
+      }
+    } else if (idleMs > LOAD_STALL_MS) {
+      guard.abort(`⚠ 動画の読込が ${Math.round(LOAD_STALL_MS / 1000)} 秒たっても始まりませんでした。` +
+        "動画の読込に失敗している可能性があります（CORS を返さないサーバーの動画など）。" +
+        "ブラウザコンソール（F12）のエラーもご確認ください。" + REOPEN);
     }
-  }, 5_000);
+  }, 5_000));
 
   // ----------------------------------------------------------------
   // GROUP-152：gifshot の単位変換バグ対策（GIF の時間情報 delay=0 の正書き）
@@ -864,6 +987,7 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
     progressCallback: (captureProgress) => {
       updateProgress(captureProgress);
       lastProgressAt = Date.now();
+      sawProgress = true; // 読込フェーズ終了＝以降は抽出フェーズの閾値で判定する
       if (captureProgress >= 1.0) {
         if (!reached100) {
           reached100 = true;
@@ -874,12 +998,17 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
       }
     },
   }, async (obj) => {
-    clearInterval(encodeTimeout);
+    // 停滞検知の発火後に遅れて到達した場合はここで打ち切る（成果物の二重処理・
+    // ウィンドウの勝手な自動クローズを防ぐ）。
+    if (!guard.settle()) {
+      console.warn("[video_convert] タイムアウト後に gifshot callback が到達（無視）");
+      return;
+    }
     if (obj.error) {
       log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
+      hideProgress();
       btn.disabled = false;
       btn.textContent = "再試行";
-      hideProgress();
       return;
     }
 
@@ -906,9 +1035,9 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
       gifBlob = new Blob([bytes], { type: "image/gif" });
     } catch (decErr) {
       log(`変換結果の後処理に失敗しました: ${decErr.message}`, "error");
+      hideProgress();
       btn.disabled = false;
       btn.textContent = "再試行";
-      hideProgress();
       return;
     }
     const approxSize = (gifBlob.size / 1024 / 1024).toFixed(1);
@@ -921,10 +1050,12 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
     try {
       const audioBlob = await audioPromise;
       if (audioBlob && audioBlob.size > 0) {
-        const audioDataUrl = await blobToDataUrl(audioBlob);
         const audioSizeMB = (audioBlob.size / 1024 / 1024).toFixed(2);
+        // GROUP-157：音声も GIF と同じ Blob 運搬に揃える（旧実装は base64 dataURL 化して
+        // stash → modal → 保存 payload と context 間を往復させていた＝実体が複製されていた）。
+        // Blob の structured clone は実体をコピーしないため、長尺音声でも安全。
         associatedAudio = {
-          dataUrl: audioDataUrl,
+          blob: audioBlob,
           mimeType: "audio/webm",
           extension: PHASE1_PARAMS.AUDIO_EXT,
           durationSec: actualDur,

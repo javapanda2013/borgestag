@@ -29,6 +29,22 @@ let outBuf = null;  // GifWriter の出力窓（固定長 Uint8Array。書かれ
 let chunks = null;  // 回収済みバイト列（Blob 構築材料）
 let frameW = 0;
 let frameH = 0;
+// GROUP-157：delay の丸め誤差を累積させないためのキャリー。
+// GIF の delay は centisec 精度しか持たないため、コマ毎に独立して round(ms/10) すると
+// 1 コマ最大 5ms の誤差がコマ数だけ積み上がり、総尺が入力（pixiv うごイラの ms 単位 delay）から
+// ずれる（10fps ちょうど以外で顕在化。例：125ms × 300 コマで +1.5 秒）。
+// 「入力 delayMs の累計」と「実際に書いた centisec の累計」を持ち、その差から今回書く値を出すと
+// 誤差は常に 1cs 未満に留まり、総尺は入力の総尺と一致する。
+// なお本 Worker はうごイラ専用で、うごイラは音声を持たない（video_convert.js が
+// associatedAudio: null で stash する）ため、ここでの論点は音声同期ではなく総尺の忠実性のみ。
+let accTargetMs = 0;
+let accWrittenCs = 0;
+
+// 主要な再生系がコマ delay を既定値へ読み替える閾値と、その既定値（centisec）。
+// これ未満の値を書いても再生時には MIN_DELAY_CS 相当で表示されるため、書く側で揃える。
+// 詳細は FRAME 処理側のコメント参照。
+const CLAMPED_BELOW_CS = 2;
+const MIN_DELAY_CS = 10;
 
 /** RGBA → RGB（アルファ除去）。NeuQuant は 3byte/px を取る */
 function dataToRGB(rgba, n) {
@@ -92,6 +108,8 @@ self.onmessage = (e) => {
       frameW = msg.width;
       frameH = msg.height;
       chunks = [];
+      accTargetMs = 0;
+      accWrittenCs = 0;
       // 1 コマ分の LZW 出力＋ローカルパレット＋ヘッダに十分な窓（非圧縮でも収まる余裕を取る）
       outBuf = new Uint8Array(frameW * frameH * 2 + (1 << 20));
       writer = new GifWriter(outBuf, frameW, frameH, {
@@ -107,9 +125,21 @@ self.onmessage = (e) => {
       const n = w * h;
       const rgba = new Uint8Array(msg.rgba);
       const { indexed, palette } = quantize(rgba, n);
+      // ms → centisec（キャリー付き）。下限の効能は「総尺の忠実性」。
+      // 主要な再生系は CLAMPED_BELOW_CS 未満の delay を既定値 10cs に読み替えるため、そこへ 1cs を
+      // 書いても実際には 10cs 表示になり、ファイルが宣言する総尺と実際の再生尺が食い違う。
+      // 読み替えられる値は書かず最初から 10cs（＝再生系が採る値）を書けば、下のキャリー加算
+      // （accWrittenCs）が「実際に消費される時間」を正しく積むことになり、後続コマがその分だけ
+      // 短くなって総尺が入力へ追従する。書き込む値は動画経路の csWhenZero
+      // （video_convert.js の Math.round(100 / PHASE1_PARAMS.FPS) ＝ 10cs）と揃えてある。
+      // 下限を一律 10cs にはしない（33ms コマ＝3cs の 30fps うごイラまで 10fps へ潰れるため）。
+      accTargetMs += (msg.delayMs || 0);
+      let delayCs = Math.round(accTargetMs / 10) - accWrittenCs;
+      if (delayCs < CLAMPED_BELOW_CS) delayCs = MIN_DELAY_CS;
+      accWrittenCs += delayCs;
       writer.addFrame(0, 0, w, h, indexed, {
         palette,
-        delay: Math.max(0, Math.round((msg.delayMs || 0) / 10)), // ms → centisec
+        delay: delayCs,
         disposal: 1, // 残置（全面不透明フレーム）
       });
       _flushOutput(); // 当該コマ分を回収して窓を再利用

@@ -483,6 +483,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       // 保存履歴タブに切り替えたら描画
       if (btn.dataset.tab === "history") renderHistoryTab();
       if (btn.dataset.tab === "authors") renderAuthorsTab();
+      // GROUP-158-fix：外部取込タブの初期化（最古保存日ヒント含む）は初回クリックまで遅延する
+      if (btn.dataset.tab === "external-import") {
+        try { await _ensureExternalImportTabInitialized(); } catch (e) { console.error("[GROUP-158-fix] 外部取込タブ初期化失敗", e); }
+      }
       // GROUP-143 α #1：タグ・保存先タブに切り替えたら最新読み直し（モーダル等の他コンテキスト追加分を反映）
       if (btn.dataset.tab === "tags") {
         try { await loadData(); renderAll(); } catch {}
@@ -516,7 +520,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupFilenameSettings();
   setupDiffExport();
   setupExportThumbsOption();
-  setupExternalImportTab();
+  // GROUP-158-fix：外部取込タブの初期化は無条件実行を撤去、初回クリック時に遅延実行する
+  // （_ensureExternalImportTabInitialized 経由、タブ切替ハンドラおよび _settingsInitialTab の tb.click() から呼ばれる）
   setupBookmarks();
   setupLogs();
   setupHistoryTab();
@@ -2087,29 +2092,58 @@ async function setupDiffExport() {
 // ----------------------------------------------------------------
 // GROUP-26-III (v1.29.1): サムネ埋込オプション設定
 // チェックボックス初期化＋ onChange 永続化＋ OFF で削減されるサイズ推定表示
+// GROUP-158-fix：見積りをオプトイン化（無条件 setTimeout 発火を撤去）。
+// 旧実装は設定画面を開くたび EXPORT_IDB_THUMBS（全サムネ Base64 化、〜350MB）を
+// 無条件で発火しておりタブクラッシュの原因になっていたため、ボタン押下時のみ実行する。
 // ----------------------------------------------------------------
 async function setupExportThumbsOption() {
-  const chk = document.getElementById("chk-export-thumbs");
+  const chk  = document.getElementById("chk-export-thumbs");
   const hint = document.getElementById("export-thumbs-size-hint");
+  const btn  = document.getElementById("btn-export-thumbs-estimate");
   if (!chk) return;
+
   const { exportThumbsEnabled } = await browser.storage.local.get("exportThumbsEnabled");
   chk.checked = exportThumbsEnabled !== false; // デフォルト ON（既存挙動維持）
-  chk.addEventListener("change", async () => {
-    await browser.storage.local.set({ exportThumbsEnabled: chk.checked });
-  });
-  // サイズ推定（非同期、UI ブロックせず）
-  // 3000 件規模の IDB 走査は数秒かかる可能性があるため setTimeout で遅延実行
-  if (hint) {
-    setTimeout(async () => {
-      try {
-        const res = await browser.runtime.sendMessage({ type: "EXPORT_IDB_THUMBS" });
-        if (res?.ok && Array.isArray(res.thumbs) && res.thumbs.length > 0) {
-          const bytes = JSON.stringify(res.thumbs).length;
-          const mb = (bytes / 1024 / 1024).toFixed(1);
-          hint.textContent = `（${res.thumbs.length} 件、OFF で約 ${mb} MB 削減）`;
-        }
-      } catch (_) { /* サイズ推定失敗は非致命、hint 空のまま */ }
-    }, 500);
+  // importData() 完了後リフレッシュ（:1962 相当）からも本関数が再度呼ばれるため、
+  // change リスナーも dataset フラグで二重登録を防止する
+  if (chk.dataset.wired !== "1") {
+    chk.dataset.wired = "1";
+    chk.addEventListener("change", async () => {
+      await browser.storage.local.set({ exportThumbsEnabled: chk.checked });
+    });
+  }
+
+  // importData() 完了後リフレッシュ（:1962 相当）からも本関数が再度呼ばれるため、
+  // ボタンの click リスナーは dataset フラグで二重登録を防止する
+  if (btn && hint && btn.dataset.wired !== "1") {
+    btn.dataset.wired = "1";
+    btn.addEventListener("click", () => _runExportThumbsEstimate(btn, hint));
+  }
+}
+
+// GROUP-158-fix：見積り本体。ボタン押下時のみ実行（無条件 setTimeout を撤去）。
+// バックエンドも全件 Base64 化（EXPORT_IDB_THUMBS）ではなく件数・サイズのみの軽量集計（GET_IDB_THUMBS_STATS）に変更。
+async function _runExportThumbsEstimate(btn, hint) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "見積り中…";
+  hint.textContent = "";
+  try {
+    const res = await browser.runtime.sendMessage({ type: "GET_IDB_THUMBS_STATS" });
+    if (res?.ok && res.count > 0) {
+      const approxBytes = res.totalBytes * 4 / 3; // Base64 化での膨張分を概算加算
+      const mb = (approxBytes / 1024 / 1024).toFixed(1);
+      hint.textContent = `（${res.count} 件、OFF で約 ${mb} MB 削減 ※概算）`;
+    } else if (res?.ok) {
+      hint.textContent = "（サムネイルはありません）";
+    } else {
+      hint.textContent = "（見積りに失敗しました）";
+    }
+  } catch (_) {
+    hint.textContent = "（見積りに失敗しました）";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -7446,23 +7480,80 @@ function _extRenderChips(arr, container, onUpdate) {
   });
 }
 
+// GROUP-158-fix：外部取込タブの初期化は初回クリックまで遅延する
+// （設定画面を開くたび無条件で走っていたのを撤去、タブクラッシュ対策）
+let _extImportTabInitialized = false;
+
+async function _ensureExternalImportTabInitialized() {
+  if (_extImportTabInitialized) return;
+  _extImportTabInitialized = true; // 連続クリックでの二重発火を先にブロックしてから実行
+  try {
+    await setupExternalImportTab();
+  } catch (e) {
+    _extImportTabInitialized = false; // 失敗時は次回クリックで再試行できるようにする
+    throw e;
+  }
+}
+
+/**
+ * GROUP-158-fix：外部取込タブの「最古保存日ヒント」用の軽量集計。
+ * _readSaveHistory() の全件 getAll＋sort（256 MiB IPC 上限のリスク経路）を避け、
+ * savedAt 索引の昇順 cursor で source !== "external_import" な最初の1件だけを取得する。
+ */
+async function _findOldestNonExternalImportEntry() {
+  const status = await browser.storage.local.get("saveHistoryMigrationStatus");
+  if (status.saveHistoryMigrationStatus === "migrated") {
+    try {
+      const db = await _phaseC1OpenDB();
+      const found = await new Promise((resolve, reject) => {
+        const tx    = db.transaction(_PHASE_C1_HISTORY_STORE, "readonly");
+        const store = tx.objectStore(_PHASE_C1_HISTORY_STORE);
+        const idx   = store.index("savedAt");
+        const req   = idx.openCursor(null, "next"); // savedAt 昇順
+        req.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (!cursor) { resolve(null); return; }
+          const v = cursor.value;
+          // GROUP-158-fix：savedAt が壊れたレコード（importData/zipインポートの無検証経路から
+          // 混入しうる。GROUP-160 で根本対応予定）を検知してスキップする。
+          // IDB のキー型優先順位（Number<Date<String<Array、W3C仕様/Firefox実装で確認済み）により
+          // 数値型等が誤って「最古」に選出される事故を防ぐ。
+          const validSavedAt = typeof v?.savedAt === "string" && !isNaN(new Date(v.savedAt).getTime());
+          if (validSavedAt && v?.source !== "external_import") { resolve(v); return; }
+          cursor.continue();
+        };
+        req.onerror = (e) => reject(e.target.error);
+      });
+      if (found !== null) return found;
+      // cursor 走査が完了したが有効な候補が1件もなかった場合もフォールバックへ
+    } catch (err) {
+      console.warn("[GROUP-158-fix] 最古保存日カーソル取得失敗、全件読込へフォールバック", err);
+    }
+  }
+  // legacy（未移送）、または migrated でカーソル失敗時／有効候補なしのフォールバック
+  try {
+    const hist = await _readSaveHistory();
+    const normalEntries = (hist || []).filter(e => e.source !== "external_import" && typeof e?.savedAt === "string" && !isNaN(new Date(e.savedAt).getTime()));
+    if (!normalEntries.length) return null;
+    return normalEntries.reduce((a, b) => new Date(a.savedAt) < new Date(b.savedAt) ? a : b);
+  } catch (err) {
+    console.warn("[GROUP-158-fix] _readSaveHistory フォールバックも失敗、最古保存日ヒントは表示しない", err);
+    return null;
+  }
+}
+
 /** 外部取り込みタブの初期化 */
 async function setupExternalImportTab() {
-  // v1.45.5 Phase C-2: saveHistory は migration aware
-  const _hist = await _readSaveHistory();
-  const stored = { saveHistory: _hist, ...(await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate", "extImportFromFilename"])) };
+  const stored = await browser.storage.local.get(["extImportExcludes", "extImportCutoffDate", "extImportFromDate", "extImportFromFilename"]);
   let savedExcludes = stored.extImportExcludes || [...EXT_IMPORT_DEFAULT_EXCLUDES];
 
-  // BorgesTag 最古保存日ヒント（外部取り込みエントリを除外して算出）
+  // BorgesTag 最古保存日ヒント（GROUP-158-fix：全件読込せず索引 cursor で1件だけ取得）
   const hintEl = document.getElementById("ext-cutoff-hint");
-  if (hintEl && stored.saveHistory?.length) {
-    const normalEntries = stored.saveHistory.filter(e => e.source !== "external_import");
-    if (normalEntries.length) {
-      const oldest = normalEntries.reduce((a, b) =>
-        new Date(a.savedAt) < new Date(b.savedAt) ? a : b
-      );
-      hintEl.textContent = `（BorgesTag 最古保存日: ${oldest.savedAt.slice(0, 10)}）`;
-    }
+  if (hintEl) {
+    try {
+      const oldest = await _findOldestNonExternalImportEntry();
+      if (oldest) hintEl.textContent = `（BorgesTag 最古保存日: ${oldest.savedAt.slice(0, 10)}）`;
+    } catch (_) { /* ヒント表示失敗は非致命 */ }
   }
 
   // 基準日時を復元

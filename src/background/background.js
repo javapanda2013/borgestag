@@ -564,8 +564,8 @@ async function handleAsyncMessage(message, sender) {
       return { ok: true };
     case "GENERATE_MISSING_THUMBS":
       return generateMissingThumbs(message.targetIds || null, message.overwrite || false);
-    case "EXPORT_IDB_THUMBS":
-      return exportIdbThumbs();
+    case "GET_IDB_THUMBS_STATS":
+      return getIdbThumbsStats();
     case "GET_IDB_THUMBS_BY_IDS":
       return getIdbThumbsByIds(message.ids);
     case "IMPORT_IDB_THUMBS":
@@ -2475,27 +2475,33 @@ async function blobToDataUrl(blob) {
   return "data:image/jpeg;base64," + btoa(binary);
 }
 
-async function exportIdbThumbs() {
+/**
+ * GROUP-158-fix：サムネ export 見積り用の軽量集計。
+ * 全件 getAll()＋FileReader Base64 変換（旧 exportIdbThumbs、EXPORT_IDB_THUMBS、〜350MB）は
+ * structured-clone 256 MiB IPC ハードリミットに抵触しうる／設定画面を開くたび無条件発火で
+ * タブクラッシュを招いていたため撤廃した。
+ * openCursor で 1 レコードずつ辿り、件数と blob.size（メタデータ、本体未読込）だけを積算する。
+ */
+async function getIdbThumbsStats() {
   try {
     const db = await openThumbDB();
-    const records = await new Promise((resolve, reject) => {
+    const { count, totalBytes } = await new Promise((resolve, reject) => {
       const tx    = db.transaction(IDB_STORE, "readonly");
       const store = tx.objectStore(IDB_STORE);
-      const req   = store.getAll();
-      req.onsuccess = (e) => resolve(e.target.result || []);
-      req.onerror   = (e) => reject(e.target.error);
+      let count = 0, totalBytes = 0;
+      const req = store.openCursor();
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (!cursor) { resolve({ count, totalBytes }); return; }
+        if (cursor.value?.blob) {
+          count++;
+          totalBytes += cursor.value.blob.size || 0;
+        }
+        cursor.continue();
+      };
+      req.onerror = (e) => reject(e.target.error);
     });
-
-    // Blob → Base64 DataURL に変換（v1.30.11：FileReader 経路で中間文字列削減）
-    const thumbs = [];
-    for (const rec of records) {
-      if (!rec.id || !rec.blob) continue;
-      thumbs.push({
-        id:      rec.id,
-        dataUrl: await blobToDataUrl(rec.blob),
-      });
-    }
-    return { ok: true, thumbs };
+    return { ok: true, count, totalBytes };
   } catch (err) {
     return { ok: false, error: err.message };
   }

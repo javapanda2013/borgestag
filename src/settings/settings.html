@@ -977,12 +977,15 @@
           差分エクスポートモード（前回エクスポート以降の新規エントリのみを対象にする）
         </label>
 
-        <!-- サムネイル埋込オプション（GROUP-26-III / v1.29.1） -->
+        <!-- サムネイル埋込オプション（GROUP-26-III / v1.29.1、見積りオプトイン化：GROUP-158-fix） -->
         <label class="export-auto-label" style="margin-top:4px;">
           <input type="checkbox" id="chk-export-thumbs" checked />
           サムネイル画像をエクスポートに含める
-          <span id="export-thumbs-size-hint" style="color:#888;font-size:.85em;margin-left:8px;"></span>
         </label>
+        <div style="margin-top:2px;margin-left:22px;">
+          <button type="button" id="btn-export-thumbs-estimate" style="font-size:.85em;padding:2px 8px;">サイズを見積る</button>
+          <span id="export-thumbs-size-hint" style="color:#888;font-size:.85em;margin-left:8px;"></span>
+        </div>
 
         <div class="backup-actions">
           <button class="backup-btn export" id="btn-export">⬇ エクスポート（ZIPファイル保存）</button>

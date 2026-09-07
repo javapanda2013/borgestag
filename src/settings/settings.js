@@ -5939,15 +5939,13 @@ function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
   canvas.addEventListener("click", async (e) => {
     e.stopPropagation();
     // Click 時に dataUrl を取得して Lightbox へ。Phase 4 で Lightbox も canvas 化予定
-    // v1.41.2：frontend cache hit なら sendMessage skip
-    let dataUrl = _frontCacheGet(entry.thumbId);
-    if (!dataUrl) {
-      try {
-        const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId });
-        dataUrl = r?.dataUrl;
-        if (dataUrl) _frontCachePut(entry.thumbId, dataUrl);
-      } catch (_) { /* ignore */ }
-    }
+    // GROUP-137：front cache は Blob 専用（GROUP-133 B、settings.js:5507）で GIF は
+    // 明示除外（settings.js:5522）のため常時 no-op だった dead path。除去し常時 fetch にする。
+    let dataUrl;
+    try {
+      const r = await browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId });
+      dataUrl = r?.dataUrl;
+    } catch (_) { /* ignore */ }
     if (!dataUrl) return;
     if (onThumbClick) {
       onThumbClick(dataUrl, canvas);
@@ -5965,7 +5963,8 @@ function _setupGifCanvasInPlaceholder(card, entry, onThumbClick, opts) {
 
 function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
   if (!canvas?.parentNode) return;
-  // v1.41.2：frontend cache hit なら同期で <img> 置換
+  // GROUP-137：front cache は Blob 専用（GROUP-133 B、settings.js:5507）で GIF は
+  // 明示除外（settings.js:5522）のため常時 no-op だった dead path。除去し常時 fetch にする。
   const _attach = (dataUrl) => {
     if (!canvas?.parentNode) return;
     const img = document.createElement("img");
@@ -5985,15 +5984,9 @@ function _fallbackCanvasToImg(canvas, entry, onThumbClick) {
     });
     canvas.replaceWith(img);
   };
-  const cached = _frontCacheGet(entry.thumbId);
-  if (cached) {
-    _attach(cached);
-    return;
-  }
   browser.runtime.sendMessage({ type: "GET_THUMB_DATA_URL", thumbId: entry.thumbId })
     .then(r => {
       if (!r?.dataUrl) return;
-      _frontCachePut(entry.thumbId, r.dataUrl);
       _attach(r.dataUrl);
     }).catch(() => {});
 }

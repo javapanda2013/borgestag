@@ -9,7 +9,10 @@
  * omggif / neuquant を ES import する（CSP: script-src 'self'、eval/new Function 非依存）。
  *
  * プロトコル（メイン→Worker）：
- *   { type:"INIT",  width, height, loop }         … GifWriter を生成
+ *   { type:"INIT",  width, height, loop, paletteShareK }  … GifWriter を生成
+ *     paletteShareK 省略時は 1（毎フレーム学習＝従来どおり）。GROUP-156-pal：N>1 で
+ *     N コマに 1 回だけ NeuQuant を学習し直し、間のコマは直近パレットで lookup のみ行う
+ *     高速化（画質とのトレードオフはハーネスでの実サンプル比較を経て確定）。
  *   { type:"FRAME", index, total, rgba(ArrayBuffer, transfer), width, height, delayMs }
  *   { type:"FINISH" }                              … trailer を書き RESULT 返却
  * Worker→メイン：
@@ -40,6 +43,14 @@ let frameH = 0;
 let accTargetMs = 0;
 let accWrittenCs = 0;
 
+// GROUP-156-pal：パレットを paletteShareK コマごとに共有する高速化（既定 1＝現行と完全同一挙動）。
+// K>1 のとき、shareFrameCounter % paletteShareK === 0 のコマでのみ NeuQuant を学習し直し、
+// 他のコマは直近の学習結果（sharedNQ/sharedPalette）で lookup のみ行う。
+let paletteShareK = 1;
+let sharedNQ = null;
+let sharedPalette = null;
+let shareFrameCounter = 0;
+
 // 主要な再生系がコマ delay を既定値へ読み替える閾値と、その既定値（centisec）。
 // これ未満の値を書いても再生時には MIN_DELAY_CS 相当で表示されるため、書く側で揃える。
 // 詳細は FRAME 処理側のコメント参照。
@@ -58,7 +69,17 @@ function dataToRGB(rgba, n) {
   return rgb;
 }
 
-/** 1 コマを量子化して {indexed(Uint8Array), palette(Uint32 相当の number[256])} を返す */
+/** 学習済み NeuQuant インスタンスで（再学習せず）indexed を引くだけ */
+function lookupIndexed(nq, rgba, n) {
+  const indexed = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    // dataToRGB と同じ R,G,B 順で lookup（内部変数名 b,g,r は Dekker 由来の呼称）
+    indexed[i] = nq.lookupRGB(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]);
+  }
+  return indexed;
+}
+
+/** 1 コマを量子化して {indexed(Uint8Array), palette(Uint32 相当の number[256]), nq(NeuQuant)} を返す */
 function quantize(rgba, n) {
   const rgb = dataToRGB(rgba, n);
   const nq = new NeuQuant(rgb, SAMPLE_FAC);
@@ -68,12 +89,8 @@ function quantize(rgba, n) {
   for (let i = 0; i < 256; i++) {
     palette[i] = (map[i * 3] << 16) | (map[i * 3 + 1] << 8) | map[i * 3 + 2];
   }
-  const indexed = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    // dataToRGB と同じ R,G,B 順で lookup（内部変数名 b,g,r は Dekker 由来の呼称）
-    indexed[i] = nq.lookupRGB(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]);
-  }
-  return { indexed, palette };
+  const indexed = lookupIndexed(nq, rgba, n);
+  return { indexed, palette, nq };
 }
 
 /**
@@ -110,6 +127,11 @@ self.onmessage = (e) => {
       chunks = [];
       accTargetMs = 0;
       accWrittenCs = 0;
+      // GROUP-156-pal：未指定（既定 1）なら現行と完全同一（毎フレーム学習）。
+      paletteShareK = (Number.isInteger(msg.paletteShareK) && msg.paletteShareK > 0) ? msg.paletteShareK : 1;
+      sharedNQ = null;
+      sharedPalette = null;
+      shareFrameCounter = 0;
       // 1 コマ分の LZW 出力＋ローカルパレット＋ヘッダに十分な窓（非圧縮でも収まる余裕を取る）
       outBuf = new Uint8Array(frameW * frameH * 2 + (1 << 20));
       writer = new GifWriter(outBuf, frameW, frameH, {
@@ -124,7 +146,20 @@ self.onmessage = (e) => {
       const w = msg.width, h = msg.height;
       const n = w * h;
       const rgba = new Uint8Array(msg.rgba);
-      const { indexed, palette } = quantize(rgba, n);
+      // GROUP-156-pal：paletteShareK コマに 1 回だけ学習し直し、他は直近パレットで lookup のみ。
+      // K=1（既定）のときは shareFrameCounter % 1 === 0 が常に真＝毎回 quantize() を通り現行と同一。
+      let indexed, palette;
+      if (!sharedNQ || shareFrameCounter % paletteShareK === 0) {
+        const q = quantize(rgba, n);
+        indexed = q.indexed;
+        palette = q.palette;
+        sharedNQ = q.nq;
+        sharedPalette = q.palette;
+      } else {
+        indexed = lookupIndexed(sharedNQ, rgba, n);
+        palette = sharedPalette;
+      }
+      shareFrameCounter++;
       // ms → centisec（キャリー付き）。下限の効能は「総尺の忠実性」。
       // 主要な再生系は CLAMPED_BELOW_CS 未満の delay を既定値 10cs に読み替えるため、そこへ 1cs を
       // 書いても実際には 10cs 表示になり、ファイルが宣言する総尺と実際の再生尺が食い違う。

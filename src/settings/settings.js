@@ -6610,6 +6610,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       }
     } else if (e.key === "Escape") {
       closeInfoEditor();
+    } else if (e.key === "Backspace" && !editorInput.value && pendingTags.size > 0) {
+      // GROUP-162：入力欄が空の状態で Backspace → 直前に追加したタグを削除（隣接する✕ボタン=6349-6351と同仕様）
+      const last = [...pendingTags].at(-1);
+      _undoStack.push({ type: "deleteTag", tag: last });
+      pendingTags.delete(last);
+      renderEditorChips();
+      saveEntryNow();
+      updateUndoBtn();
     }
   });
 
@@ -6652,6 +6660,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       }
       authorInput.value = "";
       authorSugEl.style.display = "none";
+    } else if (e.key === "Backspace" && !authorInput.value && pendingAuthors.length > 0) {
+      // GROUP-162：入力欄が空の状態で Backspace → 直前に追加した権利者を削除（隣接する✕ボタン=6397-6399と同仕様）
+      const last = pendingAuthors.at(-1);
+      _undoStack.push({ type: "deleteAuthor", author: last });
+      pendingAuthors = pendingAuthors.filter(x => x !== last);
+      renderAuthorEditorChips();
+      saveEntryNow();
+      updateUndoBtn();
     }
   });
 

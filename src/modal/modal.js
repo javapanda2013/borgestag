@@ -4251,6 +4251,14 @@ function setupModalEvents(
           authSugPanel.classList.remove("visible");
         } else if (e.key === "Escape") {
           infoEditor.classList.remove("visible");
+        } else if (e.key === "Backspace" && !authInput.value && pendingAuthors.length > 0) {
+          // GROUP-162：tagEditorIn（4201-4209）と同仕様。undo stack ＋ 自動保存を伴う
+          const last = pendingAuthors.at(-1);
+          _undoStack.push({ type: "deleteAuthor", author: last });
+          pendingAuthors = pendingAuthors.filter(x => x !== last);
+          renderInfoAuthorChips();
+          _modalSaveEntryNow();
+          _modalUpdateUndoBtn();
         }
       });
 
@@ -6394,6 +6402,10 @@ function setupModalEvents(
         }
       } else if (e.key === "Escape") {
         authorInput.value = ""; authorInputClear.style.display = "none"; hideAuthorSuggestions(); _destAuthorNav.reset();
+      } else if (e.key === "Backspace" && !authorInput.value && selectedAuthors.length > 0) {
+        // GROUP-162：入力欄が空の状態で Backspace → 直前に追加した権利者チップを削除（tagInput 5655-5658 と同仕様）
+        selectedAuthors.pop();
+        renderDestAuthorChips();
       }
     });
     authorInputClear.addEventListener("click", () => {

@@ -1622,6 +1622,12 @@ function buildModalHTML(defaultFilename) {
       display: none; z-index: 200; min-width: 140px; font-size: 11px;
     }
     .history-info-author-suggestions.visible { display: block; }
+    /* GROUP-161：同じパネルのタグ側（.history-tag-suggestions .suggestion-item）と同じ作りに揃える。
+       color 未指定だと祖先 .history-info-editor-inner の白文字を継承し、白背景に白文字で見えなくなっていた */
+    .history-info-author-suggestions .suggestion-item {
+      padding: 5px 9px; cursor: pointer; font-size: 11px; color: #1a1a1a;
+    }
+    .history-info-author-suggestions .suggestion-item:hover { background: #f0f4ff; }
     .history-info-path-input {
       font-size: 10px; color: rgba(255,255,255,0.85); word-break: break-all;
       background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
@@ -6356,13 +6362,15 @@ function setupModalEvents(
       : allAuthors
     ).filter(a => !selectedAuthors.includes(a));
     if (!matches.length) { hideAuthorSuggestions(); return; }
+    // GROUP-164：候補に共通の suggestion-item クラスを付与（サブタグ候補 showSubSuggestions と同じ作り）。
+    // 旧実装はクラス無しのインライン style のみで、上下キー操作（_setupSuggestKbdNav）が付ける
+    // .active に対応する CSS が効かず、選択中候補に色がつかなかった。hover も汎用 CSS
+    // （.suggestion-item:hover, .suggestion-item.active）に任せ、JS による背景色の直書きは廃止。
     authorSuggestEl.innerHTML = matches.slice(0, 8).map(a =>
-      `<div style="padding:5px 9px;cursor:pointer;color:#1a1a1a;" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
+      `<div class="suggestion-item" data-author="${escapeHtml(a)}">${escapeHtml(a)}</div>`
     ).join("");
     authorSuggestEl.style.display = "block";
     authorSuggestEl.querySelectorAll("[data-author]").forEach(el => {
-      el.addEventListener("mouseenter", () => el.style.background = "#f0f4ff");
-      el.addEventListener("mouseleave", () => el.style.background = "");
       el.addEventListener("mousedown", (ev) => {
         ev.preventDefault();
         addAuthorChip(el.dataset.author);

@@ -6358,12 +6358,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     });
   }
 
+  // GROUP-161：表示切替は .visible クラス方式（settings.html の .hist-tag-editor-suggestions.visible と整合）。
+  // 旧実装の style.display = "" はクラス側の display:none を打ち消せず、候補が一度も表示されなかった。
   function showTagSuggestions(query) {
     editorSuggestions.innerHTML = "";
-    if (!query) { editorSuggestions.style.display = "none"; return; }
+    if (!query) { editorSuggestions.classList.remove("visible"); return; }
     const q = query.toLowerCase();
     const matches = globalTags.filter(t => t.toLowerCase().includes(q) && !pendingTags.has(t)).slice(0, 8);
-    if (!matches.length) { editorSuggestions.style.display = "none"; return; }
+    if (!matches.length) { editorSuggestions.classList.remove("visible"); return; }
     matches.forEach(t => {
       const item = document.createElement("div");
       item.className = "suggestion-item";
@@ -6373,14 +6375,14 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         _undoStack.push({ type: "addTag", tag: t });
         pendingTags.add(t);
         editorInput.value = "";
-        editorSuggestions.style.display = "none";
+        editorSuggestions.classList.remove("visible");
         renderEditorChips();
         saveEntryNow();
         updateUndoBtn();
       });
       editorSuggestions.appendChild(item);
     });
-    editorSuggestions.style.display = "";
+    editorSuggestions.classList.add("visible");
   }
 
   // ---- 作者チップ描画 ----
@@ -6412,7 +6414,8 @@ function _buildHistCardInner(card, entry, onThumbClick) {
       ? globalAuthors.filter(a => a.toLowerCase().includes(q.toLowerCase()))
       : globalAuthors
     ).filter(a => !pendingAuthors.includes(a)).slice(0, 8);
-    if (!matches.length) { authorSugEl.style.display = "none"; return; }
+    // GROUP-161：表示切替は .visible クラス方式（settings.html の .hist-author-suggestions.visible と整合）
+    if (!matches.length) { authorSugEl.classList.remove("visible"); return; }
     matches.forEach(a => {
       const item = document.createElement("div");
       item.className = "suggestion-item";
@@ -6427,11 +6430,11 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           updateUndoBtn();
         }
         authorInput.value = "";
-        authorSugEl.style.display = "none";
+        authorSugEl.classList.remove("visible");
       });
       authorSugEl.appendChild(item);
     });
-    authorSugEl.style.display = "";
+    authorSugEl.classList.add("visible");
   }
 
   // ---- リアルタイム保存 ----
@@ -6474,9 +6477,9 @@ function _buildHistCardInner(card, entry, onThumbClick) {
     renderAuthorEditorChips();
     updateUndoBtn();
     editorInput.value = "";
-    editorSuggestions.style.display = "none";
+    editorSuggestions.classList.remove("visible");
     authorInput.value = "";
-    authorSugEl.style.display = "none";
+    authorSugEl.classList.remove("visible");
     // サムネイル取得→インライン表示
     // GROUP-133 B：card の img.src は revoke 済 Blob URL になり得る（コピー不可）。常に thumbId から取得。
     if (entry.thumbId) {
@@ -6571,25 +6574,26 @@ function _buildHistCardInner(card, entry, onThumbClick) {
 
   // ---- タグ入力配線 ----
   editorInput.addEventListener("input", () => showTagSuggestions(editorInput.value.trim()));
-  editorInput.addEventListener("blur", () => { setTimeout(() => { editorSuggestions.style.display = "none"; }, 150); });
+  // GROUP-161：以下の表示判定・表示切替も .visible クラス方式へ統一
+  editorInput.addEventListener("blur", () => { setTimeout(() => { editorSuggestions.classList.remove("visible"); }, 150); });
   // v1.46.27 GROUP-100：上下キー active 移動
   const _editorTagNav = _setupSuggestKbdNav({
     input: editorInput,
     getItems: () => editorSuggestions.querySelectorAll(".suggestion-item"),
-    isVisible: () => editorSuggestions.style.display !== "none" && editorSuggestions.children.length > 0,
+    isVisible: () => editorSuggestions.classList.contains("visible") && editorSuggestions.children.length > 0,
   });
   editorInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       // v1.46.27 GROUP-100：active があれば優先
       const active = _editorTagNav.pickActive();
-      if (active && editorSuggestions.style.display !== "none") {
+      if (active && editorSuggestions.classList.contains("visible")) {
         e.preventDefault();
         const val = active.textContent;
         if (val && !pendingTags.has(val)) {
           _undoStack.push({ type: "addTag", tag: val });
           pendingTags.add(val);
           editorInput.value = "";
-          editorSuggestions.style.display = "none";
+          editorSuggestions.classList.remove("visible");
           renderEditorChips();
           saveEntryNow();
           updateUndoBtn();
@@ -6603,7 +6607,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         _undoStack.push({ type: "addTag", tag: val });
         pendingTags.add(val);
         editorInput.value = "";
-        editorSuggestions.style.display = "none";
+        editorSuggestions.classList.remove("visible");
         renderEditorChips();
         saveEntryNow();
         updateUndoBtn();
@@ -6623,18 +6627,19 @@ function _buildHistCardInner(card, entry, onThumbClick) {
 
   // ---- 作者入力配線 ----
   authorInput.addEventListener("input", () => showAuthorEditorSuggestions(authorInput.value.trim()));
-  authorInput.addEventListener("blur", () => { setTimeout(() => { authorSugEl.style.display = "none"; }, 150); });
+  // GROUP-161：以下の表示判定・表示切替も .visible クラス方式へ統一
+  authorInput.addEventListener("blur", () => { setTimeout(() => { authorSugEl.classList.remove("visible"); }, 150); });
   // v1.46.27 GROUP-100：上下キー active 移動
   const _editorAuthorNav = _setupSuggestKbdNav({
     input: authorInput,
     getItems: () => authorSugEl.querySelectorAll(".suggestion-item"),
-    isVisible: () => authorSugEl.style.display !== "none" && authorSugEl.children.length > 0,
+    isVisible: () => authorSugEl.classList.contains("visible") && authorSugEl.children.length > 0,
   });
   authorInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       // v1.46.27 GROUP-100：active があれば優先
       const active = _editorAuthorNav.pickActive();
-      if (active && authorSugEl.style.display !== "none") {
+      if (active && authorSugEl.classList.contains("visible")) {
         e.preventDefault();
         const val = active.textContent;
         if (val && !pendingAuthors.includes(val)) {
@@ -6645,7 +6650,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
           updateUndoBtn();
         }
         authorInput.value = "";
-        authorSugEl.style.display = "none";
+        authorSugEl.classList.remove("visible");
         _editorAuthorNav.reset();
         return;
       }
@@ -6659,7 +6664,7 @@ function _buildHistCardInner(card, entry, onThumbClick) {
         updateUndoBtn();
       }
       authorInput.value = "";
-      authorSugEl.style.display = "none";
+      authorSugEl.classList.remove("visible");
     } else if (e.key === "Backspace" && !authorInput.value && pendingAuthors.length > 0) {
       // GROUP-162：入力欄が空の状態で Backspace → 直前に追加した権利者を削除（隣接する✕ボタン=6397-6399と同仕様）
       const last = pendingAuthors.at(-1);

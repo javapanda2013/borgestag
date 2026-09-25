@@ -764,6 +764,13 @@
       max-height: 100px; overflow-y: auto;
       display: none; z-index: 200; min-width: 140px;
     }
+    /* GROUP-161：タグ側（.hist-tag-editor-suggestions、691-702行目）と同じ作りに揃える。
+       表示切替は .visible クラス、候補文字色は祖先 .hist-info-editor-inner の白文字継承を打ち消す */
+    .hist-author-suggestions.visible { display: block; }
+    .hist-author-suggestions .suggestion-item {
+      padding: 5px 9px; cursor: pointer; font-size: 11px; color: #1a1a1a;
+    }
+    .hist-author-suggestions .suggestion-item:hover { background: #f0f4ff; }
     .hist-path-input {
       background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
       border-radius: 4px; color: #fff; font-size: 10px;

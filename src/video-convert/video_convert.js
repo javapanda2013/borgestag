@@ -8,18 +8,19 @@
  * 1. storage.local._pendingVideoConvert から video メタ情報を取得
  * 2. <video> 要素でプレビュー
  * 3. 利用者が「GIF に変換」ボタンをクリック
- * 4. gifshot.createGIF({video: [videoUrl], ...fixed params}, callback) 実行
- * 5. progressCallback で進捗更新
- * 6. callback で obj.image（dataURL）取得
- * 7. _pendingModal に dataURL を格納し、OPEN_MODAL_WINDOW で既存の保存モーダル起動
- * 8. 自ウィンドウは自動 close
+ * 4. GROUP-166：取り出し用 video を一時停止のまま 0.1 秒刻みの各時刻へ seek し、seeked 後に
+ *    1 コマずつ描画（makeVideoSeekFrameSource）→ 自前のストリーミングエンコーダ（streamEncodeGif、
+ *    うごイラと共通）で GIF 化する。旧 gifshot.createGIF（実時間再生＋loop=true で取り出す方式）は撤去
+ * 5. エンコーダの PROGRESS（done/total コマ）で進捗更新
+ * 6. 完了時に GIF を Blob で受領（音声はプレビュー要素から並行録音）
+ * 7. STASH_CONVERSION_PAYLOAD で background へ預け、既存の保存モーダル起動
+ * 8. 自ウィンドウは自動 close（自動遷移 OFF 時は保存方法ボタンを表示）
  *
  * Phase 1 固定パラメータ：
- * - 長さ 20 秒（numFrames=200, interval=0.1）
+ * - 長さ＝実尺（録画上限まで）
  * - fps 10（interval=0.1）
  * - 幅 480px（元動画のアスペクト比維持、元幅が 480 未満なら元幅維持）
- * - sampleInterval 10（gifshot 既定）
- * - numWorkers 2（gifshot 既定）
+ * - 量子化のサンプリング係数 10（gif-encoder.worker.js の SAMPLE_FAC）
  *
  * 対応範囲（v1.46.46 GROUP-15 範囲拡大後）：
  * - 直 mp4/webm URL：従来どおりこのウィンドウが直接ロード
@@ -38,6 +39,8 @@ const PHASE1_PARAMS = {
   DURATION_SEC: 20,
   FPS: 10,
   MAX_WIDTH: 480,
+  // GROUP-166：以下 2 つは旧 gifshot 経路のパラメータ。動画経路から gifshot を外したため現行未使用
+  // （量子化係数は gif-encoder.worker.js の SAMPLE_FAC=10 が同値で担う）。
   SAMPLE_INTERVAL: 10,
   NUM_WORKERS: 2,
   // Phase 1.5 GROUP-28 mvdl：音声録音パラメータ
@@ -115,11 +118,15 @@ async function loadPreviewVideo(video, url) {
     video.load();
   });
 
+  window.__previewCorsFailReason = null;
   try {
     await tryLoad(true);
     window.__previewCorsLoaded = true;
   } catch (corsErr) {
     // CORS 非対応サーバーは fallback で crossOrigin なしロード（この場合は音声録音不可）
+    // GROUP-166：CORS 付き読込が「読込エラー」で落ちたのか「10 秒の待ち切れ」で落ちたのかを残す
+    // （init() で変換可否の判定に使う。待ち切れは遅いだけで CORS 対応の可能性があるため区別する）
+    window.__previewCorsFailReason = corsErr && corsErr.message;
     await tryLoad(false);
     window.__previewCorsLoaded = false;
   }
@@ -133,13 +140,19 @@ async function loadPreviewVideo(video, url) {
  * 成功時：Blob（audio/webm）
  * 失敗時：null（audio track なし / MIME 非サポート / captureStream 非対応 / 再生失敗等）
  *
- * v1.31.5 修正：2 つの <video> を同時ロードするとタブクラッシュの原因になるため、
+ * v1.31.5 修正：v1.31.4 で録音用の <video> を新規作成したところ gifshot 内部 video と同一 URL の
+ * 多重ロードになり（大容量データの storage 経由受渡しと重なって）タブクラッシュしたため、
  * 既存プレビュー要素を流用する方式に変更。volume=0 で利用者に無音、muted=false で
  * captureStream に audio track が入る状態を保つ。
+ *
+ * GROUP-166：signal（AbortSignal、省略可）で録音を中断できる。中止・変換失敗・再試行で前回の録音が
+ * 裏で走り続け二重録音にならないよう、abort 時は録音を止めて **null で解決**する（途中までの音声は
+ * 使わない）。プレビューの状態（muted/volume/currentTime、一時停止）の復元は通常終了と同じ経路で行う。
  */
-async function recordAudio(previewVideo, durationSec) {
+async function recordAudio(previewVideo, durationSec, signal) {
   return new Promise((resolve) => {
     if (!previewVideo) return resolve(null);
+    if (signal && signal.aborted) return resolve(null);
     if (typeof previewVideo.captureStream !== "function") return resolve(null);
     // v1.31.7：CORS 非対応の場合 MediaRecorder が isolation で拒否するので早期 return。
     // Phase 1.5 の制限として、CORS を送らないサーバーの動画では音声録音不可。
@@ -153,10 +166,14 @@ async function recordAudio(previewVideo, durationSec) {
     const originalVolume = previewVideo.volume;
     const originalTime   = previewVideo.currentTime;
 
+    let onCanPlay = null; // canplay 待ち中の中断で外すため外側で保持
+    let onAbort = null;
     const resolveOnce = (value) => {
       if (resolved) return;
       resolved = true;
       if (hardTimer !== null) { clearTimeout(hardTimer); hardTimer = null; }
+      if (onCanPlay) { try { previewVideo.removeEventListener("canplay", onCanPlay); } catch (_) {} onCanPlay = null; }
+      if (signal && onAbort) { try { signal.removeEventListener("abort", onAbort); } catch (_) {} onAbort = null; }
       try { previewVideo.pause(); } catch (_) {}
       try { previewVideo.muted  = originalMuted; } catch (_) {}
       try { previewVideo.volume = originalVolume; } catch (_) {}
@@ -182,7 +199,18 @@ async function recordAudio(previewVideo, durationSec) {
       }, 1_000);
     }, HARD_TIMEOUT_MS);
 
+    // GROUP-166：中断。録音中なら止めるが、onstop で届く途中までの音声は採らず null で確定する
+    // （resolveOnce が先に resolved=true にするため、後着の onstop の resolveOnce(blob) は無視される）。
+    if (signal) {
+      onAbort = () => {
+        try { if (recorder && recorder.state === "recording") recorder.stop(); } catch (_) {}
+        resolveOnce(null);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     const startRecording = async () => {
+      if (resolved) return; // canplay 到達前に中断・期限切れで確定済み
       try {
         // v1.31.6：確実に unmuted + volume=0 状態にしてから play → captureStream の順番で実行。
         // play() を先に呼ぶことで audio pipeline が稼働、captureStream で audio track が取得できる。
@@ -196,9 +224,12 @@ async function recordAudio(previewVideo, durationSec) {
         } catch (playErr) {
           return resolveOnce(null);
         }
+        // GROUP-166：await の間に中断されていたら録音を始めない（resolveOnce 済み＝プレビュー復元済み）
+        if (resolved) return;
 
         // 少し待って audio pipeline が安定してから captureStream
         await new Promise(r => setTimeout(r, 150));
+        if (resolved) return;
 
         const stream = previewVideo.captureStream();
         const audioTracks = stream.getAudioTracks();
@@ -239,16 +270,14 @@ async function recordAudio(previewVideo, durationSec) {
     if (previewVideo.readyState >= 3) {
       startRecording();
     } else {
-      const onCanPlay = () => {
+      onCanPlay = () => {
         previewVideo.removeEventListener("canplay", onCanPlay);
+        onCanPlay = null;
         startRecording();
       };
       previewVideo.addEventListener("canplay", onCanPlay);
       setTimeout(() => {
-        if (!resolved) {
-          previewVideo.removeEventListener("canplay", onCanPlay);
-          resolveOnce(null);
-        }
+        if (!resolved) resolveOnce(null); // canplay リスナは resolveOnce が外す
       }, 15_000);
     }
   });
@@ -353,6 +382,149 @@ function makeUgoiraFrameSource(frameUrls, delays) {
       return { rgba: drawToRgba(img), delayMs: delays[i] };
     },
     dispose() { canvas = null; ctx = null; firstRgba = null; },
+  };
+}
+
+/**
+ * GROUP-166：動画用のフレーム供給元（seek 方式）。streamEncodeGif の供給元インタフェースに従う。
+ *
+ * 旧 gifshot は内部 video を実時間再生（loop=true）しつつ「1 コマ処理後に 100ms 待って次」で取り出して
+ * いたため、取り出しが遅いと動画が何周もし、GIF の中身が早回し＋繰り返しになった。ここでは再生せず、
+ * 一時停止のまま各コマの目標時刻 t_i へ currentTime で移動し、seeked を待ってから描く。
+ * 中身は取り出しの速さ・処理の重さに左右されず、i 番目のコマは常に元動画の t_i の画面になる。
+ *
+ *   t_i = max(0, min((i + 0.5) * intervalSec, 実尺 - 0.01))   … 各 0.1 秒区間の中央。単調増加
+ *   delayMs = round(intervalSec * 1000)                       … 全コマ同値（10fps なら 100ms）
+ *
+ * - コマ数（total）と実尺（durationSec）は init() で取り出し用 video の実尺が分かった時点で確定する
+ *   （total = min(numFrames, round(実尺 / intervalSec))）。呼び出し側は init 前の値を使わず、確定後の
+ *   total／durationSec を読む（streamEncodeGif はループ毎に total を読み、進捗の total も同じ値になる）。
+ *   実尺が指定尺より短い時に、末尾へ同じ時刻の静止コマが並ぶのを防ぐ。
+ * - 長さが Infinity/NaN の webm（MediaRecorder 由来に多い）は、取り出し前に currentTime を大きな値へ
+ *   移して seeked を待ち実尺を確定させる（tools/notes/frame_dup_diagnose.js と同じ手法）。それでも
+ *   取れなければ seekable の終端、最後は渡された尺を使う。
+ * - fastSeek は使わない（キーフレームへ丸める近似 seek のため、目標時刻の画面にならない）。
+ * - 目標時刻が現在位置と実質同じなら currentTime を代入せずそのまま描く（同じ位置への代入で seeked が
+ *   来ない実装があった場合に永久待ちにしない）。
+ * - 取り出し用 video は gifshot 内部の要素を置き換えるもの＝プレビュー（録音用）と合わせ、gifshot 時代と
+ *   同じ 2 本のまま。v1.31.4 で録音用の video を新規作成して gifshot 内部 video と同一 URL の多重ロードに
+ *   なり（大容量データの storage 経由受渡しと重なって）タブクラッシュした経緯があるため、3 本にしない。
+ * - 待ちはすべて AbortSignal で中断できる。時間切れによる自動打ち切りは入れない（GROUP-165：
+ *   止めるのは利用者の「中止」だけ）。
+ *
+ * @param {string} videoUrl
+ * @param {{w:number,h:number}} size  computeGifSize の結果（最大幅 480px）
+ * @param {number} numFrames    指定尺から求めたコマ数（上限。実尺が短ければ init で減る）
+ * @param {number} intervalSec
+ * @param {number} durationSec  変換する尺（録画上限で clamp 済み）
+ */
+function makeVideoSeekFrameSource(videoUrl, size, numFrames, intervalSec, durationSec) {
+  let video = null, canvas = null, ctx = null;
+  let effDur = durationSec;
+  let total = numFrames;
+  const delayMs = Math.round(intervalSec * 1000);
+  const SAME_TIME_EPS = 1e-6;
+
+  /** el の okType を待つ。error / abort で reject。リスナは必ず外す */
+  const waitMediaEvent = (el, okType, signal) => new Promise((resolve, reject) => {
+    if (signal && signal.aborted) { reject(new Error("cancelled")); return; }
+    const cleanup = () => {
+      el.removeEventListener(okType, onOk);
+      el.removeEventListener("error", onErr);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    };
+    const onOk = () => { cleanup(); resolve(); };
+    const onErr = () => {
+      cleanup();
+      const code = el.error && el.error.code;
+      reject(new Error(`取り出し用の動画を読み込めませんでした${code ? `（code ${code}）` : ""}。CORS を返さないサーバーの動画などで起こります`));
+    };
+    const onAbort = () => { cleanup(); reject(new Error("cancelled")); };
+    el.addEventListener(okType, onOk);
+    el.addEventListener("error", onErr);
+    if (signal) signal.addEventListener("abort", onAbort);
+  });
+
+  /** 位置を t へ移す。実質同じ位置なら代入しない（seeked を待たずに済む） */
+  const seekTo = async (t, signal) => {
+    if (Math.abs(video.currentTime - t) < SAME_TIME_EPS) return;
+    const seeked = waitMediaEvent(video, "seeked", signal);
+    video.currentTime = t; // 正確な seek（fastSeek は使わない）
+    await seeked;
+  };
+
+  const finiteDur = (d) => Number.isFinite(d) && d > 0;
+
+  /** 取り出し用 video の実尺を求める（取れなければ null） */
+  const probeDuration = async (signal) => {
+    if (finiteDur(video.duration)) return video.duration;
+    // 長さ不明の webm：終端の先まで移動すると、読み進めた結果として実尺が確定する
+    await seekTo(1e7, signal);
+    if (finiteDur(video.duration)) return video.duration;
+    try {
+      const s = video.seekable;
+      if (s && s.length > 0) {
+        const end = s.end(s.length - 1);
+        if (finiteDur(end)) return end;
+      }
+    } catch (_) {}
+    return null;
+  };
+
+  const targetTime = (i) => Math.max(0, Math.min((i + 0.5) * intervalSec, effDur - 0.01));
+
+  return {
+    /** 取り出すコマ数（init 後に確定。streamEncodeGif がループ毎に読む） */
+    get total() { return total; },
+    /** 変換する尺（init 後に確定。音声の durationSec 等に使う） */
+    get durationSec() { return effDur; },
+    async init(signal) {
+      if (signal && signal.aborted) throw new Error("cancelled");
+      video = document.createElement("video");
+      video.crossOrigin = "anonymous"; // canvas を汚染させない（getImageData のため）
+      video.muted = true;
+      video.loop = false;              // 終端で先頭へ戻らない（旧方式の巻き戻り混入の原因）
+      video.preload = "auto";
+      video.playsInline = true;
+      video.setAttribute("playsinline", "");
+      // display:none や画面外（left:-10000px 等）には置かない。Firefox は不可視と判定した video の
+      // デコードを止める（背景動画の省電力機能）ことがあり、seek 後のコマが描けなくなる恐れがあるため
+      // （推測。実機で要確認）。旧 gifshot が内部 video に使っていた配置（position:fixed＋opacity:0、
+      // このウィンドウで実際にコマが描けていた）と同じにし、操作の邪魔にならないよう pointer-events を切る。
+      video.style.cssText = "position:fixed;left:0;top:0;opacity:0;pointer-events:none;z-index:-1;"
+        + `width:${size.w}px;height:${size.h}px;`;
+      document.body.appendChild(video);
+
+      canvas = document.createElement("canvas");
+      canvas.width = size.w;
+      canvas.height = size.h;
+      ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+      // loadeddata（先頭コマのデコード完了＝メタデータも既知）を待つ。リスナ登録後に src を入れる。
+      const loaded = waitMediaEvent(video, "loadeddata", signal);
+      video.src = videoUrl;
+      video.load();
+      await loaded;
+      // 実尺で終端とコマ数を確定させる（実尺が取れなければ渡された尺のまま）
+      const realDur = await probeDuration(signal);
+      if (realDur !== null) effDur = Math.min(durationSec, realDur);
+      total = Math.min(numFrames, Math.max(1, Math.round(effDur / intervalSec)));
+      return { w: size.w, h: size.h };
+    },
+    async next(i, signal) {
+      if (signal && signal.aborted) throw new Error("cancelled");
+      await seekTo(targetTime(i), signal);
+      ctx.clearRect(0, 0, size.w, size.h);
+      ctx.drawImage(video, 0, 0, size.w, size.h);
+      return { rgba: ctx.getImageData(0, 0, size.w, size.h).data.buffer, delayMs };
+    },
+    dispose() {
+      if (video) {
+        try { video.removeAttribute("src"); video.load(); } catch (_) {}
+        try { if (video.parentNode) video.parentNode.removeChild(video); } catch (_) {}
+      }
+      video = null; canvas = null; ctx = null;
+    },
   };
 }
 
@@ -572,33 +744,9 @@ function _onCancelButtonClick() {
   window.close();
 }
 
-/**
- * GROUP-165：動画経路の中止。gifshot は止められないため、ウィンドウ再読込で裏の処理ごと破棄する。
- * ページ内録画の録画データは background が初回受領時に解放する（GET_VIDEO_CAPTURE）ので、
- * 再読込の前にこのウィンドウが持つ録画を預け直す。_pendingVideoConvert（メタ情報）は成功終端でしか
- * 消さないため残っており、再読込後の init() が同じ状態から始められる＝最初の画面から再試行できる。
- */
-async function _cancelByReload() {
-  log("中止しています…");
-  try {
-    if (window.__capturedBlobUrl) {
-      const blob = await (await fetch(window.__capturedBlobUrl)).blob();
-      const r = await browser.runtime.sendMessage({
-        type: "RESTASH_VIDEO_CAPTURE",
-        buffer: blob, // Blob の structured clone は実体をコピーしない
-        mime: blob.type || window.__capturedMime || "video/webm",
-      });
-      if (!r || !r.ok) throw new Error((r && r.error) || "録画データを預け直せませんでした");
-    }
-  } catch (err) {
-    log(`中止の準備に失敗しました（${(err && err.message) || err}）。ウィンドウを閉じ、ページ側で動画保存をもう一度実行してください。`, "error");
-    // 決着済み（_cancelActiveConversion は null）なので、ボタンは押すとウィンドウを閉じる
-    const cancel = document.getElementById("cancel-btn");
-    if (cancel) { cancel.disabled = false; cancel.textContent = "閉じる"; }
-    return;
-  }
-  location.reload();
-}
+// GROUP-166：動画経路の中止に使っていた再読込方式（録画を background へ預け直してウィンドウを再読込）は、
+// 動画も自前エンコーダ（enc.cancel() で本当に止まる）へ移行したため削除した。中止はうごイラと同じく
+// このウィンドウのまま行い、「再試行」でもう一度変換できる。
 
 /** 経過時間の表示（例：1分05秒） */
 function _formatElapsed(ms) {
@@ -767,7 +915,7 @@ async function init() {
 
     // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画経路。blob: URL はページ文脈限定のため、
     // content script が録画した webm を background のメモリ経由で受領し、
-    // このウィンドウ自身の blob URL に変換して以降の既存経路（プレビュー→gifshot）へ流す
+    // このウィンドウ自身の blob URL に変換して以降の既存経路（プレビュー→seek 取り出し）へ流す
     let effectiveUrl = videoUrl;
     let sourceLabel = null;
     if (captured) {
@@ -787,7 +935,6 @@ async function init() {
       effectiveUrl = URL.createObjectURL(capBlob);
       capBlob = null;
       window.__capturedBlobUrl = effectiveUrl;
-      window.__capturedMime = cap.mime || "video/webm"; // GROUP-165：中止時の預け直しで使う
       window.addEventListener("unload", () => {
         if (window.__capturedBlobUrl) URL.revokeObjectURL(window.__capturedBlobUrl);
       }, { once: true });
@@ -826,15 +973,18 @@ async function init() {
       return;
     }
 
-    // isSupported チェック
-    if (typeof gifshot === "undefined") {
-      log("gifshot ライブラリの読込に失敗しました。", "error");
+    // GROUP-166：gifshot の存在・対応チェック（typeof gifshot／isExistingVideoGIFSupported）は、
+    // 動画経路が gifshot を使わなくなったため削除。再生可否はプレビューの読込成否（上）で判定済み。
+
+    // GROUP-166：直 URL の動画で、CORS 付きの読込が読込エラーで失敗した（＝サーバーが CORS に応じない）
+    // 場合、取り出し用 video（crossOrigin="anonymous" で読む）も必ず失敗し、仮に読めても canvas が汚染されて
+    // コマを読み取れない。変換を始めてから失敗させず、準備の時点で変換できないことを伝える。
+    // ページ内録画（captured＝このウィンドウ自身の blob URL）は同一オリジンのため対象外。
+    // 10 秒の待ち切れで CORS なし読込へ切り替わった場合は、遅いだけで CORS 対応の可能性があるため止めない。
+    if (!captured && !window.__previewCorsLoaded && window.__previewCorsFailReason === "load error") {
+      log("このサイトの動画は GIF に変換できません（動画の配信元が CORS に対応していないため、コマを読み取れません）。", "error");
       document.getElementById("convert-btn").disabled = true;
-      return;
-    }
-    if (!gifshot.isExistingVideoGIFSupported(["mp4", "webm"])) {
-      log("このブラウザは mp4/webm → GIF 変換に対応していません。", "error");
-      document.getElementById("convert-btn").disabled = true;
+      document.getElementById("cancel-btn").addEventListener("click", _onCancelButtonClick);
       return;
     }
 
@@ -880,17 +1030,76 @@ function runConversion(videoUrl, pageUrl, origWidth, origHeight, hintDuration, c
   }
 }
 
+// ----------------------------------------------------------------
+// GROUP-152：gifshot の単位変換バグ対策（GIF の時間情報 delay=0 の正書き）
+//
+// GROUP-166：**現行の動画経路では未使用**（動画も自前エンコーダへ移行し、delay は Worker が正しく書く）。
+// 既存 GIF 修復ツール（tools/gif-repair/gif_delay_repair.py）との等価性検証のため残置している
+// （tools/node-harness/gif_delay_rewrite.mjs が本関数を実ソースから切り出して検証する）。
+//
+// 旧経路での経緯：gifshot は interval（秒、0.1）を内部でミリ秒扱いの delay オプションへ流し、さらに
+// ×0.1 の単位変換を掛けるため 0.1→0.01 となり、GIF 書込のビット演算で整数 0 に切り捨てられる
+// ＝**全コマ GCE delay=0**（時間情報なし）の GIF が生成される。0 を「最速」と解釈する再生系
+// （多くの外部アプリ・一部のブラウザ内 img 表示）では早送りになり、音声と乖離する（UAT 実害）。
+// vendored minified を触らず、生成直後にブロック構造を正しく歩いて delay を 10cs=100ms に
+// 正書きしていた（バイトパターンの盲目置換は LZW 圧縮データ中の偶然一致を誤爆し得るため不可）。
+// ----------------------------------------------------------------
+function _rewriteGifDelays(bytes, csWhenZero) {
+  if (bytes.length < 13 || bytes[0] !== 0x47 || bytes[1] !== 0x49 || bytes[2] !== 0x46) {
+    throw new Error("GIF ヘッダではありません");
+  }
+  let p = 6;
+  p += 4; // LSD: width(2) + height(2)
+  const packed = bytes[p]; p += 3; // packed, bgColor, aspect
+  if (packed & 0x80) p += 3 * (2 << (packed & 0x07)); // Global Color Table
+  let rewritten = 0;
+  const skipSubBlocks = () => {
+    while (p < bytes.length && bytes[p] !== 0) p += 1 + bytes[p];
+    p += 1; // block terminator
+  };
+  while (p < bytes.length) {
+    const b = bytes[p];
+    if (b === 0x3B) break; // trailer
+    if (b === 0x21) { // extension
+      const label = bytes[p + 1];
+      p += 2;
+      if (label === 0xF9) {
+        // GCE: size(=4), packed, delay_lo, delay_hi, transparentIdx, terminator
+        const size = bytes[p];
+        const delay = bytes[p + 2] | (bytes[p + 3] << 8);
+        if (delay === 0) {
+          bytes[p + 2] = csWhenZero & 0xFF;
+          bytes[p + 3] = (csWhenZero >> 8) & 0xFF;
+          rewritten++;
+        }
+        p += 1 + size;
+        skipSubBlocks();
+      } else {
+        skipSubBlocks();
+      }
+    } else if (b === 0x2C) { // image descriptor
+      p += 9; // separator(1) + left/top/w/h(8)
+      const ip = bytes[p]; p += 1;
+      if (ip & 0x80) p += 3 * (2 << (ip & 0x07)); // Local Color Table
+      p += 1; // LZW min code size
+      skipSubBlocks();
+    } else {
+      throw new Error(`未知の GIF ブロック 0x${b.toString(16)} @${p}`);
+    }
+  }
+  return rewritten;
+}
+
 function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hintDuration, capSec) {
   const btn = document.getElementById("convert-btn");
   btn.disabled = true;
   btn.textContent = "変換中…";
-  log("動画＋音声を読込中…");
+  log("動画を読込中…");
   updateProgress(0);
 
   const size = computeGifSize(origWidth, origHeight);
   // GROUP-15：実尺で変換（固定 20 秒/200 コマを廃止）。preview の duration を優先、無ければ
-  // 受領 duration、上限 capSec（設定値）で clamp。GIF 長 = numFrames × interval が実尺に一致し、
-  // 短い素材を 20 秒へ引き伸ばす際の末尾ループ/フリーズと音ずれを解消する。
+  // 受領 duration、上限 capSec（設定値）で clamp。GIF 長 = numFrames × interval が実尺に一致する。
   const previewVideo = document.getElementById("preview");
   const maxSec = (Number.isFinite(capSec) && capSec >= 1) ? capSec : PHASE1_PARAMS.DURATION_SEC;
   let actualDur = (Number.isFinite(previewVideo.duration) && previewVideo.duration > 0)
@@ -899,260 +1108,162 @@ function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hin
     : PHASE1_PARAMS.DURATION_SEC;
   actualDur = Math.max(0.5, Math.min(actualDur, maxSec));
   const numFrames = Math.max(1, Math.round(actualDur * PHASE1_PARAMS.FPS));
-  // 長尺は変換前に概算（コマ数・尺）を通知。コマ数上限は設けず全取得を尊重する（中断はしない）。
+  const intervalSec = 1 / PHASE1_PARAMS.FPS;
+  // 長尺は変換前に概算（コマ数・尺）を通知。コマ数上限は設けず全取得を尊重する（自動では打ち切らない）。
   if (numFrames > 600) {
-    log(`⚠ 長尺（約 ${Math.round(actualDur)} 秒・${numFrames} コマ）です。GIF のファイルが大きく、変換にも時間がかかります（中断はされません）。`);
+    log(`⚠ 長尺（約 ${Math.round(actualDur)} 秒・${numFrames} コマ）です。GIF のファイルが大きく、変換にも時間がかかります（自動では止まりません。止める場合は「中止」を押してください）。`);
   }
 
   const startTime = Date.now();
-  let lastProgressAt = Date.now();
-  let reached100 = false;
-  // GROUP-157：初回 progressCallback に到達したか（読込フェーズと抽出フェーズの境目）。
-  let sawProgress = false;
 
-  // Phase 1.5 GROUP-28 mvdl：音声録音を並列開始
-  // gifshot は独自 video を内部生成するが、録音は既存 preview video を流用する。
-  // v1.31.5 修正：同一 URL を 2 要素で同時ロードするとタブクラッシュしたため統合。
+  // Phase 1.5 GROUP-28 mvdl：音声録音を並列開始（既存 preview video を流用）。
+  // 取り出しは別の video 要素（makeVideoSeekFrameSource 内で 1 本生成）で行い、プレビューと合わせて
+  // 2 本（旧 gifshot 内部 video と同数）。v1.31.4 で録音用 video を新規作成し gifshot 内部 video と同一 URL の
+  // 多重ロードになってタブクラッシュした（v1.31.5 でプレビュー流用へ修正）経緯があるため増やさない。
   // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
-  const audioPromise = recordAudio(previewVideo, actualDur);
+  // GROUP-166：中止・失敗時に録音を止める（再試行で二重録音にしない）ため AbortController を渡す。
+  const audioAc = new AbortController();
+  const audioPromise = recordAudio(previewVideo, actualDur, audioAc.signal);
 
-  // GROUP-165：システム側の時間切れによる強制打ち切りは廃止した（旧 GROUP-157：読込 180 秒／抽出 60 秒／
-  // 符号化＝コマ数×250ms で停止扱いにし、閉じる以外の操作を消していた。符号化の予算が画素数を見ず、
-  // 縦長動画（480×853）では処理中でも打ち切られた）。今は各段階の経過時間を表示し、進捗が長く無い時は
-  // 「中止」の案内を添えるだけにする。止めるかどうかは利用者が決める。
-  //   読込中：gifshot が内部生成する video が読み込まれるまで progressCallback は 1 度も来ない
-  //   抽出中：進捗は 100ms 程度ごとに来る
-  //   符号化中：進捗が来ないのが正常（経過時間だけを示す）
-  const LOAD_SLOW_NOTICE_MS    = 180_000;
-  const CAPTURE_SLOW_NOTICE_MS = 60_000;
-  let encodeStartedAt = 0;
+  // GROUP-165/166：時間切れによる強制打ち切りはしない。進捗（1 コマごと）が長く無い時は
+  // 経過時間と「中止」の案内を添えるだけにし、止めるかどうかは利用者が決める。
+  let enc = null;
+  const SLOW_NOTICE_MS = 60_000;
+  let lastProgressAt = Date.now();
+  let lastLabel = "動画を読込中…";
   guard.watch(setInterval(() => {
-    const now = Date.now();
-    const idleMs = now - lastProgressAt;
-    const HINT = "止める場合は「中止」を押してください（最初の画面に戻り、もう一度変換できます）";
-    if (reached100) {
-      log(`GIF エンコード中…（経過 ${_formatElapsed(now - encodeStartedAt)}。進捗は表示されません。${HINT}）`);
-    } else if (sawProgress) {
-      if (idleMs > CAPTURE_SLOW_NOTICE_MS) {
-        log(`⚠ フレーム抽出が ${_formatElapsed(idleMs)} 進んでいません。${HINT}`);
-      }
-    } else if (idleMs > LOAD_SLOW_NOTICE_MS) {
-      log(`⚠ 動画の読込が ${_formatElapsed(idleMs)} たっても始まりません（CORS を返さないサーバーの動画などで起こります）。${HINT}`);
+    const idleMs = Date.now() - lastProgressAt;
+    if (idleMs > SLOW_NOTICE_MS) {
+      log(`${lastLabel}（${_formatElapsed(idleMs)} 進捗がありません。止める場合は「中止」を押してください）`);
     }
   }, 5_000));
-  // gifshot には途中で止める手段が無い（内部の video 要素と Worker を止められない）。そのため中止は
-  // 「録画データを background へ預け直してウィンドウを再読込」で行う。再読込で裏の処理ごと破棄されるので、
-  // 再試行しても二重実行にならない。
-  // 先に決着させて経過表示タイマーを止め、預け直しの最中に gifshot が完了しても成功処理が走らない
-  // ようにする（成功処理の後に再読込すると、保存ウィンドウ側の受領データや保存ボタンを壊すため）。
+  // 中止：自前エンコーダは enc.cancel() で Worker と取り出しを本当に止められる（うごイラ経路と同型）。
+  // 録音も止める。中止後はこのウィンドウのまま「再試行」できる。
   guard.onCancel(() => {
-    if (!guard.settle()) return;
-    const cancel = document.getElementById("cancel-btn");
-    if (cancel) { cancel.disabled = true; cancel.textContent = "中止中…"; }
-    _cancelByReload();
+    if (enc) enc.cancel();
+    audioAc.abort();
+    guard.fail("変換を中止しました。「再試行」でもう一度変換できます。");
   });
 
-  // ----------------------------------------------------------------
-  // GROUP-152：gifshot の単位変換バグ対策（GIF の時間情報 delay=0 の正書き）
-  //
-  // gifshot は下の interval（秒、0.1）を内部でミリ秒扱いの delay オプションへ流し、さらに
-  // ×0.1 の単位変換を掛けるため 0.1→0.01 となり、GIF 書込のビット演算で整数 0 に切り捨てられる
-  // ＝**全コマ GCE delay=0**（時間情報なし）の GIF が生成される。0 を「最速」と解釈する再生系
-  // （多くの外部アプリ・一部のブラウザ内 img 表示）では早送りになり、音声と乖離する（UAT 実害）。
-  // vendored minified を触らず、生成直後にブロック構造を正しく歩いて delay を 10cs=100ms に
-  // 正書きする（バイトパターンの盲目置換は LZW 圧縮データ中の偶然一致を誤爆し得るため不可）。
-  // 恒久解＝動画も自前ストリーミングエンコーダへ移行（gifshot 撤去）は別途の大型対応で行う。
-  // ----------------------------------------------------------------
-  function _rewriteGifDelays(bytes, csWhenZero) {
-    if (bytes.length < 13 || bytes[0] !== 0x47 || bytes[1] !== 0x49 || bytes[2] !== 0x46) {
-      throw new Error("GIF ヘッダではありません");
-    }
-    let p = 6;
-    p += 4; // LSD: width(2) + height(2)
-    const packed = bytes[p]; p += 3; // packed, bgColor, aspect
-    if (packed & 0x80) p += 3 * (2 << (packed & 0x07)); // Global Color Table
-    let rewritten = 0;
-    const skipSubBlocks = () => {
-      while (p < bytes.length && bytes[p] !== 0) p += 1 + bytes[p];
-      p += 1; // block terminator
-    };
-    while (p < bytes.length) {
-      const b = bytes[p];
-      if (b === 0x3B) break; // trailer
-      if (b === 0x21) { // extension
-        const label = bytes[p + 1];
-        p += 2;
-        if (label === 0xF9) {
-          // GCE: size(=4), packed, delay_lo, delay_hi, transparentIdx, terminator
-          const size = bytes[p];
-          const delay = bytes[p + 2] | (bytes[p + 3] << 8);
-          if (delay === 0) {
-            bytes[p + 2] = csWhenZero & 0xFF;
-            bytes[p + 3] = (csWhenZero >> 8) & 0xFF;
-            rewritten++;
-          }
-          p += 1 + size;
-          skipSubBlocks();
-        } else {
-          skipSubBlocks();
-        }
-      } else if (b === 0x2C) { // image descriptor
-        p += 9; // separator(1) + left/top/w/h(8)
-        const ip = bytes[p]; p += 1;
-        if (ip & 0x80) p += 3 * (2 << (ip & 0x07)); // Local Color Table
-        p += 1; // LZW min code size
-        skipSubBlocks();
-      } else {
-        throw new Error(`未知の GIF ブロック 0x${b.toString(16)} @${p}`);
-      }
-    }
-    return rewritten;
-  }
-
-  gifshot.createGIF({
-    video: [videoUrl],
-    gifWidth: size.w,
-    gifHeight: size.h,
-    numFrames,
-    interval: 1 / PHASE1_PARAMS.FPS,
-    sampleInterval: PHASE1_PARAMS.SAMPLE_INTERVAL,
-    numWorkers: PHASE1_PARAMS.NUM_WORKERS,
-    progressCallback: (captureProgress) => {
-      updateProgress(captureProgress);
+  // コマ数・尺は取り出し用 video の実尺で init 時に確定する（frameSource.total／durationSec）。
+  // 進捗の total・GIF のコマ数・音声の durationSec はすべて確定後の値を使う（食い違わせない）。
+  const frameSource = makeVideoSeekFrameSource(videoUrl, size, numFrames, intervalSec, actualDur);
+  enc = streamEncodeGif(
+    frameSource,
+    (done, total) => {
       lastProgressAt = Date.now();
-      sawProgress = true; // 読込フェーズ終了＝以降は抽出フェーズの閾値で判定する
-      if (captureProgress >= 1.0) {
-        if (!reached100) {
-          reached100 = true;
-          encodeStartedAt = Date.now();
-          log("キャプチャ完了、GIF エンコード中…（Worker で処理、進捗非表示）");
-        }
-      } else {
-        log(`キャプチャ中… ${Math.round(captureProgress * 100)}%`);
-      }
-    },
-  }, async (obj) => {
-    // 決着済み（開始時の例外で失敗扱いにした後など）に遅れて到達した場合はここで打ち切る
-    // （成果物の二重処理・ウィンドウの勝手な自動クローズを防ぐ）。GROUP-165 で時間切れの打ち切りは廃止。
+      updateProgress(done / total);
+      lastLabel = `変換中… ${done}/${total} コマ`;
+      log(lastLabel);
+    }
+  );
+
+  enc.promise.then(async (gifBlob) => {
+    // 中止後・決着後に遅れて完了しても二重処理しない（settle が false を返す）。
     if (!guard.settle()) {
-      console.warn("[video_convert] 決着後に gifshot callback が到達（無視）");
+      console.warn("[video_convert] 決着後に変換完了が到達（無視）");
       return;
     }
-    if (obj.error) {
-      log(`変換失敗: ${obj.errorCode || ""} ${obj.errorMsg || ""}`, "error");
+
+    // GROUP-166：成功後の処理（サイズ表示・音声待ち・保存ウィンドウ起動）で想定外の例外が出ても、
+    // 決着済み（guard.fail が使えない）のまま「変換中…」で固まらないよう、失敗表示と「再試行」へ戻す。
+    try {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      // GROUP-166：自前エンコーダは delay（100ms/コマ）を正しく書き、GIF を Blob で返す
+      // （旧 gifshot の dataURL→バイト列→delay 正書きの後処理は不要になった）。
+      const approxSize = (gifBlob.size / 1024 / 1024).toFixed(1);
+
+      // Phase 1.5 GROUP-28 mvdl：音声録音完了を待つ
+      log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。音声録音完了待ち…`, "success");
+      updateProgress(1);
+
+      let associatedAudio = null;
+      try {
+        const audioBlob = await audioPromise;
+        if (audioBlob && audioBlob.size > 0) {
+          const audioSizeMB = (audioBlob.size / 1024 / 1024).toFixed(2);
+          // GROUP-157：音声も GIF と同じ Blob 運搬に揃える（旧実装は base64 dataURL 化して
+          // stash → modal → 保存 payload と context 間を往復させていた＝実体が複製されていた）。
+          // Blob の structured clone は実体をコピーしないため、長尺音声でも安全。
+          associatedAudio = {
+            blob: audioBlob,
+            mimeType: "audio/webm",
+            extension: PHASE1_PARAMS.AUDIO_EXT,
+            durationSec: frameSource.durationSec,
+          };
+          log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB + 音声 ${audioSizeMB} MB）。保存モーダルを起動しています…`, "success");
+        } else {
+          log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声なし）。保存モーダルを起動しています…`, "success");
+        }
+      } catch (audioErr) {
+        console.warn("[video_convert] audio promise rejected:", audioErr);
+        log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声取得失敗）。保存モーダルを起動しています…`, "success");
+      }
+
+      try {
+        // v1.31.2（拡張子の誤判定対策）：
+        // 元動画 URL から basename を抽出して .gif 拡張子でファイル名提案。
+        // dataURL のままだと guessFilename が拡張子を推定できず .jpg 扱いになり、
+        // Native 側も JPEG として処理 → サムネイルのアニメーションが失われる。
+        let suggestedFilename = "video-capture.gif";
+        try {
+          // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob URL）は basename が無意味な
+          // 内部 ID になるため、取得種別＋タイムスタンプで命名する
+          if (window.__capturedBlobUrl && videoUrl === window.__capturedBlobUrl) {
+            const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+            throw { __captured: true, name: `capture-${ts}.gif` };
+          }
+          const u = new URL(videoUrl);
+          const basename = (u.pathname.split("/").pop() || "").replace(/\.[^.]*$/, "");
+          if (basename) {
+            suggestedFilename = `${basename}.gif`;
+          } else {
+            // URL からパスが取れない場合はタイムスタンプで一意化
+            const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+            suggestedFilename = `video-${ts}.gif`;
+          }
+        } catch (e) {
+          if (e && e.__captured) {
+            suggestedFilename = e.name;
+          } else {
+            const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+            suggestedFilename = `video-${ts}.gif`;
+          }
+        }
+
+        // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload を storage.local._pendingModal に入れると
+        // onChanged broadcast で全 context にクローンされ 8GB 級膨張していた → background メモリへ stash。
+        // GROUP-152：GIF は **Blob** で渡す（GROUP-166 以降、delay はエンコーダが正しく書く）。Blob の structured clone は実体を
+        // コピーしないため、巨大 dataURL の再送・保存時の overflow 系リスクもうごイラ同様に解消される。
+        await browser.runtime.sendMessage({
+          type: "STASH_CONVERSION_PAYLOAD",
+          imageBlob: gifBlob,
+          pageUrl: pageUrl || "",
+          suggestedFilename,
+          associatedAudio,
+        });
+        gifBlob = null; // 送信後に参照を切る（GROUP-82 規約。Blob 実体は background 側が保持）
+
+        // GROUP-33-T1 (v1.46.51)：自動遷移 ON は保存ウィンドウへ、OFF はボタン表示
+        await _routeAfterConvert();
+      } catch (err) {
+        log(`保存モーダル起動失敗: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.textContent = "再試行";
+      }
+    } catch (postErr) {
+      console.error("[video_convert] 変換後の処理で例外:", postErr);
+      audioAc.abort();
+      log(`変換後の処理に失敗しました: ${(postErr && postErr.message) || postErr}`, "error");
       hideProgress();
       btn.disabled = false;
       btn.textContent = "再試行";
-      return;
     }
-
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-    // GROUP-152：gifshot の dataURL をバイト列に戻し、GCE delay=0 を 10cs（100ms）へ正書きして
-    // Blob 化する。以降は Blob 運搬（うごイラと同じ stage1 基盤＝巨大 dataURL の再送を避ける）。
-    // 書換に失敗しても変換自体は無駄にしない（従来どおり delay=0 のまま進める＝現状より悪化しない）。
-    let gifBlob = null;
-    try {
-      // fetch は data: URL を直接 ArrayBuffer 化できる。slice+atob 方式だと dataURL 複製＋中間
-      // binary 文字列で 126MB GIF 時に瞬間 ~1GB 併存するため採らない（独立レビュー P1 反映）。
-      const buf = await (await fetch(obj.image)).arrayBuffer();
-      obj.image = null; // 巨大 dataURL の参照を即切る（GROUP-82 規約）
-      const bytes = new Uint8Array(buf);
-      try {
-        // 書込値は centisec。100/FPS（FPS=10 なら 10cs=100ms）＝numFrames=実尺×FPS の前提と
-        // 自己整合させる（FPS 定数を変えても不整合にならない。レビュー P2 反映）
-        const n = _rewriteGifDelays(bytes, Math.round(100 / PHASE1_PARAMS.FPS));
-        log(`GIF の時間情報を正書きしました（${n} コマ、${Math.round(1000 / PHASE1_PARAMS.FPS)}ms/コマ）`);
-      } catch (rwErr) {
-        console.warn("[video_convert] GIF delay 正書き失敗（無変換で続行）", rwErr);
-      }
-      gifBlob = new Blob([bytes], { type: "image/gif" });
-    } catch (decErr) {
-      log(`変換結果の後処理に失敗しました: ${decErr.message}`, "error");
-      hideProgress();
-      btn.disabled = false;
-      btn.textContent = "再試行";
-      return;
-    }
-    const approxSize = (gifBlob.size / 1024 / 1024).toFixed(1);
-
-    // Phase 1.5 GROUP-28 mvdl：音声録音完了を待つ
-    log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB）。音声録音完了待ち…`, "success");
-    updateProgress(1);
-
-    let associatedAudio = null;
-    try {
-      const audioBlob = await audioPromise;
-      if (audioBlob && audioBlob.size > 0) {
-        const audioSizeMB = (audioBlob.size / 1024 / 1024).toFixed(2);
-        // GROUP-157：音声も GIF と同じ Blob 運搬に揃える（旧実装は base64 dataURL 化して
-        // stash → modal → 保存 payload と context 間を往復させていた＝実体が複製されていた）。
-        // Blob の structured clone は実体をコピーしないため、長尺音声でも安全。
-        associatedAudio = {
-          blob: audioBlob,
-          mimeType: "audio/webm",
-          extension: PHASE1_PARAMS.AUDIO_EXT,
-          durationSec: actualDur,
-        };
-        log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB + 音声 ${audioSizeMB} MB）。保存モーダルを起動しています…`, "success");
-      } else {
-        log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声なし）。保存モーダルを起動しています…`, "success");
-      }
-    } catch (audioErr) {
-      console.warn("[video_convert] audio promise rejected:", audioErr);
-      log(`✅ 変換完了（${elapsed} 秒、GIF 約 ${approxSize} MB、音声取得失敗）。保存モーダルを起動しています…`, "success");
-    }
-
-    try {
-      // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
-      // 元動画 URL から basename を抽出して .gif 拡張子でファイル名提案。
-      // dataURL のままだと guessFilename が拡張子を推定できず .jpg 扱いになり、
-      // Native 側も JPEG として処理 → サムネイルのアニメーションが失われる。
-      let suggestedFilename = "video-capture.gif";
-      try {
-        // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob URL）は basename が無意味な
-        // 内部 ID になるため、取得種別＋タイムスタンプで命名する
-        if (window.__capturedBlobUrl && videoUrl === window.__capturedBlobUrl) {
-          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-          throw { __captured: true, name: `capture-${ts}.gif` };
-        }
-        const u = new URL(videoUrl);
-        const basename = (u.pathname.split("/").pop() || "").replace(/\.[^.]*$/, "");
-        if (basename) {
-          suggestedFilename = `${basename}.gif`;
-        } else {
-          // URL からパスが取れない場合はタイムスタンプで一意化
-          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-          suggestedFilename = `video-${ts}.gif`;
-        }
-      } catch (e) {
-        if (e && e.__captured) {
-          suggestedFilename = e.name;
-        } else {
-          const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-          suggestedFilename = `video-${ts}.gif`;
-        }
-      }
-
-      // v1.31.5 GROUP-28 mvdl hotfix：大容量 payload を storage.local._pendingModal に入れると
-      // onChanged broadcast で全 context にクローンされ 8GB 級膨張していた → background メモリへ stash。
-      // GROUP-152：GIF は **Blob** で渡す（delay 正書き済み）。Blob の structured clone は実体を
-      // コピーしないため、巨大 dataURL の再送・保存時の overflow 系リスクもうごイラ同様に解消される。
-      await browser.runtime.sendMessage({
-        type: "STASH_CONVERSION_PAYLOAD",
-        imageBlob: gifBlob,
-        pageUrl: pageUrl || "",
-        suggestedFilename,
-        associatedAudio,
-      });
-      gifBlob = null; // 送信後に参照を切る（GROUP-82 規約。Blob 実体は background 側が保持）
-
-      // GROUP-33-T1 (v1.46.51)：自動遷移 ON は保存ウィンドウへ、OFF はボタン表示
-      await _routeAfterConvert();
-    } catch (err) {
-      log(`保存モーダル起動失敗: ${err.message}`, "error");
-      btn.disabled = false;
-      btn.textContent = "再試行";
+  }).catch((err) => {
+    audioAc.abort(); // 失敗時は録音も止める（再試行で二重録音にしない）
+    // 中止後・決着後に遅れて届いた例外（中止時の "cancelled" 等）は fail が false を返して何もしない。
+    if (!guard.fail(`変換失敗: ${(err && err.message) || err}`)) {
+      console.warn("[video_convert] 決着後に到達した例外（無視）:", err);
     }
   });
 }

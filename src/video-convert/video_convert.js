@@ -495,9 +495,7 @@ async function initUgoira(cap, pageUrl) {
   document.getElementById("convert-btn").addEventListener("click", () => {
     runUgoiraConversion(frameUrls, delays, pageUrl);
   });
-  document.getElementById("cancel-btn").addEventListener("click", () => {
-    window.close();
-  });
+  document.getElementById("cancel-btn").addEventListener("click", _onCancelButtonClick);
   log(`うごイラを受領しました（${frameUrls.length} コマ）。「GIF に変換」で開始します。`);
 }
 
@@ -511,7 +509,7 @@ async function initUgoira(cap, pageUrl) {
 // 【方式選択】クリックハンドラ側へ set/clear を引き上げる案は採らない。ハンドラは経路ごとに
 // 別々（initUgoira 側と init 側の 2 箇所）で「共通の入口」にならず、しかも clear は非同期な
 // 変換の終端でしか打てないため set と clear が別ファイル位置に離れる＝対で守りにくい。
-// 代わりに「取得できたら { settle, fail, abort } を返すファクトリ」を 1 つ用意し、
+// 代わりに「取得できたら { settle, fail, watch, onCancel } を返すファクトリ」を 1 つ用意し、
 // フラグの set と clear をこの関数の内側だけに閉じ込める（呼び出し側は clear を書けない）。
 let _conversionActive = false;
 
@@ -531,15 +529,24 @@ function beginConversion() {
   let settled = false;
   let watchTimer = null;
 
+  // GROUP-165：変換中は「キャンセル」ボタンを「中止」へ切り替え、利用者の明示操作でだけ止める
+  // （システム側の時間切れによる強制打ち切りは廃止）。中止の中身は経路ごとに onCancel で預ける。
+  const cancelBtn = document.getElementById("cancel-btn");
+  if (cancelBtn) cancelBtn.textContent = "中止";
+
   const settle = () => {
     if (settled) return false;
     settled = true;
     _conversionActive = false;
+    _cancelActiveConversion = null;
+    if (cancelBtn) cancelBtn.textContent = "キャンセル";
     if (watchTimer !== null) { clearInterval(watchTimer); watchTimer = null; }
     return true;
   };
-  /** 停滞検知タイマーを預ける（settle で必ず止める＝止め忘れを構造的に無くす） */
+  /** 経過表示タイマーを預ける（settle で必ず止める＝止め忘れを構造的に無くす） */
   const watch = (timerId) => { watchTimer = timerId; };
+  /** 「中止」押下時の処理を預ける（決着前のみ有効） */
+  const onCancel = (fn) => { _cancelActiveConversion = fn; };
   /** 回復可能な失敗：再試行を許す。決着済みなら何もせず false を返す */
   const fail = (message) => {
     if (!settle()) return false;
@@ -548,31 +555,55 @@ function beginConversion() {
     if (btn) { btn.disabled = false; btn.textContent = "再試行"; }
     return true;
   };
-  /** 回復不能な失敗：再試行を許さず「ウィンドウを閉じる」へ導線を差し替える */
-  const abort = (message) => {
-    if (!settle()) return false;
-    log(message, "error");
-    hideProgress();
-    _showCloseOnlyAction();
-    return true;
-  };
-  return { settle, fail, abort, watch };
+  return { settle, fail, watch, onCancel };
+}
+
+// GROUP-165：変換中の「中止」処理（beginConversion の onCancel で預かる。変換していない時は null）
+let _cancelActiveConversion = null;
+
+/** 「キャンセル／中止」ボタン：変換中なら中止、それ以外はウィンドウを閉じる */
+function _onCancelButtonClick() {
+  if (_cancelActiveConversion) {
+    const fn = _cancelActiveConversion;
+    _cancelActiveConversion = null; // 連打で二重に中止しない
+    fn();
+    return;
+  }
+  window.close();
 }
 
 /**
- * GROUP-157：停滞して中断できない変換が裏で生き続けている状態では、再試行を許すと
- * 同一プレビュー要素を共有する録音などが二重に走って壊れる。変換ボタンを消し、
- * 「ウィンドウを閉じる」だけを残す（案内文と UI の矛盾を無くす）。
+ * GROUP-165：動画経路の中止。gifshot は止められないため、ウィンドウ再読込で裏の処理ごと破棄する。
+ * ページ内録画の録画データは background が初回受領時に解放する（GET_VIDEO_CAPTURE）ので、
+ * 再読込の前にこのウィンドウが持つ録画を預け直す。_pendingVideoConvert（メタ情報）は成功終端でしか
+ * 消さないため残っており、再読込後の init() が同じ状態から始められる＝最初の画面から再試行できる。
  */
-function _showCloseOnlyAction() {
-  const btn = document.getElementById("convert-btn");
-  if (btn) { btn.disabled = true; btn.style.display = "none"; }
-  const cancel = document.getElementById("cancel-btn");
-  if (cancel) {
-    cancel.disabled = false;
-    cancel.style.display = "";
-    cancel.textContent = "ウィンドウを閉じる";
+async function _cancelByReload() {
+  log("中止しています…");
+  try {
+    if (window.__capturedBlobUrl) {
+      const blob = await (await fetch(window.__capturedBlobUrl)).blob();
+      const r = await browser.runtime.sendMessage({
+        type: "RESTASH_VIDEO_CAPTURE",
+        buffer: blob, // Blob の structured clone は実体をコピーしない
+        mime: blob.type || window.__capturedMime || "video/webm",
+      });
+      if (!r || !r.ok) throw new Error((r && r.error) || "録画データを預け直せませんでした");
+    }
+  } catch (err) {
+    log(`中止の準備に失敗しました（${(err && err.message) || err}）。ウィンドウを閉じ、ページ側で動画保存をもう一度実行してください。`, "error");
+    // 決着済み（_cancelActiveConversion は null）なので、ボタンは押すとウィンドウを閉じる
+    const cancel = document.getElementById("cancel-btn");
+    if (cancel) { cancel.disabled = false; cancel.textContent = "閉じる"; }
+    return;
   }
+  location.reload();
+}
+
+/** 経過時間の表示（例：1分05秒） */
+function _formatElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}分${String(s % 60).padStart(2, "0")}秒` : `${s}秒`;
 }
 
 /** うごイラ：コマ列 → GIF 変換（原寸・全コマ・per-frame delay、ストリーミングエンコード） */
@@ -600,30 +631,32 @@ function _runUgoiraConversionBody(guard, frameUrls, delays, pageUrl) {
     try { frameUrls.forEach((u) => URL.revokeObjectURL(u)); } catch (_) {}
   };
 
-  // 進捗停止検知ウォッチドッグ（Worker 停止などを検知し、強制終了以外の回復手段＝再試行を与える）。
-  // PROGRESS は 1 コマごとに来るため、単一コマが STALL_MS 以上進まなければタイムアウトとみなす。
-  // 発火時は enc.cancel() で stuck Worker を terminate する（再試行での Worker 累積を防ぐ）。
-  // 動画経路（gifshot）と違い、こちらは cancel() で本当に止められるので再試行を許してよい。
+  // GROUP-165：システム側の時間切れによる強制打ち切りは廃止（旧：60 秒無進捗で enc.cancel()＋失敗扱い）。
+  // 進捗が止まっている時は経過時間と案内を表示するだけにし、止めるかどうかは利用者が「中止」で決める。
+  // こちらは enc.cancel() で Worker を本当に止められるので、中止後はこのウィンドウのまま再試行できる。
   let enc = null;
-  const STALL_MS = 60_000;
+  const SLOW_NOTICE_MS = 60_000; // この時間進捗が無ければ「長引いている」旨を添える（打ち切りはしない）
   let lastProgressAt = Date.now();
+  let lastLabel = "";
   guard.watch(setInterval(() => {
-    if (Date.now() - lastProgressAt > STALL_MS) {
-      if (enc) enc.cancel();
-      guard.fail(
-        `⚠ エンコードが ${Math.round(STALL_MS / 1000)} 秒進捗しませんでした。` +
-        "ブラウザコンソール（F12）で Worker エラーが出ていないか確認のうえ再試行してください。"
-      );
+    const idleMs = Date.now() - lastProgressAt;
+    if (idleMs > SLOW_NOTICE_MS) {
+      log(`${lastLabel}（${_formatElapsed(idleMs)} 進捗がありません。止める場合は「中止」を押してください）`);
     }
   }, 5_000));
+  guard.onCancel(() => {
+    if (enc) enc.cancel();
+    guard.fail("変換を中止しました。「再試行」でもう一度変換できます。");
+  });
 
   enc = streamEncodeGif(makeUgoiraFrameSource(frameUrls, delays), (done, total) => {
     lastProgressAt = Date.now();
     updateProgress(done / total);
-    log(`変換中… ${done}/${total} コマ`);
+    lastLabel = `変換中… ${done}/${total} コマ`;
+    log(lastLabel);
   });
   enc.promise.then(async (gifBlob) => {
-    // ウォッチドッグ発火後に遅れて完了しても二重処理しない（settle が false を返す）。
+    // 中止後に遅れて完了しても二重処理しない（settle が false を返す）。
     if (!guard.settle()) return;
 
     // GROUP-151 v1.49.0：GIF は **Blob のまま** background へ渡す。
@@ -653,7 +686,7 @@ function _runUgoiraConversionBody(guard, frameUrls, delays, pageUrl) {
     }
   }).catch((err) => {
     // 失敗時は frameUrls を解放しない（「再試行」で再利用するため）。解放は unload に委ねる。
-    // ウォッチドッグ発火後・決着後に遅れて届いた例外は fail が false を返して何もしない。
+    // 中止後・決着後に遅れて届いた例外は fail が false を返して何もしない。
     if (!guard.fail(`変換失敗: ${(err && err.message) || err}`)) {
       console.warn("[video_convert] 決着後に到達した例外（無視）:", err);
     }
@@ -754,6 +787,7 @@ async function init() {
       effectiveUrl = URL.createObjectURL(capBlob);
       capBlob = null;
       window.__capturedBlobUrl = effectiveUrl;
+      window.__capturedMime = cap.mime || "video/webm"; // GROUP-165：中止時の預け直しで使う
       window.addEventListener("unload", () => {
         if (window.__capturedBlobUrl) URL.revokeObjectURL(window.__capturedBlobUrl);
       }, { once: true });
@@ -813,10 +847,8 @@ async function init() {
       runConversion(effectiveUrl, pageUrl, videoWidth, videoHeight, duration, capSec);
     });
 
-    // キャンセル
-    document.getElementById("cancel-btn").addEventListener("click", () => {
-      window.close();
-    });
+    // キャンセル（変換中は「中止」：GROUP-165）
+    document.getElementById("cancel-btn").addEventListener("click", _onCancelButtonClick);
 
     log("準備完了。「GIF に変換」をクリックしてください。");
   } catch (err) {
@@ -884,40 +916,41 @@ function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hin
   // 音声なし / 録音失敗時は associatedAudio = null で GIF のみ保存にフォールバック。
   const audioPromise = recordAudio(previewVideo, actualDur);
 
-  // 停滞検知。gifshot の progressCallback は **capture 進捗**（フレーム抽出）のみで、その前後の
-  // フェーズは進捗が取れないため、3 つの閾値を使い分ける（GROUP-157）。
-  //   読込中：gifshot が内部生成する video が読み込まれるまで progressCallback は 1 度も来ない。
-  //           60 秒で切ると低速回線の正常な変換を停止扱いにするため、別枠で長めに取る。
-  //   抽出中：進捗は 100ms 程度ごとに来るので、60 秒無進捗なら明らかに停止している。
-  //   符号化中：進捗が来ないのが正常なので、コマ数比例の総予算で判定する。
-  // 従来は `reached100 &&` で gate されており、**抽出が一度も始まらない失敗（CORS 非対応の
-  // サーバーで内部 video の読込に失敗する等）では永久に発火せず無言ハングしていた**（GROUP-157）。
-  const LOAD_STALL_MS    = 180_000; // 読込フェーズ（初回 progressCallback 到達まで）
-  const CAPTURE_STALL_MS = 60_000;  // 抽出フェーズ（progressCallback 到達後の無進捗）
-  const encodeTimeoutMs  = Math.max(60_000, numFrames * 250);
+  // GROUP-165：システム側の時間切れによる強制打ち切りは廃止した（旧 GROUP-157：読込 180 秒／抽出 60 秒／
+  // 符号化＝コマ数×250ms で停止扱いにし、閉じる以外の操作を消していた。符号化の予算が画素数を見ず、
+  // 縦長動画（480×853）では処理中でも打ち切られた）。今は各段階の経過時間を表示し、進捗が長く無い時は
+  // 「中止」の案内を添えるだけにする。止めるかどうかは利用者が決める。
+  //   読込中：gifshot が内部生成する video が読み込まれるまで progressCallback は 1 度も来ない
+  //   抽出中：進捗は 100ms 程度ごとに来る
+  //   符号化中：進捗が来ないのが正常（経過時間だけを示す）
+  const LOAD_SLOW_NOTICE_MS    = 180_000;
+  const CAPTURE_SLOW_NOTICE_MS = 60_000;
+  let encodeStartedAt = 0;
   guard.watch(setInterval(() => {
-    const idleMs = Date.now() - lastProgressAt;
-    // 停滞した変換そのものを中断する手段は現状ない（gifshot に cancel API が無く、内部で生成した
-    // video 要素と Worker を止められない）。1 本目が生きたまま再試行すると 2 本の recordAudio が
-    // 同一プレビュー要素を共有し、1 本目の後始末が 2 本目の録音を潰す。よって再試行は許さず、
-    // abort() でボタンを「ウィンドウを閉じる」へ差し替える（案内文と UI の矛盾を無くす）。
-    const REOPEN = "このウィンドウを閉じて開き直してください（停止した処理は中断できないため、再試行は行えません）。";
+    const now = Date.now();
+    const idleMs = now - lastProgressAt;
+    const HINT = "止める場合は「中止」を押してください（最初の画面に戻り、もう一度変換できます）";
     if (reached100) {
-      if (idleMs > encodeTimeoutMs) {
-        guard.abort(`⚠ エンコード段階でタイムアウト（${Math.round(encodeTimeoutMs / 1000)} 秒）。` +
-          "ブラウザコンソール（F12）で CSP 違反や Worker エラーが出ていないか確認してください。" + REOPEN);
-      }
+      log(`GIF エンコード中…（経過 ${_formatElapsed(now - encodeStartedAt)}。進捗は表示されません。${HINT}）`);
     } else if (sawProgress) {
-      if (idleMs > CAPTURE_STALL_MS) {
-        guard.abort(`⚠ フレーム抽出が ${Math.round(CAPTURE_STALL_MS / 1000)} 秒間まったく進みませんでした。` +
-          "ブラウザコンソール（F12）のエラーもご確認ください。" + REOPEN);
+      if (idleMs > CAPTURE_SLOW_NOTICE_MS) {
+        log(`⚠ フレーム抽出が ${_formatElapsed(idleMs)} 進んでいません。${HINT}`);
       }
-    } else if (idleMs > LOAD_STALL_MS) {
-      guard.abort(`⚠ 動画の読込が ${Math.round(LOAD_STALL_MS / 1000)} 秒たっても始まりませんでした。` +
-        "動画の読込に失敗している可能性があります（CORS を返さないサーバーの動画など）。" +
-        "ブラウザコンソール（F12）のエラーもご確認ください。" + REOPEN);
+    } else if (idleMs > LOAD_SLOW_NOTICE_MS) {
+      log(`⚠ 動画の読込が ${_formatElapsed(idleMs)} たっても始まりません（CORS を返さないサーバーの動画などで起こります）。${HINT}`);
     }
   }, 5_000));
+  // gifshot には途中で止める手段が無い（内部の video 要素と Worker を止められない）。そのため中止は
+  // 「録画データを background へ預け直してウィンドウを再読込」で行う。再読込で裏の処理ごと破棄されるので、
+  // 再試行しても二重実行にならない。
+  // 先に決着させて経過表示タイマーを止め、預け直しの最中に gifshot が完了しても成功処理が走らない
+  // ようにする（成功処理の後に再読込すると、保存ウィンドウ側の受領データや保存ボタンを壊すため）。
+  guard.onCancel(() => {
+    if (!guard.settle()) return;
+    const cancel = document.getElementById("cancel-btn");
+    if (cancel) { cancel.disabled = true; cancel.textContent = "中止中…"; }
+    _cancelByReload();
+  });
 
   // ----------------------------------------------------------------
   // GROUP-152：gifshot の単位変換バグ対策（GIF の時間情報 delay=0 の正書き）
@@ -991,6 +1024,7 @@ function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hin
       if (captureProgress >= 1.0) {
         if (!reached100) {
           reached100 = true;
+          encodeStartedAt = Date.now();
           log("キャプチャ完了、GIF エンコード中…（Worker で処理、進捗非表示）");
         }
       } else {
@@ -998,10 +1032,10 @@ function _runConversionBody(guard, videoUrl, pageUrl, origWidth, origHeight, hin
       }
     },
   }, async (obj) => {
-    // 停滞検知の発火後に遅れて到達した場合はここで打ち切る（成果物の二重処理・
-    // ウィンドウの勝手な自動クローズを防ぐ）。
+    // 決着済み（開始時の例外で失敗扱いにした後など）に遅れて到達した場合はここで打ち切る
+    // （成果物の二重処理・ウィンドウの勝手な自動クローズを防ぐ）。GROUP-165 で時間切れの打ち切りは廃止。
     if (!guard.settle()) {
-      console.warn("[video_convert] タイムアウト後に gifshot callback が到達（無視）");
+      console.warn("[video_convert] 決着後に gifshot callback が到達（無視）");
       return;
     }
     if (obj.error) {

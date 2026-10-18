@@ -399,6 +399,15 @@ async function handleAsyncMessage(message, sender) {
       });
       return;
     }
+    case "RESTASH_VIDEO_CAPTURE": {
+      // GROUP-165：変換ウィンドウが「中止」で自身を再読込する前に、録画データを預け直す
+      // （GET_VIDEO_CAPTURE で解放済みのため）。buffer は Blob（structured clone で実体コピーなし）。
+      // 動画経路のみ（うごイラはウィンドウ内で中止・再試行できるため使わない）。
+      if (!message.buffer) return Promise.resolve({ ok: false, error: "buffer が空です" });
+      _pendingVideoCapture = { buffer: message.buffer, mime: message.mime || "video/webm", frames: null, frameMime: null };
+      message.buffer = null; // 巨大 payload null 代入（GROUP-82 規約）
+      return Promise.resolve({ ok: true });
+    }
     case "GET_VIDEO_CAPTURE": {
       // 変換ウィンドウからの録画データ受領要求。渡したら即解放
       const cap = _pendingVideoCapture;

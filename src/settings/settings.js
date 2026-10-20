@@ -10910,11 +10910,8 @@ function _extB1BuildFilenameWithMeta(filename, tags, subTags, authors, settings)
   const dotIdx = filename.lastIndexOf(".");
   const stem = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
   const ext  = dotIdx > 0 ? filename.slice(dotIdx) : "";
-  const sanitize = (s) => s
-    .replace(/[\\/:*?"<>|]/g, "")
-    .replace(/[\x00-\x1f]/g, "")
-    .replace(/[\s.]+$/, "")
-    .trim();
+  // GROUP-168：変換規則は src/io/safe-name.js に一本化（background.js と共通）
+  const sanitize = (s) => BTSafeName.toSafeName(s);
   const parts = [];
   if (filenameIncludeTag    && tags?.length)    parts.push(...tags.map(sanitize).filter(Boolean));
   if (filenameIncludeSubtag && subTags?.length) parts.push(...subTags.map(sanitize).filter(Boolean));
@@ -11870,7 +11867,12 @@ async function _extFpMakeTagDir() {
     showStatus("⚠️ メインタグが入力されていません", true);
     return;
   }
-  const name = _extB1MainTags[0];
+  // GROUP-168：タグ名の禁止文字（/ \ 等）がパス区切りとして扱われないよう全角へ置換
+  const name = BTSafeName.toSafeName(_extB1MainTags[0]);
+  if (!name) {
+    showStatus("⚠️ このタグ名ではフォルダを作成できません", true);
+    return;
+  }
   const sep = _extFpCurrent && !_extFpCurrent.endsWith("\\") && !_extFpCurrent.endsWith("/") ? "\\" : "";
   const newPath = _extFpCurrent + sep + name;
   let res;

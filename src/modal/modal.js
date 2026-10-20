@@ -4694,7 +4694,8 @@ function setupModalEvents(
 
   function applyTagFilter() {
     if (!currentEntries || selectedTags.length === 0) return;
-    const keywords = selectedTags.map(t => t.toLowerCase());
+    // GROUP-168：タグ名から作ったフォルダは禁止文字が全角化されているため、変換後の名前でも照合する（原文は従来フォルダ用に残す）
+    const keywords = [...new Set(selectedTags.flatMap(t => [t, BTSafeName.toSafeName(t)]).filter(Boolean).map(k => k.toLowerCase()))];
     const view = document.getElementById("tree-view");
     view.querySelectorAll(".tree-row").forEach(el => {
       const name = (el.dataset.name || "").toLowerCase();
@@ -5011,24 +5012,30 @@ function setupModalEvents(
   async function createFolderByTagNames(tagNames) {
     if (!currentPath) return;
     for (const tagName of tagNames) {
-      const newPath = normalizePath(`${currentPath}\\${tagName}`);
+      // GROUP-168：タグ名の禁止文字（/ \ 等）がパス区切りとして扱われないよう全角へ置換したフォルダ名を使う
+      const folderName = BTSafeName.toSafeName(tagName);
+      if (!folderName) {
+        showToast(shadow, `「${tagName}」ではフォルダを作成できません`);
+        continue;
+      }
+      const newPath = normalizePath(`${currentPath}\\${folderName}`);
       // 既に存在する場合は絞込に切り替え
       const check = await browser.runtime.sendMessage({ type: "LIST_DIR", path: newPath });
       if (check?.ok) {
         // 存在する → 絞込フィルタを適用してそのフォルダを強調
         tagFilterActive = true;
         btnTagFilter.classList.add("active");
-        btnTagFilter.title = `絞込中: ${tagName}（再クリックで解除）`;
+        btnTagFilter.title = `絞込中: ${folderName}（再クリックで解除）`;
         const view = document.getElementById("tree-view");
         view.querySelectorAll(".tree-row").forEach(el => {
           const name = (el.dataset.name || "").toLowerCase();
-          el.style.display = name.includes(tagName.toLowerCase()) ? "" : "none";
+          el.style.display = name.includes(folderName.toLowerCase()) ? "" : "none";
         });
-        showToast(shadow, `「${tagName}」は既に存在します。絞込表示に切り替えました`);
+        showToast(shadow, `「${folderName}」は既に存在します。絞込表示に切り替えました`);
       } else {
         // 存在しない → 作成
         await browser.runtime.sendMessage({ type: "MKDIR", path: newPath, contextPath: currentPath });
-        showToast(shadow, `✅ フォルダ「${tagName}」を作成しました`);
+        showToast(shadow, `✅ フォルダ「${folderName}」を作成しました`);
       }
     }
     await navigateTo(currentPath, [...breadcrumbStack]);

@@ -1005,15 +1005,8 @@ function buildFilenameWithMeta(filename, tags, subTags, authors, settings) {
   const stem = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
   const ext  = dotIdx > 0 ? filename.slice(dotIdx) : "";
 
-  // ファイル名に使えない文字を除去するヘルパー
-  // - Windows禁止文字（\ / : * ? " < > |）
-  // - 制御文字（\x00-\x1f）
-  // - 末尾の空白・ドット（Windowsで無効）
-  const sanitize = (s) => s
-    .replace(/[\\/:*?"<>|]/g, "")
-    .replace(/[\x00-\x1f]/g, "")
-    .replace(/[\s.]+$/, "")
-    .trim();
+  // ファイル名に使えない文字の変換は src/io/safe-name.js に一本化（GROUP-168：禁止文字は削除せず全角へ置換）
+  const sanitize = (s) => BTSafeName.toSafeName(s);
 
   const parts = [];
   if (filenameIncludeTag    && tags?.length)    parts.push(...tags.map(sanitize).filter(Boolean));

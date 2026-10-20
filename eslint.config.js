@@ -129,6 +129,7 @@ const browserGlobals = {
   gifshot:           "readonly",
   // 共有部品（GROUP-142 派生・共有部品化。src/io / src/players で読込済の global 名）
   BTFiles:           "readonly",
+  BTSafeName:        "readonly",
   BTGifAudio:        "readonly",
   // プロジェクト固有 helpers（settings.js setupHistoryTab 内 local 関数を window 経由で expose、
   // modal.js でも top-level に同名関数を定義）。"writable" にすることで複数ファイルでの

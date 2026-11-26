@@ -131,12 +131,52 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (info.menuItemId !== "save-image-with-tags") return;
+  // GROUP-171：保存履歴のページアドレスに、押した画像の投稿のアドレスを入れる。
+  // 最上位のページで押したときは content.js が右クリックの時点の記録から求める。
+  // 枠（デックの列など）の中で押したときは content.js がその枠に居ないため、
+  // post_url.js をその枠にだけ入れて求める。入れられない・失敗したときは今までどおり info.pageUrl
+  const frameId = Number.isInteger(info.frameId) ? info.frameId : 0;
+  let pageUrl = info.pageUrl;
+  if (frameId !== 0) {
+    pageUrl = (await _findPostUrlInFrame(tab.id, frameId, info.srcUrl)) || info.pageUrl;
+  }
   browser.tabs.sendMessage(tab.id, {
     type: "OPEN_SAVE_MODAL",
     imageUrl: info.srcUrl,
-    pageUrl:  info.pageUrl,
-  });
+    pageUrl,
+    // 枠の中で押したときは、ここで求め終えた値をそのまま使わせる（最上位のページの記録とは無関係のため）
+    inFrame: frameId !== 0,
+  }, { frameId: 0 });
 });
+
+// GROUP-171：枠の中で右クリックした画像の投稿のアドレスを、その枠で求める（取れなければ null）。
+// 枠が読み込み中などで注入が返らないとき、保存ウィンドウが開かないままにならないよう、
+// 待つのは _FRAME_POST_WAIT_MS までにして、過ぎたら今までどおりのページアドレスで開く（保存は止めない）
+const _FRAME_POST_WAIT_MS = 1500;
+function _findPostUrlInFrame(tabId, frameId, srcUrl) {
+  const state = { gaveUp: false }; // 待ち切れた後は、残りの注入をしない
+  return Promise.race([
+    _findPostUrlInFrameInner(tabId, frameId, srcUrl, state),
+    new Promise(resolve => setTimeout(() => { state.gaveUp = true; resolve(null); }, _FRAME_POST_WAIT_MS)),
+  ]);
+}
+async function _findPostUrlInFrameInner(tabId, frameId, srcUrl, state) {
+  // data: / blob: は投稿の画像を探す対象にしない（巨大な data: をスクリプトの文字列に埋め込まないため）。
+  // その場合も、枠のアドレスが投稿を指していれば post_url.js がそれを返す
+  if (!/^https?:/i.test(String(srcUrl || ""))) srcUrl = "";
+  try {
+    await browser.tabs.executeScript(tabId, { frameId, file: "/src/content/post_url.js" });
+    if (state && state.gaveUp) return null;
+    const [res] = await browser.tabs.executeScript(tabId, {
+      frameId,
+      code: `typeof __btFindPostForSrc === "function" ? __btFindPostForSrc(${JSON.stringify(String(srcUrl || ""))}) : null`,
+    });
+    return typeof res === "string" ? res : null;
+  } catch (err) {
+    console.warn("[BorgesTag] 枠の中で投稿のアドレスを求められなかった（今までどおりページのアドレスを使う）:", err && err.message);
+    return null;
+  }
+}
 
 // ----------------------------------------------------------------
 // モーダルウィンドウ管理

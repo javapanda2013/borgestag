@@ -4,12 +4,60 @@
  * 2. 画像ホバー時にクイック保存ボタン・即保存ボタンを表示
  */
 
+// ================================================================
+// GROUP-171：保存履歴のページアドレスに、押した画像の投稿のアドレスを入れる
+// 求め方は post_url.js（content_scripts で先に読み込む）。取れないときは今までどおり location.href
+// ================================================================
+/* global __btFindPostUrl, __btRememberThumb, __btFindPostForSrc */
+function _btPageUrlFor(el) {
+  try {
+    return (typeof __btFindPostUrl === "function" && __btFindPostUrl(el)) || location.href;
+  } catch (_) {
+    return location.href;
+  }
+}
+
+// 右クリックした画像の結果は、押した時点で文字列にして持つ（メニューを選ぶまでに画面が作り直されて
+// 要素が別の画像を指すことがあるため、要素は持たない）。既定の動作は止めない
+let _btCtxRecord = null;
+document.addEventListener("contextmenu", (e) => {
+  _btCtxRecord = null;
+  try {
+    const t = e.target;
+    if (!t || t.nodeType !== 1 || t.tagName !== "IMG") return;
+    if (typeof __btFindPostUrl !== "function") return;
+    _btCtxRecord = { src: t.src, currentSrc: t.currentSrc, post: __btFindPostUrl(t), at: Date.now() };
+  } catch (_) {}
+}, true);
+
+// Misskey の拡大表示は投稿の外の層に出るため、開くときに押した縮小表示の投稿を記録しておく。既定の動作は止めない
+document.addEventListener("click", (e) => {
+  if (typeof __btRememberThumb === "function") __btRememberThumb(e.target);
+}, true);
+
+// 右クリックメニューからの保存（最上位のページで押したとき）の投稿のアドレス
+function _btPostUrlForContextMenu(srcUrl) {
+  try {
+    const r = _btCtxRecord;
+    if (r && Date.now() - r.at < 60 * 1000 && (r.src === srcUrl || r.currentSrc === srcUrl)) return r.post;
+    return typeof __btFindPostForSrc === "function" ? __btFindPostForSrc(srcUrl) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 browser.runtime.onMessage.addListener((message) => {
   if (message.type === "OPEN_SAVE_MODAL") {
+    // inFrame：枠の中で押した。background.js がその枠で求め終えた値（取れなければ今までのページアドレス）が
+    // message.pageUrl に入っている。最上位のページの記録とは無関係なので、ここでは求めない
+    let pageUrl = message.pageUrl || location.href;
+    if (!message.inFrame) {
+      pageUrl = _btPostUrlForContextMenu(message.imageUrl) || pageUrl;
+    }
     browser.runtime.sendMessage({
       type:     "OPEN_MODAL_WINDOW",
       imageUrl: message.imageUrl,
-      pageUrl:  message.pageUrl || location.href,
+      pageUrl,
     });
   }
 });
@@ -131,7 +179,7 @@ function getWrap() {
     const res = await browser.runtime.sendMessage({
       type: "INSTANT_SAVE",
       imageUrl,
-      pageUrl: location.href,
+      pageUrl: _btPageUrlFor(currentImg),
     }).catch(() => null);
     _instantSavePending--;
     // 既存 flash があれば clear、最後の完了の結果で上書き
@@ -160,7 +208,7 @@ function getWrap() {
     browser.runtime.sendMessage({
       type:     "OPEN_MODAL_WINDOW",
       imageUrl: imageUrl,
-      pageUrl:  location.href,
+      pageUrl:  _btPageUrlFor(currentImg),
     });
     hideNow();
   });
@@ -494,7 +542,7 @@ async function executeFullCapture(el, btn) {
     if (/^https?:/i.test(url)) {
       // 直 URL：従来経路（変換ウィンドウが URL を直接ロード、不変）
       browser.runtime.sendMessage({
-        type: "OPEN_VIDEO_CONVERT", videoUrl: url, pageUrl: location.href,
+        type: "OPEN_VIDEO_CONVERT", videoUrl: url, pageUrl: _btPageUrlFor(el),
         videoWidth: el.videoWidth || 0, videoHeight: el.videoHeight || 0,
         duration: Number.isFinite(el.duration) ? el.duration : 0,
       });
@@ -563,7 +611,7 @@ async function fetchBlobAndSend(el, btn) {
   await browser.runtime.sendMessage({
     type: "OPEN_VIDEO_CONVERT_CAPTURED",
     buffer: buf, mime: type,
-    pageUrl: location.href,
+    pageUrl: _btPageUrlFor(el),
     videoWidth: el.videoWidth || 0, videoHeight: el.videoHeight || 0,
     duration: Number.isFinite(el.duration) ? el.duration : 0,
     sourceKind: "blob-file",
@@ -870,7 +918,7 @@ async function captureAndSend(el, btn, fixedSec, syncOpts) {
     type:        "OPEN_VIDEO_CONVERT_CAPTURED",
     buffer:      buf,
     mime:        mime || "video/webm",
-    pageUrl:     location.href,
+    pageUrl:     _btPageUrlFor(el),
     videoWidth:  isVideo ? (el.videoWidth || 0) : (el.width || Math.round(rect.width)),
     videoHeight: isVideo ? (el.videoHeight || 0) : (el.height || Math.round(rect.height)),
     duration:    sync ? Math.max(0.5, maxT - startSec) : (elapsed || secLimit),

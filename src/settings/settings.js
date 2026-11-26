@@ -2374,14 +2374,28 @@ async function saveBookmarks() {
 
 // ----------------------------------------------------------------
 // 動作ログ
+// GROUP-173：「簡易」「詳細」のタブ。簡易は simple: true の行だけ、詳細は全部の行を出す。
+//   設定画面を開いたときは毎回「簡易」から始め、選んだタブは覚えない（設計書類 16 §5）。
 // ----------------------------------------------------------------
+let _logTab = "simple";                              // "simple" | "detail"
+let _logRenderGen = 0;                               // 読み直しが重なったとき、古い結果で描かないための番号
+const LOG_TAB_MAX = { simple: 200, detail: 400 };    // background.js の LOG_MAX（それぞれ 200 件）に合わせる
+
 async function setupLogs() {
+  for (const btn of document.querySelectorAll(".log-tab[data-log-tab]")) {
+    btn.addEventListener("click", () => {
+      if (_logTab === btn.dataset.logTab) return;
+      _logTab = btn.dataset.logTab;
+      renderLogs();
+    });
+  }
+
   await renderLogs();
 
   document.getElementById("btn-log-refresh").addEventListener("click", renderLogs);
 
   document.getElementById("btn-log-clear").addEventListener("click", async () => {
-    if (!confirm("動作ログをすべて削除しますか？")) return;
+    if (!confirm("動作ログ（簡易と詳細の両方）をすべて削除しますか？")) return;
     await browser.runtime.sendMessage({ type: "CLEAR_LOGS" });
     await renderLogs();
     showStatus("ログをクリアしました");
@@ -2389,17 +2403,37 @@ async function setupLogs() {
 }
 
 async function renderLogs() {
-  const list = document.getElementById("log-list");
-  list["innerHTML"] = "";
+  const gen = ++_logRenderGen;
+  const tab = _logTab;
+  for (const btn of document.querySelectorAll(".log-tab[data-log-tab]")) {
+    const on = btn.dataset.logTab === tab;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  }
 
   const { logs } = await browser.runtime.sendMessage({ type: "GET_LOGS" });
+  if (gen !== _logRenderGen) return;   // 待つ間にタブの切り替えや読み直しがあった
 
-  if (!logs || logs.length === 0) {
-    list["innerHTML"] = `<div class="log-empty">ログがありません</div>`;
+  const list = document.getElementById("log-list");
+  list["innerHTML"] = "";
+  const all = Array.isArray(logs) ? logs : [];
+  const shown = tab === "simple" ? all.filter((e) => e && e.simple === true) : all;
+  const title = document.getElementById("log-toolbar-title");
+  if (title) title.textContent = `🗒 ${shown.length} 件を表示（最大 ${LOG_TAB_MAX[tab]} 件）`;
+
+  if (shown.length === 0) {
+    let msg = "ログがありません";
+    if (tab === "simple" && all.length > 0) {
+      // この版より前に書いた行には simple が無い（この版に上げた直後は、簡易のタブが空になる）
+      msg = all.some((e) => e && !("simple" in e))
+        ? "簡易に出す行はまだありません（前の版の行は「詳細」にあります）"
+        : "簡易に出す行はまだありません";
+    }
+    list["innerHTML"] = `<div class="log-empty">${escHtml(msg)}</div>`;
     return;
   }
 
-  for (const entry of logs) {
+  for (const entry of shown) {
     const div = document.createElement("div");
     div.className = "log-entry";
 

@@ -10,23 +10,99 @@
 const NATIVE_APP_ID = "image_saver_host";
 
 // ----------------------------------------------------------------
-// 動作ログ（最大200件・新しい順）
+// 動作ログ（新しい順。簡易にも出す行と詳細だけの行を、それぞれ最大 200 件）
+// GROUP-173：設定画面の動作ログを「簡易」「詳細」のタブに分けた。簡易にも出す行は addLog の
+//   第 4 引数に LOG_SIMPLE を渡し、行に simple: true を付ける。詳細だけの行は simple: false。
+//   この版より前に書いた行には simple が無く、詳細だけの行として扱う（設計書類 16 §4〜§6）。
+// GROUP-173-race：以前は addLog のたびに storage を「読む → 先頭に足す → 書き戻す」していたため、
+//   続けて呼ぶと前の行が消えた。background の中の写し（_logCache）を正とし、storage への
+//   書き込みは短い間をおいてまとめ、1 本の列に並べて写しを丸ごと書く（設計書類 16 §7）。
+//   appLogs を書くのはこのファイルの addLog と clearLogs だけであることが前提。
 // ----------------------------------------------------------------
-const LOG_MAX = 200;
+const LOG_MAX = 200;              // 簡易にも出す行・詳細だけの行の、それぞれの上限
+const LOG_SIMPLE = true;          // addLog の第 4 引数に渡す、簡易のタブにも出す行の印
+const LOG_FLUSH_DELAY_MS = 300;   // 書き込みをまとめる間
 
-async function addLog(level, message, detail = null) {
+let _logCache = [];               // 動作ログの写し（新しい順）
+let _logPending = [];             // 読み込みが終わる前に来た行（新しい順）
+let _logLoaded = false;
+let _logFlushTimer = null;
+let _logWriteChain = Promise.resolve();
+let _logWriteWaiting = false;     // 列で順番を待っている（まだ始まっていない）書き込みがあるか
+
+// background の読み込み時に 1 回だけ storage を読んで写しにする。失敗したら空の写しから始める
+// （前の行は次の書き込みで上書きされるが、動作ログだけのことなので許す）。
+const _logLoadPromise = (async () => {
+  try {
+    const stored = await browser.storage.local.get("appLogs");
+    if (Array.isArray(stored.appLogs)) _logCache = stored.appLogs;
+  } catch (err) {
+    console.error("[ImageSaver] 動作ログの読み込みに失敗（空の写しから始める）", err);
+  }
+  _logLoaded = true;
+  if (_logPending.length > 0) {
+    _logCache = _logPending.concat(_logCache);
+    _logPending = [];
+    _trimLogs();
+    _scheduleLogFlush();
+  }
+})();
+
+// 写しを、簡易にも出す行と詳細だけの行でそれぞれ LOG_MAX 件に切り詰める（新しい方から残す）
+function _trimLogs() {
+  if (_logCache.length <= LOG_MAX) return;
+  let nSimple = 0;
+  let nDetail = 0;
+  _logCache = _logCache.filter((e) => (e && e.simple === true) ? ++nSimple <= LOG_MAX : ++nDetail <= LOG_MAX);
+}
+
+function _scheduleLogFlush() {
+  if (_logFlushTimer !== null) return;
+  _logFlushTimer = setTimeout(() => {
+    _logFlushTimer = null;
+    _queueLogWrite();
+  }, LOG_FLUSH_DELAY_MS);
+}
+
+// 書き込みを 1 本の列に並べ、前の書き込みが終わってから次を始める。書き始める時点の写しを丸ごと
+// 書くので、列で待つ間に足された行も入る（待っている書き込みがあれば、新しく並べない）。
+// 失敗したら写しは残し、コンソールにだけ出す（動作ログに書くと、失敗が次の書き込みを呼び続けるため）。
+function _queueLogWrite() {
+  if (_logWriteWaiting) return _logWriteChain;
+  _logWriteWaiting = true;
+  _logWriteChain = _logWriteChain.then(async () => {
+    _logWriteWaiting = false;     // ここから後に足された行は、次の書き込みで書く
+    try {
+      await browser.storage.local.set({ appLogs: _logCache.slice() });
+    } catch (err) {
+      console.error("[ImageSaver] 動作ログの書き込みに失敗（写しは残し、次の行の書き込みで書き直す）", err);
+    }
+  });
+  return _logWriteChain;
+}
+
+async function addLog(level, message, detail = null, simple = false) {
   // GROUP-26-slice (v1.30.2): SpiderMonkey の dependent string 対策
   // 呼出側で largeString.slice(0, N) されたプレビュー文字列は、親文字列への参照を
   // 内部的に保持（JSDependentString）するため、appLogs / storage に短い文字列として
   // 格納しても親の数十 MB 級文字列が GC されずに残り続ける。
   // JSON.parse(JSON.stringify(...)) で明示的に新規 linear string を生成し、
   // 親文字列への参照を切ることで GC 可能にする。詳細：設計書類 07 §8
+  // GROUP-173-race：行は写し（_logCache）に長く残るため、message と detail の両方を新しい文字列にする
+  // （以前は detail が文字列のとき message を写していなかった）。文字列でない値は文字列にする
+  // （複製できない値が写しに 1 つ混ざると、まとめた書き込みが毎回失敗するため。表示は以前から String() で出している）。
   if (typeof detail === "string" && detail.length > 0) {
     try {
       detail = JSON.parse(JSON.stringify(detail));
     } catch (_) { /* JSON 化失敗は極めて稀、元のまま続行 */ }
-  } else if (typeof message === "string" && message.length > 0) {
-    // message も同様の経路で dependent になり得るため念のため
+  } else if (detail === undefined) {
+    detail = null;
+  } else if (detail !== null && typeof detail !== "string") {
+    try { detail = String(detail); } catch (_) { detail = null; }
+  }
+  if (typeof message !== "string") {
+    try { message = String(message); } catch (_) { message = ""; }
+  } else if (message.length > 0) {
     try {
       message = JSON.parse(JSON.stringify(message));
     } catch (_) {}
@@ -37,25 +113,37 @@ async function addLog(level, message, detail = null) {
     level,   // "INFO" | "WARN" | "ERROR"
     message,
     detail,
+    simple:  simple === LOG_SIMPLE,   // GROUP-173：簡易のタブにも出す行か
   };
-  // コンソールにも出力
+  // コンソールにも出力（今までどおり、すぐに出す）
   const fn = level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log;
   fn(`[ImageSaver][${level}] ${message}`, detail ?? "");
 
-  const stored = await browser.storage.local.get("appLogs");
-  const logs = stored.appLogs || [];
-  logs.unshift(entry);
-  if (logs.length > LOG_MAX) logs.length = LOG_MAX;
-  await browser.storage.local.set({ appLogs: logs });
+  if (!_logLoaded) {
+    _logPending.unshift(entry);
+    return;
+  }
+  _logCache.unshift(entry);
+  _trimLogs();
+  _scheduleLogFlush();
 }
 
+// 読み込みが終わるのを待ってから写しを返す（まだ書いていない行も入っている）
 async function getLogs() {
-  const stored = await browser.storage.local.get("appLogs");
-  return { logs: stored.appLogs || [] };
+  await _logLoadPromise;
+  return { logs: _logCache.slice() };
 }
 
+// 読み込みが終わるのを待ってから写しを空にし、まとめ待ちの書き込みを取り消して、空の写しを書く。
+// 書き込みの途中に来たときは、その書き込みが終わった後に空の配列を書くので、打ち消されない。
 async function clearLogs() {
-  await browser.storage.local.set({ appLogs: [] });
+  await _logLoadPromise;
+  _logCache = [];
+  if (_logFlushTimer !== null) {
+    clearTimeout(_logFlushTimer);
+    _logFlushTimer = null;
+  }
+  await _queueLogWrite();
   return { ok: true };
 }
 
@@ -835,11 +923,11 @@ async function handleAsyncMessage(message, sender) {
       const normSrcDir = normalizePath(srcDir).toLowerCase();
       const normDstDir = normalizePath(dstDir).toLowerCase();
       if (normSrcDir === normDstDir) {
-        addLog("INFO", `外部取り込みコピー: 同一フォルダのためスキップ: ${srcPath}`);
+        addLog("INFO", `外部取り込みコピー: 同一フォルダのためスキップ: ${srcPath}`, null, LOG_SIMPLE);
         return { ok: true, skipped: true };
       }
       const dstPath = `${normalizePath(dstDir)}\\${filename}`;
-      addLog("INFO", `外部取り込みコピー: ${srcPath}`, `→ ${dstPath}`);
+      addLog("INFO", `外部取り込みコピー: ${srcPath}`, `→ ${dstPath}`, LOG_SIMPLE);
       return sendNative({ cmd: "COPY_FILE", srcPath, dstPath });
     }
     // v1.24.0: GROUP-5-A 外部取り込み 1 枚ずつ形式で同一フォルダ内メタ付与リネーム
@@ -851,7 +939,7 @@ async function handleAsyncMessage(message, sender) {
       if (!srcPath || !dstPath) {
         return { ok: false, error: "RENAME_FILE: srcPath/dstPath は必須" };
       }
-      addLog("INFO", `外部取り込みリネーム: ${srcPath}`, `→ ${dstPath}`);
+      addLog("INFO", `外部取り込みリネーム: ${srcPath}`, `→ ${dstPath}`, LOG_SIMPLE);
       return sendNative({ cmd: "RENAME_FILE", srcPath, dstPath });
     }
     // v1.30.0 GROUP-26-split: エクスポート分割出力用の一時ディレクトリ作成
@@ -970,12 +1058,12 @@ function sendNative(payload) {
   return new Promise((resolve, reject) => {
     // ① 入力検証: 型・必須フィールド・JSONシリアライズ可否・サイズ上限
     if (!payload || typeof payload !== "object") {
-      addLog("ERROR", "sendNative: payload が object ではありません");
+      addLog("ERROR", "sendNative: payload が object ではありません", null, LOG_SIMPLE);
       reject(new Error("payload が不正です（object ではない）"));
       return;
     }
     if (typeof payload.cmd !== "string" || !payload.cmd) {
-      addLog("ERROR", "sendNative: cmd が文字列ではありません");
+      addLog("ERROR", "sendNative: cmd が文字列ではありません", null, LOG_SIMPLE);
       reject(new Error("payload.cmd が不正です"));
       return;
     }
@@ -1008,7 +1096,7 @@ function sendNative(payload) {
       if (typeof payload.dataUrl === "string") estimatedSize += payload.dataUrl.length;
       if (estimatedSize > NATIVE_PAYLOAD_MAX_BYTES) {
         const kb = (estimatedSize / 1024).toFixed(0);
-        addLog("ERROR", `sendNative: payload 過大 ${cmdName}`, `${kb} KB（推定）`);
+        addLog("ERROR", `sendNative: payload 過大 ${cmdName}`, `${kb} KB（推定）`, LOG_SIMPLE);
         reject(new Error(`payload が大きすぎます（推定）: ${kb} KB（上限 ${NATIVE_PAYLOAD_MAX_BYTES / 1024 / 1024} MB）`));
         return;
       }
@@ -1018,7 +1106,7 @@ function sendNative(payload) {
     try {
       port = browser.runtime.connectNative(NATIVE_APP_ID);
     } catch (e) {
-      addLog("ERROR", `connectNative 失敗`, e.message);
+      addLog("ERROR", `connectNative 失敗`, e.message, LOG_SIMPLE);
       reject(new Error(`ネイティブアプリへの接続に失敗しました: ${e.message}`));
       return;
     }
@@ -1066,7 +1154,7 @@ function sendNative(payload) {
 
     const timer = setTimeout(() => {
       port.disconnect();
-      addLog("ERROR", `Native タイムアウト: ${cmdName}`, `${timeoutMs / 1000}s`);
+      addLog("ERROR", `Native タイムアウト: ${cmdName}`, `${timeoutMs / 1000}s`, LOG_SIMPLE);
       reject(new Error("ネイティブアプリからの応答がタイムアウトしました"));
     }, timeoutMs);
 
@@ -1091,7 +1179,7 @@ function sendNative(payload) {
     port.onDisconnect.addListener(() => {
       clearTimeout(timer);
       const err = browser.runtime.lastError?.message || "ネイティブアプリが切断されました";
-      addLog("ERROR", `Native切断: ${cmdName}`, err);
+      addLog("ERROR", `Native切断: ${cmdName}`, err, LOG_SIMPLE);
       reject(new Error(err));
     });
 
@@ -1324,7 +1412,7 @@ async function handleSave(payload) {
   // なるため、他の音声失敗経路と違って WARN すら残らない）。ここで必ず記録する。
   if (associatedAudio && associatedAudio.useStashAudio && !audioBlob) {
     addLog("WARN", "関連音声を保存できません（変換データの一時保持が既に解放されています）",
-      `filename=${filename}`);
+      `filename=${filename}`, LOG_SIMPLE);
   }
 
   // v1.31.4 GROUP-28 mvdl：関連音声ファイル名（GIF と同じ basename + .webm 等）
@@ -1360,9 +1448,9 @@ async function handleSave(payload) {
     const actualSavedPath = res.savedPath || fullPath;
     const actualSavedFilename = actualSavedPath.replace(/^.*[\\/]/, "");
     if (actualSavedFilename !== effectiveFilename) {
-      addLog("INFO", `Native が自動リネーム: ${effectiveFilename} → ${actualSavedFilename}`);
+      addLog("INFO", `Native が自動リネーム: ${effectiveFilename} → ${actualSavedFilename}`, null, LOG_SIMPLE);
     }
-    addLog("INFO", `保存成功: ${actualSavedPath}`);
+    addLog("INFO", `保存成功: ${actualSavedPath}`, null, LOG_SIMPLE);
     // v1.41.7:lastSaveDir set は addSaveHistory の最終集約 set にマージ（個別 set 廃止）
 
     // v1.31.4 GROUP-28 mvdl：関連音声ファイルを同フォルダに書き出す
@@ -1389,19 +1477,19 @@ async function handleSave(payload) {
           // 音声側も Native で独自に unique_path が走る場合がある
           const audioActualPath = audioRes.savedPath || audioFullPath;
           actualAudioFilename = audioActualPath.replace(/^.*[\\/]/, "");
-          addLog("INFO", `関連音声保存成功: ${audioActualPath}`);
+          addLog("INFO", `関連音声保存成功: ${audioActualPath}`, null, LOG_SIMPLE);
         } else {
-          addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "");
+          addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "", LOG_SIMPLE);
         }
       } catch (audioErr) {
-        addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message);
+        addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message, LOG_SIMPLE);
       }
     }
 
     // サムネイル優先度（mutex 外で OK：mutex 内 R-M-W に渡す引数の用意のみ）:
     // ① content側（DOM img / fetch）→ ② Python側（ダウンロード済みデータを再利用）→ ③ background XHR
     if (res.thumbError) {
-      addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
+      addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError, LOG_SIMPLE);
     }
     // v1.22.10: Python が thumbData（非 GIF）と thumbChunkPath（大容量 GIF）を出し分けるため
     // 共通ヘルパーで統合する。content 由来の thumbBlob / thumbDataUrl は最優先を維持。
@@ -1451,7 +1539,7 @@ async function handleSave(payload) {
       return { success: true };
     });
   } catch (err) {
-    addLog("ERROR", `保存失敗: ${fullPath}`, err.message);
+    addLog("ERROR", `保存失敗: ${fullPath}`, err.message, LOG_SIMPLE);
     return { success: false, error: err.message };
   }
 }
@@ -1491,7 +1579,7 @@ async function notifySaveResult(jobId, result, payload) {
       message: ok ? filename : `${filename}\n${result?.error || "不明なエラー"}`,
     });
   } catch (err) {
-    addLog("WARN", "OS 通知の作成に失敗", err?.message || String(err));
+    addLog("WARN", "OS 通知の作成に失敗", err?.message || String(err), LOG_SIMPLE);
   }
   // modal への結果通知。modal が既に閉じている場合は sendMessage が reject するが無視
   try {
@@ -1517,7 +1605,7 @@ browser.notifications.onClicked.addListener(async (notificationId) => {
     }
     await browser.notifications.clear(notificationId);
   } catch (err) {
-    addLog("WARN", "通知クリック時の復元失敗", err?.message || String(err));
+    addLog("WARN", "通知クリック時の復元失敗", err?.message || String(err), LOG_SIMPLE);
   }
 });
 
@@ -1615,14 +1703,14 @@ async function makeDir(path, contextPath) {
       return { ok: false, error: "パスが指定されていません" };
     }
     if (path.includes("..")) {
-      addLog("WARN", `makeDir: 相対パス成分を含むパスを拒否: ${path}`);
+      addLog("WARN", `makeDir: 相対パス成分を含むパスを拒否: ${path}`, null, LOG_SIMPLE);
       return { ok: false, error: "許可されていないパスです（相対成分を含む）" };
     }
 
     // ② ホワイトリスト検証
     const allowedRoots = await getAllowedRoots(contextPath);
     if (!isPathUnderAllowedRoot(path, allowedRoots)) {
-      addLog("WARN", `makeDir: 許可ルート外のパスを拒否: ${path}`);
+      addLog("WARN", `makeDir: 許可ルート外のパスを拒否: ${path}`, null, LOG_SIMPLE);
       return { ok: false, error: "許可されていないパスです（許可ルート外）" };
     }
 
@@ -1779,7 +1867,7 @@ async function handleInstantSave(imageUrl, pageUrl) {
 
     // Python側が返すサムネイルデータを使用（通常保存と同じ処理、mutex 外で OK）
     if (res.thumbError) {
-      addLog("WARN", "即保存: サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
+      addLog("WARN", "即保存: サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError, LOG_SIMPLE);
     }
     // v1.22.10: thumbData / thumbChunkPath を共通ヘルパーで統合（即保存は content 由来サムネなし）
     const pyThumb = await resolveThumbDataUrlFromNativeRes(res);
@@ -1813,11 +1901,11 @@ async function handleInstantSave(imageUrl, pageUrl) {
         _extraStorage: _extra,
       });
 
-      addLog("INFO", `即保存: ${fullPath}`);
+      addLog("INFO", `即保存: ${fullPath}`, null, LOG_SIMPLE);
       return { success: true };
     });
   } catch (err) {
-    addLog("ERROR", `即保存失敗: ${err.message}`);
+    addLog("ERROR", `即保存失敗: ${err.message}`, null, LOG_SIMPLE);
     return { success: false, error: err.message };
   }
 }
@@ -1862,7 +1950,7 @@ async function handleInstantSaveConversion() {
     if (result && result.success) _clearPendingConversionStash(); // 成功時のみ消費（失敗時は再試行用に保持）
     return result;
   } catch (err) {
-    addLog("ERROR", `変換結果の即保存失敗: ${err.message}`);
+    addLog("ERROR", `変換結果の即保存失敗: ${err.message}`, null, LOG_SIMPLE);
     return { success: false, error: err.message };
   }
 }
@@ -1874,7 +1962,7 @@ async function openSettingsToVideoTab() {
     await browser.storage.local.set({ _settingsInitialTab: "video" });
     await browser.runtime.openOptionsPage();
   } catch (err) {
-    addLog("WARN", `動画設定タブ起動失敗: ${err.message}`);
+    addLog("WARN", `動画設定タブ起動失敗: ${err.message}`, null, LOG_SIMPLE);
   }
 }
 
@@ -2093,11 +2181,11 @@ async function openExplorer(path) {
     if (res.ok) {
       addLog("INFO", `エクスプローラー起動成功: ${path}`);
     } else {
-      addLog("ERROR", `エクスプローラー起動失敗: ${path}`, res.error);
+      addLog("ERROR", `エクスプローラー起動失敗: ${path}`, res.error, LOG_SIMPLE);
     }
     return res;
   } catch (err) {
-    addLog("ERROR", `openExplorer 例外: ${path}`, err.message);
+    addLog("ERROR", `openExplorer 例外: ${path}`, err.message, LOG_SIMPLE);
     return { ok: false, error: err.message };
   }
 }
@@ -2109,11 +2197,11 @@ async function openFile(path) {
     if (res.ok) {
       addLog("INFO", `ファイル起動成功: ${path}`);
     } else {
-      addLog("ERROR", `ファイル起動失敗: ${path}`, res.error);
+      addLog("ERROR", `ファイル起動失敗: ${path}`, res.error, LOG_SIMPLE);
     }
     return res;
   } catch (err) {
-    addLog("ERROR", `openFile 例外: ${path}`, err.message);
+    addLog("ERROR", `openFile 例外: ${path}`, err.message, LOG_SIMPLE);
     return { ok: false, error: err.message };
   }
 }
@@ -3165,7 +3253,7 @@ async function generateMissingThumbs(targetIds = null, overwrite = false) {
     });
   }
 
-  addLog("INFO", `サムネイル生成完了: ${generated}件成功 / ${failed}件失敗 / ${skipped}件スキップ`);
+  addLog("INFO", `サムネイル生成完了: ${generated}件成功 / ${failed}件失敗 / ${skipped}件スキップ`, null, LOG_SIMPLE);
   return { ok: true, generated, skipped, failed };
 }
 
@@ -3189,7 +3277,7 @@ async function handleSaveMulti(payload) {
   // 音声だけが無言で消える（他の音声失敗経路は必ず WARN を出すのでここだけ無音になる）。
   if (associatedAudio && associatedAudio.useStashAudio && !audioBlobMulti) {
     addLog("WARN", "関連音声を保存できません（変換データの一時保持が既に解放されています）",
-      `filename=${filename}`);
+      `filename=${filename}`, LOG_SIMPLE);
   }
   const allTags = [...new Set([...(tags || []), ...(subTags || [])])];
   if (!Array.isArray(savePaths) || savePaths.length === 0) {
@@ -3244,11 +3332,11 @@ async function handleSaveMulti(payload) {
       const actualSavedPath = res.savedPath || fullPath;
       const actualSavedFilename = actualSavedPath.replace(/^.*[\\/]/, "");
       if (actualSavedFilename !== effectiveFilenameMulti) {
-        addLog("INFO", `Native が自動リネーム: ${effectiveFilenameMulti} → ${actualSavedFilename}`);
+        addLog("INFO", `Native が自動リネーム: ${effectiveFilenameMulti} → ${actualSavedFilename}`, null, LOG_SIMPLE);
       }
       if (!firstActualSavedFilename) firstActualSavedFilename = actualSavedFilename;
 
-      addLog("INFO", `一括保存成功: ${actualSavedPath}`);
+      addLog("INFO", `一括保存成功: ${actualSavedPath}`, null, LOG_SIMPLE);
       // v1.41.7:lastSaveDir / globalTags / tagDestinations の個別 set を廃止し、
       // ループ後の addSaveHistoryMulti の最終集約 set にマージ。
       // v1.22.10: ループ初回ぶんだけ Python サムネを採用する既存方針を維持。
@@ -3260,7 +3348,7 @@ async function handleSaveMulti(payload) {
         }
       }
       if (res.thumbError && !pyThumbData) {
-        addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError);
+        addLog("WARN", "サムネイル生成失敗 (Pillow未インストールの可能性)", res.thumbError, LOG_SIMPLE);
       }
 
       // v1.31.4 GROUP-28 mvdl：関連音声ファイルをこの保存先にも書き出す
@@ -3283,18 +3371,18 @@ async function handleSaveMulti(payload) {
             const audioActualPath = audioRes.savedPath || audioFullPath;
             const audioActualFilename = audioActualPath.replace(/^.*[\\/]/, "");
             if (!firstActualAudioFilename) firstActualAudioFilename = audioActualFilename;
-            addLog("INFO", `関連音声保存成功: ${audioActualPath}`);
+            addLog("INFO", `関連音声保存成功: ${audioActualPath}`, null, LOG_SIMPLE);
           } else {
-            addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "");
+            addLog("WARN", `関連音声保存失敗: ${audioFullPath}`, audioRes.error || "", LOG_SIMPLE);
           }
         } catch (audioErr) {
-          addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message);
+          addLog("WARN", `関連音声保存例外: ${audioFullPath}`, audioErr.message, LOG_SIMPLE);
         }
       }
 
       results.push({ savePath, ok: true });
     } catch (err) {
-      addLog("ERROR", `一括保存失敗: ${fullPath}`, err.message);
+      addLog("ERROR", `一括保存失敗: ${fullPath}`, err.message, LOG_SIMPLE);
       results.push({ savePath, ok: false, error: err.message });
     }
   }
@@ -3508,7 +3596,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
       thumbId = await saveThumbToIDB(thumbBlob);
       addLog("INFO", `サムネイル IDB 保存 (Blob 直送): ${thumbWidth}×${thumbHeight}`);
     } catch (err) {
-      addLog("WARN", "サムネイル IDB 保存失敗 (Blob 直送)", err.message);
+      addLog("WARN", "サムネイル IDB 保存失敗 (Blob 直送)", err.message, LOG_SIMPLE);
     }
   } else if (thumbDataUrl) {
     try {
@@ -3537,7 +3625,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
       thumbId = await saveThumbToIDB(blob);
       addLog("INFO", `サムネイル IDB 保存: ${thumbWidth}×${thumbHeight}`);
     } catch (err) {
-      addLog("WARN", "サムネイル IDB 保存失敗", err.message);
+      addLog("WARN", "サムネイル IDB 保存失敗", err.message, LOG_SIMPLE);
     }
   } else if (typeof imageUrl !== "string" || !/^https?:/i.test(imageUrl)) {
     // GROUP-151 v1.49.0：XHR フォールバックは「ブラウザで表示済みの http(s) 画像を
@@ -3548,7 +3636,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
     // 断とうとしている巨大割当を、サムネ生成失敗時に限って再現することになる。
     // ここに来るのは Native の GIF サムネ生成が失敗した時だけで、サムネは後から
     // 再生成できるため、本体保存を優先してサムネなしで続行する。
-    addLog("WARN", "サムネイル生成を見送り（変換 GIF：Native サムネ生成に失敗）", `filename: ${filename}`);
+    addLog("WARN", "サムネイル生成を見送り（変換 GIF：Native サムネ生成に失敗）", `filename: ${filename}`, LOG_SIMPLE);
   } else {
     // フォールバック: Background XHR（Referer + クッキー付き）
     try {
@@ -3579,7 +3667,7 @@ async function addSaveHistoryMulti({ imageUrl, filename, savePaths, tags, author
       thumbId = await saveThumbToIDB(jpegBlob);
       addLog("INFO", `サムネイル IDB 保存: ${thumbWidth}×${thumbHeight} (bg XHR: ${referer})`);
     } catch (err) {
-      addLog("WARN", "サムネイル取得失敗", err.message);
+      addLog("WARN", "サムネイル取得失敗", err.message, LOG_SIMPLE);
     }
   }
 

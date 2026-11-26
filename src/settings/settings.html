@@ -362,6 +362,14 @@
     .log-msg { color: #ddd; flex: 1; word-break: break-all; }
     .log-detail { color: #777; font-size: 10px; word-break: break-all; }
     .log-empty { padding: 20px; text-align: center; color: #555; font-size: 11px; }
+    /* GROUP-173：動作ログの「簡易」「詳細」のタブ */
+    .log-tabs { display: flex; gap: 4px; }
+    .log-tab {
+      background: #2a2a2a; border: 1px solid #444; border-radius: 4px;
+      color: #999; font-size: 11px; font-weight: 700; padding: 3px 14px; cursor: pointer; font-family: inherit;
+    }
+    .log-tab:not(.active):hover { background: #333; color: #ddd; }
+    .log-tab.active { background: #3b6ea8; border-color: #5287c4; color: #fff; cursor: default; }
     /* ================================================================
        保存履歴タブ
        ================================================================ */
@@ -1161,11 +1169,15 @@
       <div class="section-title">動作ログ</div>
       <div class="log-section">
         <div class="log-toolbar">
-          <span class="log-toolbar-title">🗒 最新 200 件</span>
+          <div class="log-tabs" role="tablist" aria-label="動作ログの表示">
+            <button type="button" class="log-tab active" role="tab" aria-selected="true" aria-controls="log-list" data-log-tab="simple">簡易</button>
+            <button type="button" class="log-tab" role="tab" aria-selected="false" aria-controls="log-list" data-log-tab="detail">詳細</button>
+          </div>
+          <span class="log-toolbar-title" id="log-toolbar-title">🗒 0 件を表示（最大 200 件）</span>
           <button class="log-btn" id="btn-log-refresh">更新</button>
           <button class="log-btn danger delete-guarded" id="btn-log-clear">クリア</button>
         </div>
-        <div class="log-list" id="log-list">
+        <div class="log-list" id="log-list" role="tabpanel">
           <div class="log-empty">ログがありません</div>
         </div>
       </div>

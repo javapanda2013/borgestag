@@ -131,6 +131,8 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (info.menuItemId !== "save-image-with-tags") return;
+  // GROUP-171-timing（v1.51.2）：保存ウィンドウの起動にかかった時間を測る起点（メニューを押した時刻）
+  const clickedAt = Date.now();
   // GROUP-171：保存履歴のページアドレスに、押した画像の投稿のアドレスを入れる。
   // 最上位のページで押したときは content.js が右クリックの時点の記録から求める。
   // 枠（デックの列など）の中で押したときは content.js がその枠に居ないため、
@@ -146,6 +148,7 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     pageUrl,
     // 枠の中で押したときは、ここで求め終えた値をそのまま使わせる（最上位のページの記録とは無関係のため）
     inFrame: frameId !== 0,
+    clickedAt,
   }, { frameId: 0 });
 });
 
@@ -241,7 +244,75 @@ function _clearPendingConversionStash() {
   _pendingConversionStash = null;
 }
 
-async function openModalWindow(imageUrl, pageUrl) {
+// GROUP-171-timing（v1.51.2）：保存ウィンドウの起動にかかった時間を、段階ごとに動作ログへ 1 行出す（保存の動きは変えない）。
+// 押した時刻・依頼が届いた時刻・ウィンドウへ知らせた時刻はここで持ち（storage には書かない）、
+// 保存ウィンドウの起動処理が済んで届く MODAL_TIMING_LOG と突き合わせる。突き合わせられたら消す。
+// 中身は数値数個だけで、届かないまま残っても次に開くときに上書きされる
+let _modalOpenTiming = null;
+
+function _noteModalOpen(start, requestedAt, reused) {
+  const s = start || {};
+  _modalOpenTiming = {
+    via:        typeof s.via === "string" ? s.via : "",
+    clickedAt:  Number.isFinite(s.clickedAt) ? s.clickedAt : null,
+    requestedAt,
+    notifiedAt: Date.now(),
+    reused:     !!reused,
+  };
+}
+
+function _logModalStartup(m) {
+  const num = v => (typeof v === "number" && Number.isFinite(v)) ? v : null;
+  const marks = (m && m.marks && typeof m.marks === "object") ? m.marks : {};
+  const nav = num(m && m.navStart); // 保存ウィンドウのページの読み込みが始まった時刻（エポックミリ秒）
+  const at = k => (nav !== null && num(marks[k]) !== null) ? nav + marks[k] : null;
+  const span = (a, b) => (a !== null && b !== null) ? `${(Math.max(0, b - a) / 1000).toFixed(2)} 秒` : "？";
+  // この読み込みが、直近に記録した依頼に対応するか（知らせてから 60 秒以内に読み込みが始まっていること）。
+  // 対応しない読み込み（ウィンドウ側の読み込み直しなど）では記録を消さない（後から届く本来の分のため）。
+  // 30 秒の時点の途中の分でも消さない（済んだ後に、同じ読み込みの全体の分が届くため）
+  const partial = !!(m && m.partial);
+  const t = _modalOpenTiming;
+  const matched = !!(t && nav !== null && nav >= t.notifiedAt - 50 && nav - t.notifiedAt <= 60000);
+  if (matched && !partial) _modalOpenTiming = null;
+
+  const viaLabel = { menu: "右クリックのメニュー", hover: "ホバーの保存ボタン", conversion: "動画→GIF 変換" };
+  const head = matched
+    ? `${viaLabel[t.via] || "不明な経路"}から、${t.reused ? "開いたままのウィンドウを使い回し" : "新しいウィンドウ"}`
+    : "依頼の記録と対応しない読み込み（ウィンドウ側の読み込み直しなど）";
+  const listEnd = at("list");
+  const prevEnd = at("preview");
+  const ends = [listEnd, prevEnd].filter(v => v !== null);
+  const end = ends.length ? Math.max(...ends) : null;
+  const begin = matched ? (t.clickedAt ?? t.requestedAt) : nav;
+
+  const parts = [];
+  if (matched) {
+    if (t.clickedAt !== null) parts.push(`押してから依頼が届くまで ${span(t.clickedAt, t.requestedAt)}`);
+    parts.push(`ウィンドウへ知らせるまで ${span(t.requestedAt, t.notifiedAt)}`);
+    parts.push(`ページの読み込みの開始まで ${span(t.notifiedAt, nav)}`);
+  }
+  parts.push(`ページの読み込み ${span(nav, at("dcl"))}`);
+  parts.push(`画像の情報の受け取り ${span(at("dcl"), at("pending"))}`);
+  const n = num(m && m.historyCount);
+  parts.push(`データの読み込み ${span(at("pending"), at("data"))}${n !== null ? `（保存履歴 ${n.toLocaleString("ja-JP")} 件）` : ""}`);
+  // 一覧の依頼とプレビューの読み込みは、画面の組み立ての途中で始まり、組み立てと並んで進む
+  parts.push(`画面の組み立て ${span(at("data"), at("built"))}（うち一覧を頼むまで ${span(at("data"), at("listReq"))}）`);
+  parts.push(`フォルダ一覧の応答待ち ${span(at("listReq"), at("listRes"))}`);
+  const listNote = listEnd === null ? "（まだ済んでいない）" : (m && m.listOk === false ? "（表示できない）" : "");
+  parts.push(`フォルダ一覧の表示 ${span(at("listRes"), listEnd)}${listNote}`);
+  const howLabel = { direct: "画像のアドレスから直接", background: "background で取り直し", native: "Native で取り直し" };
+  const prevHow = prevEnd === null ? "まだ表示されていない"
+    : (m && m.previewOk === false) ? "表示できない" : (howLabel[m && m.previewHow] || "不明");
+  parts.push(`プレビュー ${span(at("previewStart"), prevEnd)}（${prevHow}）`);
+
+  const title = partial
+    ? `保存ウィンドウの起動：30 秒たっても済んでいない段階あり（${head}。済んだら改めて 1 行出す）`
+    : `保存ウィンドウの起動：合計 ${span(begin, end)}（${head}）`;
+  addLog("INFO", title, parts.join("／"));
+}
+
+async function openModalWindow(imageUrl, pageUrl, start = null) {
+  const requestedAt = Date.now(); // GROUP-171-timing：依頼が届いた時刻
   // 既存ウィンドウが開いていれば再利用
   if (modalWindowId !== null) {
     try {
@@ -258,6 +329,7 @@ async function openModalWindow(imageUrl, pageUrl) {
         const tabs = await browser.tabs.query({ windowId: modalWindowId });
         if (tabs[0]) {
           await browser.tabs.update(tabs[0].id, { active: true });
+          _noteModalOpen(start, requestedAt, true);
           browser.tabs.sendMessage(tabs[0].id, { type: "MODAL_NEW_IMAGE", imageUrl, pageUrl });
         }
         return;
@@ -275,6 +347,7 @@ async function openModalWindow(imageUrl, pageUrl) {
   // 画像情報を一時保存
   await browser.storage.local.set({ _pendingModal: { imageUrl, pageUrl } });
 
+  _noteModalOpen(start, requestedAt, false);
   const win = await browser.windows.create({
     url:    browser.runtime.getURL("src/modal/modal.html"),
     type:   "normal",  // popup だとホイールイベントがJSに届かないため normal に変更
@@ -319,6 +392,7 @@ browser.windows.onRemoved.addListener(async (windowId) => {
 // 大容量データ（imageUrl / associatedAudio）は _pendingConversionStash で保持。
 // modal.js 起動時に CLAIM_CONVERSION_PAYLOAD で取得される。
 async function openModalFromConversion() {
+  const requestedAt = Date.now(); // GROUP-171-timing：依頼が届いた時刻
   // 既存ウィンドウ再利用（通常経路と同じ分岐）
   if (modalWindowId !== null) {
     try {
@@ -333,6 +407,7 @@ async function openModalFromConversion() {
         if (tabs[0]) {
           modalTabId = tabs[0].id; // GROUP-151 v1.49.0：再利用窓でも解放判定用のタブ ID を確定
           await browser.tabs.update(tabs[0].id, { active: true });
+          _noteModalOpen({ via: "conversion" }, requestedAt, true);
           // 既存 modal に再初期化を依頼
           browser.tabs.sendMessage(tabs[0].id, { type: "MODAL_NEW_FROM_CONVERSION" });
         }
@@ -349,6 +424,7 @@ async function openModalFromConversion() {
 
   await browser.storage.local.set({ _pendingModal: { __fromConversion: true } });
 
+  _noteModalOpen({ via: "conversion" }, requestedAt, false);
   const win = await browser.windows.create({
     url:    browser.runtime.getURL("src/modal/modal.html"),
     type:   "normal",
@@ -446,7 +522,8 @@ browser.runtime.onMessage.addListener((message, sender) => {
 async function handleAsyncMessage(message, sender) {
   switch (message.type) {
     case "OPEN_MODAL_WINDOW":
-      openModalWindow(message.imageUrl, message.pageUrl);
+      // GROUP-171-timing：via（menu／hover）と clickedAt（押した時刻）は起動の時間を測るためだけに使う
+      openModalWindow(message.imageUrl, message.pageUrl, { via: message.via, clickedAt: message.clickedAt });
       return;
     case "OPEN_VIDEO_CONVERT_CAPTURED": {
       // GROUP-15 範囲拡大 (v1.46.46)：ページ内録画（blob:/MSE 動画・Canvas）の webm を
@@ -834,6 +911,9 @@ async function handleAsyncMessage(message, sender) {
       return { ok: true };
     case "POST_URL_LOG": // GROUP-171：保存の投稿のアドレスをどこから取ったか
       _logPostUrl(message.how, message.post, message.page);
+      return { ok: true };
+    case "MODAL_TIMING_LOG": // GROUP-171-timing：保存ウィンドウの起動の段階ごとの時間
+      _logModalStartup(message);
       return { ok: true };
     // ---- 動作ログ ----
     case "GET_LOGS":

@@ -264,8 +264,49 @@ async function _readSaveHistory() {
   return stored.saveHistory || [];
 }
 
+// ----------------------------------------------------------------
+// GROUP-171-timing（v1.51.2）：保存ウィンドウの起動の段階ごとの時刻を記録し、最初のフォルダ一覧と
+// プレビューの両方が済んだ時点で background へ送って、動作ログに 1 行出す（保存の動きは変えない）。
+// 時刻はこのページの読み込み開始からのミリ秒（performance.now()）で、各段階の最初の 1 回だけ記録する。
+// 30 秒たっても済まない段階があれば、その時点までの記録を 1 回送り、済んだら改めて全体を 1 回送る
+//（起動の処理は止めない。遅い段階の時間も取れるように、途中の分の後でも済んだ分を送る）
+// ----------------------------------------------------------------
+const _btStartup = { marks: {}, previewHow: "direct", previewOk: null, listOk: null, historyCount: null, sentPartial: false, sentFinal: false };
+function _btMark(name) {
+  if (!(name in _btStartup.marks)) _btStartup.marks[name] = Math.round(performance.now());
+}
+function _btSendStartup(partial) {
+  const done = "list" in _btStartup.marks && "preview" in _btStartup.marks;
+  if (partial) {
+    if (done || _btStartup.sentPartial || _btStartup.sentFinal) return;
+    _btStartup.sentPartial = true;
+  } else {
+    if (!done || _btStartup.sentFinal) return;
+    _btStartup.sentFinal = true;
+    clearTimeout(_btStartupTimer);
+  }
+  browser.runtime.sendMessage({
+    type:         "MODAL_TIMING_LOG",
+    navStart:     performance.timeOrigin,
+    marks:        _btStartup.marks,
+    previewHow:   _btStartup.previewHow,
+    previewOk:    _btStartup.previewOk,
+    listOk:       _btStartup.listOk,
+    historyCount: _btStartup.historyCount,
+    partial:      !!partial,
+  }).catch(() => {});
+}
+function _btPreviewDone(ok) {
+  if ("preview" in _btStartup.marks) return;
+  _btMark("preview");
+  _btStartup.previewOk = ok;
+  _btSendStartup(false);
+}
+const _btStartupTimer = setTimeout(() => _btSendStartup(true), 30000);
+
 // ウィンドウが開いたら即座に初期化
 document.addEventListener("DOMContentLoaded", () => {
+  _btMark("dcl"); // GROUP-171-timing
   initModal();
   initZoomMonitor();
 });
@@ -422,6 +463,7 @@ async function initModal() {
   // 音声なし時は null。
   window.__pendingAssociatedAudio = associatedAudio || null;
   // 使用済みフラグをクリア（別ウィンドウ開くときの再初期化用に残す）
+  _btMark("pending"); // GROUP-171-timing：画像の情報を受け取り終えた
 
   // 必要なデータを並列取得
   const [
@@ -461,6 +503,9 @@ async function initModal() {
     browser.storage.local.get(["retainedTags", "retainedSubTags", "retainedAuthors"]),
     browser.storage.local.get(["leftPanelOrder", "leftPanelHeights"]),
   ]);
+  // GROUP-171-timing：起動時のデータを読み込み終えた（保存履歴の件数を添える）
+  _btMark("data");
+  _btStartup.historyCount = Array.isArray(saveHistory) ? saveHistory.length : null;
 
   // v1.31.2 GROUP-15-impl-A-phase1-hotfix-ext：
   // 動画→GIF 変換経由など、呼出側が明示的にファイル名を提案した場合はそれを優先採用。
@@ -484,6 +529,7 @@ async function initModal() {
     retainedTags || [], retainedSubTags || [], retainedAuthors || [],
     leftPanelOrder || ["preview", "recent-tags", "bookmarks"], leftPanelHeights || {}
   );
+  _btMark("built"); // GROUP-171-timing：画面を組み立て終えた
 }
 
 // ----------------------------------------------------------------
@@ -2033,6 +2079,11 @@ function setupModalEvents(
   // shadow/host は別ウィンドウモードでは document/null が渡される
   const previewEl = document.getElementById("preview");
   previewEl.style.display = "";
+  // GROUP-171-timing（v1.51.2）：プレビューが表示されるまでの時間と、どの経路で読んだかを記録する。
+  // 取り直した画像も読めなかったときは「表示できない」として記録する（最初の失敗は取り直しに任せる）
+  previewEl.addEventListener("load", () => _btPreviewDone(true), { once: true });
+  previewEl.addEventListener("error", () => { if (_btStartup.previewHow !== "direct") _btPreviewDone(false); });
+  _btMark("previewStart");
   previewEl.src = imageUrl;
   previewEl.addEventListener("error", async () => {
     // ① background XHR（Referer付き）で取得
@@ -2041,7 +2092,7 @@ function setupModalEvents(
         type: "FETCH_IMAGE_AS_DATAURL",
         url: imageUrl,
       });
-      if (res?.dataUrl) { previewEl.src = res.dataUrl; return; }
+      if (res?.dataUrl) { _btStartup.previewHow = "background"; previewEl.src = res.dataUrl; return; }
     } catch {}
     // ② XHRも失敗した場合（pixiv等）→ Python経由で取得
     try {
@@ -2049,7 +2100,7 @@ function setupModalEvents(
         type: "FETCH_PREVIEW",
         url: imageUrl,
       });
-      if (res?.dataUrl) { previewEl.src = res.dataUrl; return; }
+      if (res?.dataUrl) { _btStartup.previewHow = "native"; previewEl.src = res.dataUrl; return; }
       // v1.22.9: GIF は base64 チャンクで返るため Blob URL に組み立てる
       if (res && Array.isArray(res.chunksB64)) {
         const arrays = [];
@@ -2061,11 +2112,14 @@ function setupModalEvents(
         }
         const blob = new Blob(arrays, { type: res.mime || "image/gif" });
         const blobUrl = URL.createObjectURL(blob);
+        _btStartup.previewHow = "native";
         previewEl.src = blobUrl;
         // モーダルが閉じられる時点で revoke する手段が無いため、次の src 変更時に
         // 自動 GC に委ねる（モーダル自体が閉じた際にページごと破棄される）
+        return;
       }
     } catch {}
+    _btPreviewDone(false); // GROUP-171-timing：どの経路でも取れなかった
   }, { once: true });
 
   // ウィンドウのリサイズを監視して外枠サイズ（outerWidth/Height）を保存
@@ -4785,10 +4839,11 @@ function setupModalEvents(
     renderLoading();
 
     const res = await browser.runtime.sendMessage({ type: "LIST_DIR", path: normalizedPath });
+    _btMark("listRes"); // GROUP-171-timing：最初の一覧の応答が届いた（記録は最初の 1 回だけ）
 
     if (!res || !res.ok) {
       renderError(res ? res.error : "ネイティブアプリに接続できません");
-      return;
+      return false; // GROUP-171-timing：一覧を表示できなかった（戻り値は起動の時間の記録だけが使う）
     }
 
     currentEntries = res.entries;
@@ -4803,6 +4858,7 @@ function setupModalEvents(
     updateNewFolderTagBtn();
     // a1: フォルダ遷移後にバナーを更新
     updateCurrentPathBanner();
+    return true;
   }
 
   function renderLoading() {
@@ -4932,16 +4988,26 @@ function setupModalEvents(
     return lastSaveDir || explorerRootPath || null;
   })();
 
+  _btMark("listReq"); // GROUP-171-timing：最初のフォルダ一覧を頼む
+  let _btFirstList;
   if (startPath) {
     const parts = normalizePath(startPath).split("\\").filter(Boolean);
     const stack = parts.reduce((acc, seg, i) => {
       acc.push({ label: seg, path: parts.slice(0, i + 1).join("\\") });
       return acc;
     }, []);
-    navigateTo(startPath, stack);
+    _btFirstList = navigateTo(startPath, stack);
   } else {
-    navigateTo(null, []);
+    _btFirstList = navigateTo(null, []);
   }
+  // GROUP-171-timing：最初のフォルダ一覧を表示し終えた時刻を記録する（表示できなかったときも記録する）
+  _btFirstList.then(
+    (shown) => { _btStartup.listOk = shown !== false; _btMark("list"); _btSendStartup(false); },
+    (err) => {
+      console.error("[modal] 最初のフォルダ一覧の処理でエラー:", err); // 受け側を付けても、これまでどおりコンソールに出す
+      _btStartup.listOk = false; _btMark("list"); _btSendStartup(false);
+    }
+  );
 
   // ================================================================
   // ② 直近タグ描画（左カラム下部）

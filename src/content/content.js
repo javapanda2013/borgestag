@@ -85,6 +85,9 @@ browser.runtime.onMessage.addListener((message) => {
       type:     "OPEN_MODAL_WINDOW",
       imageUrl: message.imageUrl,
       pageUrl,
+      // GROUP-171-timing（v1.51.2）：保存ウィンドウの起動にかかった時間を測るためだけに使う
+      via:       "menu",
+      clickedAt: message.clickedAt,
     });
   }
 });
@@ -229,6 +232,7 @@ function getWrap() {
   saveBtn.addEventListener("mouseleave", () => { startWatch(); scheduleHide(); });
   saveBtn.addEventListener("click", (e) => {
     e.preventDefault(); e.stopPropagation();
+    const clickedAt = Date.now(); // GROUP-171-timing（v1.51.2）：起動の時間を測る起点（押した時刻）
     if (!currentImg) return;
     const imageUrl = currentImg.src || currentImg.currentSrc;
     if (!imageUrl) return;
@@ -236,6 +240,8 @@ function getWrap() {
       type:     "OPEN_MODAL_WINDOW",
       imageUrl: imageUrl,
       pageUrl:  _btPageUrlFor(currentImg),
+      via:      "hover",
+      clickedAt,
     });
     hideNow();
   });

@@ -8,13 +8,26 @@
 // GROUP-171：保存履歴のページアドレスに、押した画像の投稿のアドレスを入れる
 // 求め方は post_url.js（content_scripts で先に読み込む）。取れないときは今までどおり location.href
 // ================================================================
-/* global __btFindPostUrl, __btRememberThumb, __btFindPostForSrc */
-function _btPageUrlFor(el) {
+/* global __btFindPostUrl, __btRememberThumb, __btFindPostForSrc, __btNoteFrame, __btLastHow */
+
+// 投稿のアドレスをどこから取ったか（取れなかったか）を、設定画面のログに 1 行出す（実機で取れなかったときの切り分け用）
+function _btLogPost(how, post) {
   try {
-    return (typeof __btFindPostUrl === "function" && __btFindPostUrl(el)) || location.href;
+    browser.runtime.sendMessage({
+      type: "POST_URL_LOG", how: how || "不明", post: post || "", page: location.href,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+function _btPageUrlFor(el) {
+  let post = null;
+  try {
+    post = typeof __btFindPostUrl === "function" ? __btFindPostUrl(el) : null;
   } catch (_) {
-    return location.href;
+    post = null;
   }
+  _btLogPost(typeof __btLastHow === "string" ? __btLastHow : "", post);
+  return post || location.href;
 }
 
 // 右クリックした画像の結果は、押した時点で文字列にして持つ（メニューを選ぶまでに画面が作り直されて
@@ -26,8 +39,16 @@ document.addEventListener("contextmenu", (e) => {
     const t = e.target;
     if (!t || t.nodeType !== 1 || t.tagName !== "IMG") return;
     if (typeof __btFindPostUrl !== "function") return;
-    _btCtxRecord = { src: t.src, currentSrc: t.currentSrc, post: __btFindPostUrl(t), at: Date.now() };
+    const post = __btFindPostUrl(t);
+    _btCtxRecord = { src: t.src, currentSrc: t.currentSrc, post, how: __btLastHow, at: Date.now() };
   } catch (_) {}
+}, true);
+
+// X のデック独自の拡大表示は最上位のページに出て、投稿は列の枠の中にあるため、
+// ポインタが乗った枠を記録しておき、拡大表示の画像の投稿を探すときに先に探す。既定の動作は止めない
+document.addEventListener("mouseover", (e) => {
+  const t = e.target;
+  if (t && t.tagName === "IFRAME" && typeof __btNoteFrame === "function") __btNoteFrame(t);
 }, true);
 
 // Misskey の拡大表示は投稿の外の層に出るため、開くときに押した縮小表示の投稿を記録しておく。既定の動作は止めない
@@ -39,9 +60,15 @@ document.addEventListener("click", (e) => {
 function _btPostUrlForContextMenu(srcUrl) {
   try {
     const r = _btCtxRecord;
-    if (r && Date.now() - r.at < 60 * 1000 && (r.src === srcUrl || r.currentSrc === srcUrl)) return r.post;
-    return typeof __btFindPostForSrc === "function" ? __btFindPostForSrc(srcUrl) : null;
+    if (r && Date.now() - r.at < 60 * 1000 && (r.src === srcUrl || r.currentSrc === srcUrl)) {
+      _btLogPost(r.how, r.post);
+      return r.post;
+    }
+    const post = typeof __btFindPostForSrc === "function" ? __btFindPostForSrc(srcUrl) : null;
+    _btLogPost(typeof __btLastHow === "string" ? __btLastHow : "", post);
+    return post;
   } catch (_) {
+    _btLogPost("求める途中で失敗（開いているページのアドレスを使う）", null);
     return null;
   }
 }

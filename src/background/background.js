@@ -157,8 +157,28 @@ function _findPostUrlInFrame(tabId, frameId, srcUrl) {
   const state = { gaveUp: false }; // 待ち切れた後は、残りの注入をしない
   return Promise.race([
     _findPostUrlInFrameInner(tabId, frameId, srcUrl, state),
-    new Promise(resolve => setTimeout(() => { state.gaveUp = true; resolve(null); }, _FRAME_POST_WAIT_MS)),
+    new Promise(resolve => setTimeout(() => {
+      state.gaveUp = true;
+      _logPostUrl("枠の中で求める処理が時間内に返らない（開いているページのアドレスを使う）", null, "");
+      resolve(null);
+    }, _FRAME_POST_WAIT_MS)),
   ]);
+}
+// 投稿のアドレスをどこから取ったか（取れなかったか）を動作ログに 1 行出す（content.js からの POST_URL_LOG と共用）。
+// ページのアドレスは、切り分けに要らないクエリとハッシュを除いて記録する（検索語などをログに残さない）
+function _logPostUrl(how, post, page) {
+  addLog("INFO", `投稿のアドレス：${String(how || "不明").slice(0, 100)}`,
+    `投稿：${String(post || "（なし）").slice(0, 300)}／ページ：${_urlForLog(page)}`);
+}
+function _urlForLog(u) {
+  if (!u) return "（不明）";
+  try {
+    const x = new URL(String(u));
+    if (x.protocol === "http:" || x.protocol === "https:") return x.origin + x.pathname;
+    return x.protocol; // data: / blob: などは種類だけ
+  } catch (_) {
+    return "（不明）";
+  }
 }
 async function _findPostUrlInFrameInner(tabId, frameId, srcUrl, state) {
   // data: / blob: は投稿の画像を探す対象にしない（巨大な data: をスクリプトの文字列に埋め込まないため）。
@@ -169,11 +189,22 @@ async function _findPostUrlInFrameInner(tabId, frameId, srcUrl, state) {
     if (state && state.gaveUp) return null;
     const [res] = await browser.tabs.executeScript(tabId, {
       frameId,
-      code: `typeof __btFindPostForSrc === "function" ? __btFindPostForSrc(${JSON.stringify(String(srcUrl || ""))}) : null`,
+      code: `(function () {
+        if (typeof __btFindPostForSrc !== "function") return null;
+        var u = __btFindPostForSrc(${JSON.stringify(String(srcUrl || ""))});
+        return { u: typeof u === "string" ? u : null, how: String(__btLastHow || ""), page: location.href };
+      })()`,
     });
-    return typeof res === "string" ? res : null;
+    if (state && state.gaveUp) return null;
+    if (!res || typeof res !== "object") {
+      _logPostUrl("枠の中で求める処理を読み込めない（開いているページのアドレスを使う）", null, "");
+      return null;
+    }
+    _logPostUrl(`枠の中で：${res.how}`, res.u, res.page);
+    return typeof res.u === "string" ? res.u : null;
   } catch (err) {
     console.warn("[BorgesTag] 枠の中で投稿のアドレスを求められなかった（今までどおりページのアドレスを使う）:", err && err.message);
+    if (!(state && state.gaveUp)) _logPostUrl("枠の中に入れられない（開いているページのアドレスを使う）", null, "");
     return null;
   }
 }
@@ -800,6 +831,9 @@ async function handleAsyncMessage(message, sender) {
       return fetchFileAsDataUrl(message.path);
     case "DEBUG_LOG":
       addLog("DEBUG", message.msg || "");
+      return { ok: true };
+    case "POST_URL_LOG": // GROUP-171：保存の投稿のアドレスをどこから取ったか
+      _logPostUrl(message.how, message.post, message.page);
       return { ok: true };
     // ---- 動作ログ ----
     case "GET_LOGS":
